@@ -19,6 +19,8 @@ from paicli.tools.base import Tool, ToolContext, ToolResult, object_schema
 class McpClientManager:
     def __init__(self, project_root: str | Path):
         self.project_root = str(Path(project_root).resolve())
+        self.project_config_path = Path(self.project_root) / ".paicli" / "mcp.json"
+        self.log_dir = Path(self.project_root) / ".paicli" / "mcp-logs"
         self.specs = load_mcp_server_specs(self.project_root)
         self.last_errors: dict[str, str] = {}
 
@@ -29,12 +31,65 @@ class McpClientManager:
             if not spec.enabled:
                 continue
             try:
-                tools.extend(await self._tools_for_server(spec))
-                tools.extend(self._virtual_resource_tools(spec))
-                tools.extend(self._virtual_prompt_tools(spec))
+                tools.extend(await self.load_server_tools(spec.name))
             except Exception as exc:  # noqa: BLE001 - keep broken MCP servers isolated
                 self.last_errors[spec.name] = str(exc)
         return tools
+
+    async def load_server_tools(self, name: str) -> list[Tool]:
+        spec = self.specs.get(name)
+        if not spec or not spec.enabled:
+            return []
+        tools = await self._tools_for_server(spec)
+        tools.extend(self._virtual_resource_tools(spec))
+        tools.extend(self._virtual_prompt_tools(spec))
+        return tools
+
+    def status(self) -> list[dict[str, Any]]:
+        rows = []
+        for spec in self.specs.values():
+            if not spec.enabled:
+                state = "disabled"
+            elif spec.name in self.last_errors:
+                state = "error"
+            else:
+                state = "configured"
+            rows.append(
+                {
+                    "name": spec.name,
+                    "type": spec.type,
+                    "enabled": spec.enabled,
+                    "status": state,
+                    "target": spec.url or f"{spec.command or ''} {' '.join(spec.args)}".strip(),
+                    "error": self.last_errors.get(spec.name, ""),
+                }
+            )
+        return rows
+
+    def enable(self, name: str) -> bool:
+        return self._set_enabled(name, True)
+
+    def disable(self, name: str) -> bool:
+        return self._set_enabled(name, False)
+
+    async def restart(self, name: str) -> int:
+        spec = self.specs.get(name)
+        if not spec or not spec.enabled:
+            return 0
+        self.last_errors.pop(name, None)
+        try:
+            return len(await self._tools_for_server(spec))
+        except Exception as exc:  # noqa: BLE001
+            self.last_errors[name] = str(exc)
+            return 0
+
+    def logs(self, name: str, limit: int = 200) -> str:
+        log_path = self._log_path(name)
+        if not log_path.exists():
+            error = self.last_errors.get(name)
+            return error or "(no logs)"
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        return "\n".join(lines[-limit:]) or "(no logs)"
 
     async def list_server_tools(self, spec: McpServerSpec) -> list[Any]:
         async with self._session(spec) as session:
@@ -200,7 +255,8 @@ class McpClientManager:
                 env={**os.environ, **spec.env},
                 cwd=spec.cwd or self.project_root,
             )
-            with open(os.devnull, "w", encoding="utf-8") as errlog:
+            self.log_dir.mkdir(parents=True, exist_ok=True)
+            with self._log_path(spec.name).open("a", encoding="utf-8") as errlog:
                 async with (
                     stdio_client(params, errlog=errlog) as (read, write),
                     ClientSession(read, write) as session,
@@ -224,6 +280,29 @@ class McpClientManager:
             return
         raise ValueError(f"Unsupported MCP transport: {spec.type}")
 
+    def _set_enabled(self, name: str, enabled: bool) -> bool:
+        spec = self.specs.get(name)
+        if not spec:
+            return False
+        data = _read_project_config(self.project_config_path)
+        servers = data.setdefault("mcpServers", {})
+        raw = servers.setdefault(name, _spec_to_raw(spec))
+        if not isinstance(raw, dict):
+            raw = _spec_to_raw(spec)
+            servers[name] = raw
+        raw["enabled"] = enabled
+        self.project_config_path.parent.mkdir(parents=True, exist_ok=True)
+        self.project_config_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self.specs = load_mcp_server_specs(self.project_root)
+        return True
+
+    def _log_path(self, name: str) -> Path:
+        safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in name)
+        return self.log_dir / f"{safe}.log"
+
 
 def _content_to_text(content: Any) -> str:
     if content is None:
@@ -242,3 +321,37 @@ def _content_to_text(content: Any) -> str:
     if hasattr(content, "model_dump"):
         return json.dumps(content.model_dump(mode="json"), ensure_ascii=False)
     return str(content)
+
+
+def _read_project_config(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"mcpServers": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"mcpServers": {}}
+    if not isinstance(data, dict):
+        return {"mcpServers": {}}
+    data.setdefault("mcpServers", {})
+    return data
+
+
+def _spec_to_raw(spec: McpServerSpec) -> dict[str, Any]:
+    raw: dict[str, Any] = {
+        "type": spec.type,
+        "enabled": spec.enabled,
+        "timeout": spec.timeout,
+    }
+    if spec.command:
+        raw["command"] = spec.command
+    if spec.args:
+        raw["args"] = spec.args
+    if spec.env:
+        raw["env"] = spec.env
+    if spec.cwd:
+        raw["cwd"] = spec.cwd
+    if spec.url:
+        raw["url"] = spec.url
+    if spec.headers:
+        raw["headers"] = spec.headers
+    return raw

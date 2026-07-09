@@ -158,6 +158,26 @@ def test_tool_use_and_result_render_as_structured_panels():
     assert "README.md" in output
 
 
+def test_plan_review_events_render_summary_and_shortcuts():
+    stream = StringIO()
+    console = Console(file=stream, color_system=None, width=120)
+    renderer = RichRenderer(console=console)
+
+    renderer.handle({"type": "plan_generation_started", "goal": "做一个学生管理系统"})
+    renderer.handle({"type": "plan_thinking", "thinking": "先拆分 CRUD 与测试任务"})
+    renderer.handle({"type": "plan_review_summary", "summary": "计划摘要\n- 任务数: 3"})
+    renderer.handle({"type": "plan_review_instructions"})
+
+    output = stream.getvalue()
+    assert "Plan-and-Execute" in output
+    assert "规划思考" in output
+    assert "计划摘要" in output
+    assert "Enter" in output
+    assert "Ctrl+O" in output
+    assert "ESC" in output
+    assert "I" in output
+
+
 def test_start_run_resets_token_usage():
     stream = StringIO()
     console = Console(file=stream, color_system=None, width=120)

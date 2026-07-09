@@ -38,6 +38,7 @@ This file tracks the Python port against the existing Java and TypeScript implem
   - OpenAI-compatible streaming LLM client
   - DeepSeek default
   - ReAct loop with text/thinking/tool-call/tool-result/done events
+  - Plan-and-Execute mode with JSON planning, dependency-aware task execution, and plan events
   - SDK entrypoint
   - pre/post side-history snapshots around Agent runs
 - Configuration:
@@ -57,6 +58,10 @@ This file tracks the Python port against the existing Java and TypeScript implem
   - `bash` / `execute_command`
   - `web_search`
   - `web_fetch`
+  - `browser_status`
+  - `browser_connect`
+  - `browser_disconnect`
+  - `browser_tabs`
   - `save_memory`
   - `load_skill`
   - `search_code`
@@ -86,10 +91,18 @@ This file tracks the Python port against the existing Java and TypeScript implem
   - virtual prompt tools
   - `paicli mcp init-chrome`
   - `paicli mcp list`
+  - REPL lifecycle commands: `/mcp`, `/mcp restart <name>`, `/mcp logs <name>`,
+    `/mcp disable <name>`, `/mcp enable <name>`, `/mcp resources <name>`,
+    `/mcp prompts <name>`
+  - per-server stderr logs under `.paicli/mcp-logs/`
   - PaiCLI MCP server over stdio/http for built-in tools
 - Chrome DevTools MCP:
   - project/user config writer for `npx chrome-devtools-mcp@latest`
   - `--browser-url`
+  - REPL browser commands: `/browser status`, `/browser connect [port]`,
+    `/browser disconnect`, `/browser tabs`
+  - shared CDP mode via `--autoConnect` or `--browser-url=http://127.0.0.1:<port>`
+  - isolated mode restoration via `--isolated=true`
   - `--headless`
   - `--slim`
   - usage-statistics opt-out flag by default

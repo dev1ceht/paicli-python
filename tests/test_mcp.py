@@ -120,3 +120,75 @@ if __name__ == "__main__":
     assert any(tool.name == "mcp__noisy__echo" for tool in tools)
     captured = capsys.readouterr()
     assert "NOISY_MCP_STARTUP" not in captured.err
+
+
+def test_mcp_manager_disable_enable_persists_project_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / ".paicli").mkdir()
+    (tmp_path / ".paicli" / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "fake": {
+                        "type": "stdio",
+                        "command": "python",
+                        "args": ["server.py"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manager = McpClientManager(tmp_path)
+
+    assert manager.disable("fake")
+    assert McpClientManager(tmp_path).specs["fake"].enabled is False
+    assert manager.enable("fake")
+    assert McpClientManager(tmp_path).specs["fake"].enabled is True
+
+
+def test_mcp_manager_logs_stdio_stderr(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    server = tmp_path / "noisy_mcp_server.py"
+    server.write_text(
+        """
+import sys
+from mcp.server.fastmcp import FastMCP
+
+sys.stderr.write("NOISY_MCP_LOG\\n")
+sys.stderr.flush()
+
+mcp = FastMCP("noisy")
+
+@mcp.tool()
+def echo(text: str) -> str:
+    return text
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+""".lstrip(),
+        encoding="utf-8",
+    )
+    (tmp_path / ".paicli").mkdir()
+    (tmp_path / ".paicli" / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "noisy": {
+                        "type": "stdio",
+                        "command": "python",
+                        "args": [str(server)],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async def run():
+        manager = McpClientManager(tmp_path)
+        await manager.load_tools()
+        return manager.logs("noisy")
+
+    assert "NOISY_MCP_LOG" in asyncio.run(run())

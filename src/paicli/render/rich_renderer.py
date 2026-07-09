@@ -118,6 +118,67 @@ class RichRenderer:
             self._flush_thinking()
             self._flush_markdown(title="Assistant Output")
             self.console.print(f"[red]Error:[/red] {event.get('error')}")
+        elif event_type == "plan_generation_started":
+            self._flush_thinking()
+            self._flush_markdown(title="Assistant Output")
+            self.console.print("[bold cyan]?[/bold cyan] 使用 Plan-and-Execute 模式")
+            self.console.print(f"[bold cyan]?[/bold cyan] 正在规划任务: {event.get('goal')}")
+        elif event_type == "plan_thinking":
+            self._flush_thinking()
+            self._flush_markdown(title="Assistant Output")
+            thinking = str(event.get("thinking") or "")
+            if thinking.strip():
+                self.console.print(
+                    _output_panel(
+                        Text(thinking, style="dim"),
+                        title=Text("规划思考", style="bold cyan"),
+                        border_style="cyan",
+                    )
+                )
+        elif event_type == "plan_review_summary":
+            self._flush_thinking()
+            self._flush_markdown(title="Assistant Output")
+            self.console.print(str(event.get("summary") or ""))
+        elif event_type == "plan_visualization":
+            self._flush_thinking()
+            self._flush_markdown(title="Assistant Output")
+            self.console.print(str(event.get("visualization") or ""))
+        elif event_type == "plan_review_instructions":
+            self._flush_thinking()
+            self._flush_markdown(title="Assistant Output")
+            self.console.print(
+                "计划已生成。\n"
+                "- Enter: 按当前计划执行\n"
+                "- Ctrl+O: 展开完整计划\n"
+                "- ESC: 折叠或取消本次计划\n"
+                "- I: 输入补充要求后重新规划"
+            )
+        elif event_type == "plan_cancelled":
+            self._flush_thinking()
+            self._flush_markdown(title="Assistant Output")
+            self.console.print("[yellow]计划已取消。[/yellow]")
+        elif event_type == "plan_started":
+            self._flush_thinking()
+            self._flush_markdown(title="Assistant Output")
+            self._print_plan(event)
+        elif event_type == "task_started":
+            self._flush_thinking()
+            self._flush_markdown(title="Assistant Output")
+            task = event.get("task") or {}
+            self.console.print(f"[bold #60a5fa]Plan task:[/bold #60a5fa] {task.get('id')}")
+        elif event_type == "task_completed":
+            self.console.print(f"[green]Task completed:[/green] {event.get('task_id')}")
+        elif event_type == "task_failed":
+            self.console.print(
+                f"[red]Task failed:[/red] {event.get('task_id')} {event.get('error')}"
+            )
+        elif event_type == "task_skipped":
+            self.console.print(f"[yellow]Task skipped:[/yellow] {event.get('task_id')}")
+        elif event_type == "plan_failed":
+            detail = event.get("error") or event.get("failed")
+            self.console.print(f"[red]Plan failed:[/red] {detail}")
+        elif event_type == "plan_completed":
+            self.console.print("[green]Plan completed[/green]")
         elif event_type == "done":
             self._flush_thinking()
             self._flush_markdown(title="Final Output")
@@ -259,6 +320,20 @@ class RichRenderer:
                 border_style=border_style,
             )
         )
+
+    def _print_plan(self, event: dict[str, Any]) -> None:
+        table = Table(title="Execution Plan")
+        table.add_column("ID", style="bold #60a5fa", no_wrap=True)
+        table.add_column("Depends On", style="dim")
+        table.add_column("Task")
+        for task in event.get("tasks") or []:
+            depends_on = ", ".join(task.get("depends_on") or [])
+            table.add_row(
+                str(task.get("id") or ""),
+                depends_on or "-",
+                str(task.get("description") or ""),
+            )
+        self.console.print(table)
 
     def _record_run_summary(self, event: dict[str, Any]) -> None:
         total_tokens = int(event.get("total_tokens") or self._input_tokens + self._output_tokens)
