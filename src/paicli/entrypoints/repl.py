@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.prompt import Prompt
@@ -17,9 +19,19 @@ from rich.table import Table
 from paicli import __version__
 from paicli.agent import Agent
 from paicli.bootstrap import build_tool_registry
+from paicli.browser import BrowserSession
 from paicli.config import PaiCliConfig, config_to_public_dict
 from paicli.llm import create_llm_client
+from paicli.mcp import McpClientManager
 from paicli.memory import MemoryManager
+from paicli.plan import (
+    ExecutionPlan,
+    JsonPlanner,
+    PlanExecutor,
+    PlanReviewDecision,
+    PlanTask,
+    parse_plan_review_input,
+)
 from paicli.policy import AuditLog
 from paicli.prompt import PromptAssembler
 from paicli.rag import CodeIndex
@@ -48,9 +60,61 @@ SLASH_COMMANDS = [
     "/model",
     "/skill",
     "/mcp",
+    "/browser",
     "/task",
     "/snapshot",
     "/restore",
+]
+
+HELP_LINES = [
+    "可用命令：",
+    "/help - 查看命令帮助",
+    "/exit - 退出 PaiCLI",
+    "/clear - 清空当前会话历史",
+    "/context - 查看当前上下文状态",
+    "/memory - 查看长期记忆列表",
+    "/memory search <关键词> - 搜索当前项目长期记忆",
+    "/memory clear - 清空当前项目长期记忆",
+    "/save <事实> - 保存项目级长期记忆",
+    "/config - 查看当前配置",
+    "/tools - 查看可用工具",
+    "/model - 查看当前模型",
+    "/model <模型名> - 切换当前模型名（重启 REPL 后生效）",
+    "/model <provider> <model> - 切换 provider 和模型（重启 REPL 后生效）",
+    "/plan - 查看计划模式用法",
+    "/plan <任务内容> - 直接用计划模式执行这条任务",
+    "/team - 查看 Multi-Agent 模式用法",
+    "/team <任务内容> - 直接用多 Agent 协作执行这条任务",
+    "/hitl - 查看 HITL 状态",
+    "/hitl on - 启用危险操作人工审批",
+    "/hitl off - 关闭 HITL 审批",
+    "/hitl always|auto|never - 设置 HITL 模式",
+    "/policy - 查看安全策略",
+    "/audit [N] - 查看最近 N 条审计记录",
+    "/browser - 查看浏览器会话状态",
+    "/browser connect - 复用已允许远程调试的登录态 Chrome",
+    "/browser connect <port> - 旧式 CDP 端口连接",
+    "/browser status - 查看浏览器会话状态",
+    "/browser tabs - 查看 shared 模式真实 Chrome tab",
+    "/browser disconnect - 切回 isolated 浏览器模式",
+    "/task - 查看后台任务列表",
+    "/task add <任务内容> - 提交后台任务",
+    "/task cancel <task_id> - 取消后台任务",
+    "/task log <task_id> - 查看后台任务结果",
+    "/mcp - 查看 MCP server 状态",
+    "/mcp restart <name> - 重启 MCP server",
+    "/mcp logs <name> - 查看 MCP server 日志",
+    "/mcp disable <name> - 禁用 MCP server",
+    "/mcp enable <name> - 启用 MCP server",
+    "/mcp resources <name> - 查看 MCP resources",
+    "/mcp prompts <name> - 查看 MCP prompts",
+    "/skill - 查看可用 Skill",
+    "/skill show <name> - 查看指定 Skill 内容",
+    "/index [path] - 索引代码库",
+    "/search <查询> - 搜索本地代码索引",
+    "/snapshot - 查看最近 Side-History 快照",
+    "/snapshot clean - 清理当前项目快照",
+    "/restore <snapshot-id-or-index> - 恢复到指定快照",
 ]
 
 
@@ -134,7 +198,15 @@ async def start_repl(cwd: str, config: PaiCliConfig) -> None:
         if not message:
             continue
         if message.startswith("/"):
-            should_exit = await _handle_slash(message, console, cwd, config, agent, registry)
+            should_exit = await _handle_slash(
+                message,
+                console,
+                cwd,
+                config,
+                agent,
+                registry,
+                mcp_manager,
+            )
             if should_exit:
                 return
             continue
@@ -152,6 +224,117 @@ async def _run_agent(agent: Agent, renderer: RichRenderer, message: str) -> None
     renderer.newline()
 
 
+PlanReviewInput = Callable[[ExecutionPlan, bool], Awaitable[PlanReviewDecision]]
+
+
+async def _run_plan_agent(
+    agent: Agent,
+    renderer: RichRenderer,
+    message: str,
+    review_input: PlanReviewInput | None = None,
+) -> None:
+    async def run_task(task: PlanTask, completed: dict[str, str]) -> str:
+        context = _completed_task_context(completed)
+        prompt = (
+            f"Execute plan task `{task.id}`.\n\nTask description:\n{task.description}\n\n{context}"
+        )
+        result = await agent.run_complete(prompt)
+        return result.text
+
+    planner = JsonPlanner(agent.llm_client)
+    executor = PlanExecutor()
+    renderer.set_context_window(agent.llm_client.max_context_window)
+    renderer.start_run()
+    renderer.newline()
+
+    original_goal = message
+    planning_goal = message
+    while True:
+        renderer.handle({"type": "plan_generation_started", "goal": planning_goal})
+        plan = await planner.create_plan(planning_goal)
+        if planner.last_thinking.strip():
+            renderer.handle({"type": "plan_thinking", "thinking": planner.last_thinking})
+        renderer.handle({"type": "plan_review_summary", "summary": plan.summary()})
+        renderer.handle({"type": "plan_review_instructions"})
+
+        decision = await _review_plan(plan, renderer, review_input)
+        if decision.action == "cancel":
+            renderer.handle({"type": "plan_cancelled"})
+            break
+        if decision.action == "supplement":
+            planning_goal = f"{original_goal}\n补充要求：{decision.feedback}"
+            continue
+
+        async for event in executor.execute(plan, run_task):
+            renderer.handle(event)
+        break
+
+    renderer.newline()
+
+
+async def _review_plan(
+    plan: ExecutionPlan,
+    renderer: RichRenderer,
+    review_input: PlanReviewInput | None,
+) -> PlanReviewDecision:
+    expanded = False
+    while True:
+        if review_input:
+            decision = await review_input(plan, expanded)
+        else:
+            decision = await _prompt_plan_review_decision(expanded=expanded)
+
+        if decision.action == "expand":
+            renderer.handle({"type": "plan_visualization", "visualization": plan.visualize()})
+            expanded = True
+            continue
+        if decision.action == "collapse":
+            renderer.handle({"type": "plan_review_summary", "summary": plan.summary()})
+            expanded = False
+            continue
+        if decision.action == "supplement" and not decision.feedback.strip():
+            feedback = await _prompt_plan_supplement()
+            if feedback.strip():
+                return PlanReviewDecision.supplement(feedback.strip())
+            renderer.handle({"type": "plan_review_summary", "summary": plan.summary()})
+            renderer.handle({"type": "plan_review_instructions"})
+            continue
+        return decision
+
+
+async def _prompt_plan_review_decision(*, expanded: bool) -> PlanReviewDecision:
+    raw = await _read_plan_review_input()
+    return parse_plan_review_input(raw, expanded=expanded)
+
+
+async def _read_plan_review_input() -> str:
+    bindings = KeyBindings()
+
+    @bindings.add("c-o")
+    def _expand(event: Any) -> None:
+        event.app.exit(result="\x0f")
+
+    @bindings.add("escape")
+    def _escape(event: Any) -> None:
+        event.app.exit(result="\x1b")
+
+    @bindings.add("i")
+    def _supplement(event: Any) -> None:
+        buffer = event.app.current_buffer
+        if buffer.text:
+            buffer.insert_text("i")
+            return
+        event.app.exit(result="/supplement")
+
+    session = PromptSession(key_bindings=bindings)
+    return await session.prompt_async("操作/补充> ")
+
+
+async def _prompt_plan_supplement() -> str:
+    session = PromptSession()
+    return await session.prompt_async("补充> ")
+
+
 async def _handle_slash(
     raw: str,
     console: Console,
@@ -159,13 +342,14 @@ async def _handle_slash(
     config: PaiCliConfig,
     agent: Agent,
     registry: ToolRegistry,
+    mcp_manager: McpClientManager | None,
 ) -> bool:
     command, _, rest = raw.partition(" ")
     arg = rest.strip()
     if command in {"/exit", "/quit"}:
         return True
     if command == "/help":
-        console.print("\n".join(SLASH_COMMANDS))
+        console.print(help_text())
     elif command == "/clear":
         agent.clear_history()
         console.clear()
@@ -213,11 +397,7 @@ async def _handle_slash(
         if not arg:
             console.print("[red]Usage:[/red] /plan <task>")
         else:
-            await _run_agent(
-                agent,
-                RichRenderer(),
-                "Plan the task, show the plan briefly, then execute it step by step:\n" + arg,
-            )
+            await _run_plan_agent(agent, RichRenderer(), arg)
     elif command == "/team":
         if not arg:
             console.print("[red]Usage:[/red] /team <task>")
@@ -233,7 +413,9 @@ async def _handle_slash(
     elif command == "/skill":
         _skill_command(arg, console, cwd)
     elif command == "/mcp":
-        console.print("Use `paicli mcp serve --transport stdio|http --port 3000` to expose tools.")
+        await _mcp_command(arg, console, mcp_manager, registry)
+    elif command == "/browser":
+        _browser_command(arg, console, cwd)
     elif command == "/task":
         _task_command(arg, console)
     elif command == "/snapshot":
@@ -322,6 +504,110 @@ def _task_command(arg: str, console: Console) -> None:
             "\n".join(f"{task.id} {task.status} {task.prompt[:80]}" for task in rows)
             or "(no tasks)"
         )
+
+
+def _browser_command(arg: str, console: Console, cwd: str) -> None:
+    session = BrowserSession(cwd)
+    sub, _, rest = arg.partition(" ")
+    try:
+        if sub in {"", "status"}:
+            state = session.status()
+        elif sub == "connect":
+            port = int(rest.strip()) if rest.strip() else None
+            state = session.connect(port=port)
+        elif sub == "disconnect":
+            state = session.disconnect()
+        elif sub == "tabs":
+            tabs = session.tabs()
+            if not tabs:
+                console.print(
+                    "No browser tabs available. Use /browser connect <port> for CDP tabs."
+                )
+                return
+            table = Table(title="Browser Tabs")
+            table.add_column("ID")
+            table.add_column("Title")
+            table.add_column("URL")
+            for tab in tabs:
+                table.add_row(tab.id, tab.title, tab.url)
+            console.print(table)
+            return
+        else:
+            console.print("[red]Usage:[/red] /browser status|connect [port]|disconnect|tabs")
+            return
+    except ValueError as exc:
+        console.print(f"[red]Browser error:[/red] {exc}")
+        return
+    suffix = f" ({state.browser_url})" if state.browser_url else ""
+    console.print(f"Browser mode: {state.mode}{suffix}")
+
+
+async def _mcp_command(
+    arg: str,
+    console: Console,
+    manager: McpClientManager | None,
+    registry: ToolRegistry,
+) -> None:
+    if manager is None:
+        console.print("MCP is disabled.")
+        return
+    sub, _, rest = arg.partition(" ")
+    name = rest.strip()
+    if not sub:
+        table = Table(title="MCP Servers")
+        table.add_column("Name")
+        table.add_column("Type")
+        table.add_column("Status")
+        table.add_column("Target")
+        for row in manager.status():
+            status = row["status"]
+            if row["error"]:
+                status = f"{status}: {row['error']}"
+            table.add_row(row["name"], row["type"], status, row["target"])
+        console.print(table)
+        return
+    if sub in {"enable", "disable", "restart", "logs", "resources", "prompts"} and not name:
+        console.print(f"[red]Usage:[/red] /mcp {sub} <name>")
+        return
+    if sub == "disable":
+        if manager.disable(name):
+            removed = registry.unregister_prefix(f"mcp__{name}__")
+            console.print(f"Disabled {name}; removed {removed} tools from this session.")
+        else:
+            console.print(f'MCP server "{name}" not found.')
+        return
+    if sub == "enable":
+        if not manager.enable(name):
+            console.print(f'MCP server "{name}" not found.')
+            return
+        registry.unregister_prefix(f"mcp__{name}__")
+        tools = await manager.load_server_tools(name)
+        registry.register_all(tools)
+        console.print(f"Enabled {name}; loaded {len(tools)} tools.")
+        return
+    if sub == "restart":
+        registry.unregister_prefix(f"mcp__{name}__")
+        count = await manager.restart(name)
+        tools = await manager.load_server_tools(name)
+        registry.register_all(tools)
+        console.print(f"Restarted {name}; loaded {len(tools) or count} tools.")
+        return
+    if sub == "logs":
+        console.print(manager.logs(name))
+        return
+    spec = manager.specs.get(name)
+    if not spec:
+        console.print(f'MCP server "{name}" not found.')
+        return
+    if sub == "resources":
+        result = await manager.list_resources(spec)
+        console.print(result.content)
+        return
+    if sub == "prompts":
+        result = await manager.list_prompts(spec)
+        console.print(result.content)
+        return
+    console.print("[red]Usage:[/red] /mcp [restart|logs|disable|enable|resources|prompts] <name>")
 
 
 def _snapshot_command(arg: str, console: Console, cwd: str) -> None:
@@ -453,3 +739,17 @@ def _format_toolbar_percent(value: float) -> str:
     if value < 0.01:
         return "<1%"
     return f"{value:.0%}"
+
+
+def help_text() -> str:
+    return "\n".join(HELP_LINES)
+
+
+def _completed_task_context(completed: dict[str, str]) -> str:
+    if not completed:
+        return "No previous plan tasks have completed yet."
+    lines = ["Completed dependency results:"]
+    for task_id, result in completed.items():
+        preview = result if len(result) <= 4000 else result[:4000] + "\n... [truncated]"
+        lines.append(f"\n[{task_id}]\n{preview}")
+    return "\n".join(lines)

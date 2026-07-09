@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from paicli.browser import BrowserSession
 from paicli.lsp import diagnose_file
 from paicli.memory import MemoryManager
 from paicli.policy import CommandGuard, PathGuard
@@ -177,6 +178,42 @@ def get_builtin_tools() -> list[Tool]:
             ),
             required_keys=["url"],
             handler=web_fetch,
+        ),
+        Tool(
+            name="browser_status",
+            description="Show current Chrome DevTools MCP browser session mode.",
+            parameters=object_schema({}),
+            handler=browser_status,
+        ),
+        Tool(
+            name="browser_connect",
+            description=(
+                "Switch Chrome DevTools MCP to shared mode using --autoConnect or a CDP port."
+            ),
+            parameters=object_schema(
+                {"port": {"type": "number", "description": "Optional local CDP port"}},
+            ),
+            handler=browser_connect,
+            is_read_only=False,
+            is_concurrency_safe=False,
+            danger_level="medium",
+            requires_approval=True,
+        ),
+        Tool(
+            name="browser_disconnect",
+            description="Switch Chrome DevTools MCP back to isolated browser mode.",
+            parameters=object_schema({}),
+            handler=browser_disconnect,
+            is_read_only=False,
+            is_concurrency_safe=False,
+            danger_level="medium",
+            requires_approval=True,
+        ),
+        Tool(
+            name="browser_tabs",
+            description="List tabs from a Chrome DevTools CDP browser URL session.",
+            parameters=object_schema({}),
+            handler=browser_tabs,
         ),
         Tool(
             name="save_memory",
@@ -366,6 +403,32 @@ async def web_fetch(payload: dict[str, Any], _context: ToolContext) -> ToolResul
     except Exception as exc:  # noqa: BLE001
         return ToolResult(f"Fetch error: {exc}", is_error=True)
     return ToolResult(content, display_summary=f"Fetched {payload['url']}")
+
+
+async def browser_status(_payload: dict[str, Any], context: ToolContext) -> ToolResult:
+    state = BrowserSession(context.cwd).status()
+    suffix = f" ({state.browser_url})" if state.browser_url else ""
+    return ToolResult(f"browser mode: {state.mode}{suffix}")
+
+
+async def browser_connect(payload: dict[str, Any], context: ToolContext) -> ToolResult:
+    raw_port = payload.get("port")
+    port = int(raw_port) if raw_port not in (None, "") else None
+    state = BrowserSession(context.cwd).connect(port=port)
+    suffix = f" at {state.browser_url}" if state.browser_url else " with --autoConnect"
+    return ToolResult(f"browser mode: {state.mode}{suffix}")
+
+
+async def browser_disconnect(_payload: dict[str, Any], context: ToolContext) -> ToolResult:
+    state = BrowserSession(context.cwd).disconnect()
+    return ToolResult(f"browser mode: {state.mode}")
+
+
+async def browser_tabs(_payload: dict[str, Any], context: ToolContext) -> ToolResult:
+    tabs = BrowserSession(context.cwd).tabs()
+    if not tabs:
+        return ToolResult("No browser tabs available. Use /browser connect <port> for CDP tabs.")
+    return ToolResult("\n".join(f"{tab.id}\t{tab.title}\t{tab.url}" for tab in tabs))
 
 
 async def save_memory(payload: dict[str, Any], context: ToolContext) -> ToolResult:

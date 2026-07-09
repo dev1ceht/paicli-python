@@ -14,6 +14,12 @@ class ToolRegistry:
         for tool in tools:
             self.register(tool)
 
+    def unregister_prefix(self, prefix: str) -> int:
+        names = [name for name in self._tools if name.startswith(prefix)]
+        for name in names:
+            del self._tools[name]
+        return len(names)
+
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
