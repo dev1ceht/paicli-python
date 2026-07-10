@@ -140,7 +140,6 @@ async def start_repl(cwd: str, config: PaiCliConfig) -> None:
         system_prompt=system_prompt,
         cwd=cwd,
         config=config,
-        approval_callback=lambda request: _approval_prompt(request, console, config),
     )
 
     # Launch Textual TUI app (same pattern as pico: PicoTuiApp(agent).run())
@@ -155,6 +154,10 @@ async def start_repl(cwd: str, config: PaiCliConfig) -> None:
     tui_app._model = client.model_name
     tui_app._context_window = client.max_context_window
     tui_app._provider = client.provider_name
+
+    # Wire the native TUI approval modal as the agent's HITL callback
+    agent.approval_callback = tui_app.request_approval
+
     await tui_app.run_async()
 
 

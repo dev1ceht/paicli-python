@@ -16,6 +16,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Footer, TextArea
 
+from paicli.render.tui_dialogs import ApprovalScreen, PlanReviewScreen
 from paicli.render.tui_events import UiEvent
 from paicli.render.textual_widgets import (
     ChatLog,
@@ -184,9 +185,7 @@ class PaiCliApp(App):
             if not arg:
                 chat_log.add_info("[red]Usage:[/red] /plan <task>")
             else:
-                self.run_agent_task(
-                    f"[PLAN MODE] {arg}",
-                )
+                self.run_plan_task(arg)
             return
         if command == "/team":
             if not arg:
@@ -867,3 +866,120 @@ class PaiCliApp(App):
         rows = registry.list()
         output = "\n".join(f"{item.name}: {item.description}" for item in rows)
         chat_log.add_info(output or "(no skills)")
+
+    # -- Plan review and approval ----------------------------------------
+
+    async def review_plan(
+        self,
+        plan: Any,
+        *,
+        can_replan: bool = False,
+    ) -> Any:
+        """Push a PlanReviewScreen and return the user's PlanReviewDecision."""
+        from paicli.plan.executor import PlanReviewDecision
+
+        screen = PlanReviewScreen(plan, can_replan=can_replan)
+        result = await self.push_screen_wait(screen)
+        return result
+
+    async def request_approval(self, request: dict[str, Any]) -> str:
+        """Push an ApprovalScreen and return the decision string."""
+        screen = ApprovalScreen(request)
+        result = await self.push_screen_wait(screen)
+        # "approve_all" means approve + switch to YOLO
+        if result == "approve_all" and self.config:
+            self.config.policy.hitl_mode = "never"
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_info("[bold green]HITL switched to YOLO mode[/bold green]")
+            result = "approve"
+        return result
+
+    def run_plan_task(self, message: str) -> None:
+        """Launch a plan-and-execute loop via the TUI's native modal flow."""
+        self._running = True
+        self._phase = "plan"
+        self._run_start_time = time.monotonic()
+        self._text_buffer.clear()
+        self._thinking_buffer.clear()
+        self._input_tokens = 0
+        self._output_tokens = 0
+        self._cached_tokens = 0
+        self._task_buffers.clear()
+        self._task_thinking_buffers.clear()
+        self._update_status_bar()
+
+        chat_log = self.query_one("#chat-log", ChatLog)
+        chat_log.add_user_message(f"/plan {message}")
+
+        async def _run() -> None:
+            try:
+                from paicli.entrypoints.repl import _run_plan_agent
+
+                renderer = _tui_event_renderer(self)
+                await _run_plan_agent(
+                    self.agent,
+                    renderer,
+                    message,
+                    review_input=self._tui_review_input,
+                )
+            except Exception as exc:
+                chat_log = self.query_one("#chat-log", ChatLog)
+                chat_log.add_info(f"[bold red]Plan error:[/bold red] {exc}")
+            finally:
+                self._running = False
+                self._phase = "idle"
+                self._update_status_bar()
+
+        self.run_worker(_run(), exclusive=True)
+
+    async def _tui_review_input(
+        self,
+        plan: Any,
+        expanded: bool,
+    ) -> Any:
+        """Adapter: called by _run_plan_agent to get a PlanReviewDecision."""
+        decision = await self.review_plan(plan, can_replan=True)
+        # If the user asked to expand/collapse, handle it via events and
+        # re-present the screen with updated state.  _run_plan_agent's
+        # _review_plan loop handles expand/collapse natively when
+        # review_input is not set; with our adapter we must replicate here.
+        while decision.action in ("expand", "collapse"):
+            if decision.action == "expand":
+                chat_log = self.query_one("#chat-log", ChatLog)
+                chat_log.add_info(str(plan.visualize()))
+            elif decision.action == "collapse":
+                chat_log = self.query_one("#chat-log", ChatLog)
+                chat_log.add_info(str(plan.summary()))
+            decision = await self.review_plan(plan, can_replan=True)
+        # If supplement with empty feedback, prompt for text
+        if decision.action == "supplement" and not decision.feedback.strip():
+            decision = await self.review_plan(plan, can_replan=True)
+        return decision
+
+
+class _TuiEventRenderer:
+    """Minimal renderer adapter that forwards events to PaiCliApp.handle_event."""
+
+    def __init__(self, app: PaiCliApp) -> None:
+        self._app = app
+        self._context_window = 0
+
+    def set_context_window(self, window: int) -> None:
+        self._context_window = window
+
+    def set_provider(self, provider: str) -> None:
+        pass
+
+    def start_run(self) -> None:
+        pass
+
+    def newline(self) -> None:
+        pass
+
+    def handle(self, event: dict[str, Any]) -> None:
+        self._app.handle_event(event)
+
+
+def _tui_event_renderer(app: PaiCliApp) -> _TuiEventRenderer:
+    """Create a renderer adapter for plan execution within the TUI."""
+    return _TuiEventRenderer(app)
