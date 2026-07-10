@@ -41,7 +41,6 @@ class PaiCliApp(App):
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit", show=True),
         Binding("ctrl+l", "clear_screen", "Clear", show=True),
-        Binding("enter", "submit_message", "Send", show=True, priority=True),
     ]
 
     def __init__(
