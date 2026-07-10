@@ -10,6 +10,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from rich.errors import MarkupError
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
@@ -17,6 +18,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Collapsible, Footer, Header, Label, Static, TextArea
 
@@ -29,6 +31,7 @@ from paicli.render._common import (
     format_tokens,
     tool_label as _tool_label,
 )
+from paicli.render.history import PromptHistory
 
 
 def _clip(text: str, limit: int = 1200) -> str:
@@ -55,12 +58,12 @@ class ToolCard(Static):
         height: auto;
         margin: 0 0 1 0;
         padding: 0 1;
-        background: #14171d;
-        border: tall #273244;
+        background: #0d1117;
+        border: tall #60d8ff;
     }
     ToolCard .tool-output {
         max-height: 14;
-        color: #adb5bd;
+        color: #60d8ff;
         padding: 0 1;
         overflow-x: hidden;
     }
@@ -135,6 +138,9 @@ class ChatLog(VerticalScroll):
         width: 100%;
         height: 1fr;
         overflow-y: scroll;
+        background: #0d1117;
+        color: #60d8ff;
+        padding: 0 1;
     }
     """
 
@@ -232,9 +238,10 @@ class ChatLog(VerticalScroll):
         self.call_after_refresh(self.scroll_end, animate=False)
 
     def add_info(self, text: str, *, style: str = "dim") -> None:
-        widget = Static(Text(text, style=style))
+        renderable = _rich_markup_text(text, style=style)
+        widget = Static(renderable)
         self.mount(widget)
-        self._record_renderable_text(text)
+        self._record_renderable_text(renderable.plain)
         self.call_after_refresh(self.scroll_end, animate=False)
 
     def clear_log(self) -> None:
@@ -254,8 +261,8 @@ class StatusBar(Static):
     DEFAULT_CSS = """
     StatusBar {
         height: 1;
-        background: #000000;
-        color: #ffffff;
+        background: #0d1117;
+        color: #a8ff60;
         padding: 0 1;
     }
     """
@@ -305,17 +312,21 @@ class InputBar(Horizontal):
     DEFAULT_CSS = """
     InputBar {
         height: 3;
-        background: #000000;
+        background: #0d1117;
         padding: 0 1;
+        border-top: solid #a8ff60;
     }
     InputBar TextArea {
         width: 1fr;
         height: 1;
+        background: #0d1117;
+        color: #a8ff60;
+        border: round #60d8ff;
     }
     InputBar Label {
         width: auto;
         content-align: left middle;
-        color: #ffffff;
+        color: #a8ff60;
     }
     """
 
@@ -323,25 +334,80 @@ class InputBar(Horizontal):
         super().__init__(*args, **kwargs)
 
     def compose(self) -> ComposeResult:
-        yield Label("* ")
+        yield Label("> ")
         yield CommandInput(placeholder="Type your message or /command", compact=True)
 
 
 class CommandInput(TextArea):
     """TextArea that owns chat submission while it has focus."""
 
+    class MessageSubmitted(Message):
+        def __init__(self, value: str) -> None:
+            super().__init__()
+            self.value = value
+
     BINDINGS = [
         Binding("enter", "submit_message", "Send", show=False, priority=True),
         Binding("shift+enter", "insert_newline", "New line", show=False, priority=True),
+        Binding("up", "history_previous", "History previous", show=False, priority=True),
+        Binding("down", "history_next", "History next", show=False, priority=True),
+        Binding("tab", "complete_slash_command", "Complete command", show=False, priority=True),
     ]
+
+    def __init__(
+        self,
+        *args: Any,
+        history: PromptHistory | None = None,
+        slash_commands: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.prompt_history = history
+        self.slash_commands = slash_commands or ["/help"]
+
+    def _is_single_line_or_empty(self) -> bool:
+        return "\n" not in self.text
+
+    def _set_text_value(self, value: str) -> None:
+        self.load_text(value)
+        line = len(self.text.splitlines()) - 1 if self.text else 0
+        column = len(self.text.splitlines()[-1]) if self.text else 0
+        self.move_cursor((line, column))
 
     def action_submit_message(self) -> None:
         """Delegate Enter to the app only from the focused command input."""
-        self.app.action_submit_message()
+        value = self.text.strip()
+        self.post_message(self.MessageSubmitted(value))
+        if self.prompt_history and value:
+            self.prompt_history.append(value)
+        if hasattr(self.app, "action_submit_message"):
+            self.app.action_submit_message()
 
     def action_insert_newline(self) -> None:
         """Keep Shift+Enter available for a multiline draft."""
         self.insert("\n")
+
+    def action_history_previous(self) -> None:
+        if not self.prompt_history or not self._is_single_line_or_empty():
+            self.action_cursor_up()
+            return
+        self._set_text_value(self.prompt_history.previous())
+
+    def action_history_next(self) -> None:
+        if not self.prompt_history or not self._is_single_line_or_empty():
+            self.action_cursor_down()
+            return
+        self._set_text_value(self.prompt_history.next())
+
+    def action_complete_slash_command(self) -> None:
+        if not self.text.startswith("/") or " " in self.text.strip():
+            self.insert("\t")
+            return
+        matches = [command for command in self.slash_commands if command.startswith(self.text)]
+        if len(matches) == 1:
+            self._set_text_value(matches[0])
+            return
+        self.insert("\t")
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +430,13 @@ def _format_args_summary(name: str, args: dict | None) -> str:
     for v in args.values():
         return str(v)[:80]
     return ""
+
+
+def _rich_markup_text(text: str, *, style: str = "dim") -> Text:
+    try:
+        return Text.from_markup(text, style=style)
+    except MarkupError:
+        return Text(text, style=style)
 
 
 # format_tokens, format_elapsed, format_cost are re-exported from _common above
