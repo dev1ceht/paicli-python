@@ -87,3 +87,61 @@ Result:
 Suggested commit message used for this task:
 
 `feat: add textual history and aurora widgets`
+
+## Review follow-up fixes
+
+Addressed two Task 2 review findings without expanding file ownership:
+
+1. Production `InputBar` now constructs `CommandInput` with a real
+   `PromptHistory(Path.home() / ".paicli" / "history" / "prompt_history.txt")`.
+2. `StatusBar.render()` now uses the exact requested colors:
+   - phase: `#a8ff60`
+   - cost: `#facc15`
+
+### Follow-up RED
+
+Command:
+
+`D:\project\PaiCLI-Python\.venv\Scripts\python.exe -m pytest tests/test_tui.py -q --basetemp .\testing\pytest-basetemp`
+
+Observed failures:
+
+```text
+FAILED tests/test_tui.py::test_tui_mounted_input_uses_persisted_prompt_history
+FAILED tests/test_tui.py::test_status_bar_render_uses_exact_phase_and_cost_colors
+```
+
+The first failure showed the mounted `PaiCliApp` input still had no production
+history wired. The second showed `StatusBar.render()` was still emitting
+`#a3e635` for phase and `#f97316` for cost.
+
+### Follow-up GREEN
+
+Implemented:
+
+- production history wiring in `InputBar`
+- app-level `run_test` coverage proving mounted input Up/Down retrieves
+  persisted prompt history
+- exact markup assertions for status phase and cost colors
+
+### Follow-up verification
+
+Focused command:
+
+`D:\project\PaiCLI-Python\.venv\Scripts\python.exe -m pytest tests/test_tui.py -q --basetemp .\testing\pytest-basetemp`
+
+Result:
+
+```text
+.........                                                                [100%]
+```
+
+Commit-gate command:
+
+`D:\project\PaiCLI-Python\.venv\Scripts\python.exe -m pytest tests/test_tui.py tests/test_render.py tests/test_help.py -q --basetemp .\testing\pytest-basetemp`
+
+Result:
+
+```text
+...............................................                          [100%]
+```
