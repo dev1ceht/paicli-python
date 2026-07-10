@@ -55,6 +55,7 @@ class OpenAICompatibleClient:
             "model": self.model,
             "messages": self._format_messages(messages, system_prompt),
             "stream": True,
+            "stream_options": {"include_usage": True},
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
         }
@@ -129,6 +130,23 @@ class OpenAICompatibleClient:
         return "\n".join(text_parts)
 
     async def _parse_chunk(self, chunk: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+        # Extract usage FIRST — many providers send usage in a chunk
+        # with no choices (e.g. DeepSeek final chunk after [DONE]).
+        usage = chunk.get("usage")
+        if isinstance(usage, dict):
+            cached = 0
+            prompt_details = usage.get("prompt_tokens_details")
+            if isinstance(prompt_details, dict):
+                cached = int(prompt_details.get("cached_tokens") or 0)
+            yield {
+                "type": "usage",
+                "usage": {
+                    "input_tokens": int(usage.get("prompt_tokens") or 0),
+                    "output_tokens": int(usage.get("completion_tokens") or 0),
+                    "cached_tokens": cached,
+                },
+            }
+
         choices = chunk.get("choices") or []
         if not choices:
             return
@@ -150,16 +168,6 @@ class OpenAICompatibleClient:
         finish_reason = choice.get("finish_reason")
         if finish_reason:
             yield {"type": "message_end", "stop_reason": _map_finish_reason(str(finish_reason))}
-
-        usage = chunk.get("usage")
-        if isinstance(usage, dict):
-            yield {
-                "type": "usage",
-                "usage": {
-                    "input_tokens": int(usage.get("prompt_tokens") or 0),
-                    "output_tokens": int(usage.get("completion_tokens") or 0),
-                },
-            }
 
 
 async def _iter_sse(response: httpx.Response) -> AsyncIterator[str]:

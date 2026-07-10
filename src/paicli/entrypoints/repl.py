@@ -7,11 +7,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import WordCompleter
-from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.prompt import Prompt
 from rich.table import Table
@@ -29,13 +25,18 @@ from paicli.plan import (
     JsonPlanner,
     PlanExecutor,
     PlanReviewDecision,
+    PlanStatus,
     PlanTask,
+    TaskStatus,
+    build_task_context,
+    build_task_system_prompt,
     parse_plan_review_input,
 )
 from paicli.policy import AuditLog
 from paicli.prompt import PromptAssembler
+from paicli.prompt.project_memory import ProjectMemoryLoader
 from paicli.rag import CodeIndex
-from paicli.render import RichRenderer
+from paicli.render import PaiCliApp, RichRenderer
 from paicli.runtime import DurableTaskManager
 from paicli.skill import SkillRegistry
 from paicli.snapshot import SnapshotService
@@ -72,10 +73,13 @@ HELP_LINES = [
     "/exit - 退出 PaiCLI",
     "/clear - 清空当前会话历史",
     "/context - 查看当前上下文状态",
-    "/memory - 查看长期记忆列表",
-    "/memory search <关键词> - 搜索当前项目长期记忆",
-    "/memory clear - 清空当前项目长期记忆",
+    "/memory - 查看记忆系统状态",
+    "/memory list - 查看长期记忆列表",
+    "/memory search <关键词> - 搜索当前项目可见长期记忆",
+    "/memory delete <id> - 删除单条长期记忆",
+    "/memory clear - 清空全部长期记忆",
     "/save <事实> - 保存项目级长期记忆",
+    "/save --global <事实> - 保存全局长期记忆",
     "/config - 查看当前配置",
     "/tools - 查看可用工具",
     "/model - 查看当前模型",
@@ -113,6 +117,7 @@ HELP_LINES = [
     "/index [path] - 索引代码库",
     "/search <查询> - 搜索本地代码索引",
     "/snapshot - 查看最近 Side-History 快照",
+    "/snapshot status - 查看 Side-Git 快照状态",
     "/snapshot clean - 清理当前项目快照",
     "/restore <snapshot-id-or-index> - 恢复到指定快照",
 ]
@@ -129,23 +134,6 @@ async def start_repl(cwd: str, config: PaiCliConfig) -> None:
         model=client.model_name,
         provider=client.provider_name,
     ).build()
-    tool_count = len(registry.list_names())
-    mcp_server_count = _count_mcp_servers(mcp_manager)
-    skill_count = len(SkillRegistry(cwd).list())
-    agents_file_count = _count_named_files(cwd, "AGENTS.md")
-    renderer = RichRenderer(context_window=client.max_context_window)
-    renderer.banner(
-        model=client.model_name,
-        provider=client.provider_name,
-        cwd=cwd,
-        tools=tool_count,
-        version=__version__,
-        api_key_configured=bool(config.llm.api_key),
-        mcp_servers=mcp_server_count,
-        skills=skill_count,
-        agents_files=agents_file_count,
-        hitl_mode=config.policy.hitl_mode,
-    )
     agent = Agent(
         llm_client=client,
         tool_registry=registry,
@@ -155,62 +143,20 @@ async def start_repl(cwd: str, config: PaiCliConfig) -> None:
         approval_callback=lambda request: _approval_prompt(request, console, config),
     )
 
-    history_path = Path.home() / ".paicli" / "history" / "prompt_history.txt"
-    history_path.parent.mkdir(parents=True, exist_ok=True)
-    session = PromptSession(
-        message=lambda: _prompt_message(
-            cwd=cwd,
-            model=client.model_name,
-            tools=tool_count,
-            agents_files=agents_file_count,
-            mcp_servers=mcp_server_count,
-            skills=skill_count,
-            stats=renderer.toolbar_status(),
-        ),
-        history=FileHistory(str(history_path)),
-        completer=WordCompleter(SLASH_COMMANDS, ignore_case=True),
-        placeholder=[("class:placeholder", "Type your message or @path/to/file")],
-        style=Style.from_dict(
-            {
-                "prompt": "bold #ffffff bg:#262626",
-                "placeholder": "#9a9a9a bg:#262626",
-                "prompt.dim": "#a3a3a3 bg:#000000",
-                "prompt.count.agents": "bold #22d3ee bg:#000000",
-                "prompt.count.mcp": "bold #c084fc bg:#000000",
-                "prompt.count.skills": "bold #facc15 bg:#000000",
-                "prompt.tools": "bold #22d3ee bg:#000000",
-                "toolbar.model": "noreverse bold #ffffff bg:#000000",
-                "toolbar.ctx.bar": "noreverse #22c55e bg:#000000",
-                "toolbar.ctx.value": "noreverse #ffffff bg:#000000",
-                "toolbar.cwd.value": "noreverse #c084fc bg:#000000",
-                "toolbar.gap": "noreverse #ffffff bg:#000000",
-            }
-        ),
+    # Launch Textual TUI app (same pattern as pico: PicoTuiApp(agent).run())
+    tui_app = PaiCliApp(
+        agent=agent,
+        config=config,
+        cwd=cwd,
+        registry=registry,
+        mcp_manager=mcp_manager,
+        console=console,
     )
+    tui_app._model = client.model_name
+    tui_app._context_window = client.max_context_window
+    tui_app._provider = client.provider_name
+    await tui_app.run_async()
 
-    while True:
-        try:
-            user_input = await session.prompt_async()
-        except (EOFError, KeyboardInterrupt):
-            console.print()
-            return
-        message = user_input.strip()
-        if not message:
-            continue
-        if message.startswith("/"):
-            should_exit = await _handle_slash(
-                message,
-                console,
-                cwd,
-                config,
-                agent,
-                registry,
-                mcp_manager,
-            )
-            if should_exit:
-                return
-            continue
-        await _run_agent(agent, renderer, message)
 
 
 async def _run_agent(agent: Agent, renderer: RichRenderer, message: str) -> None:
@@ -233,15 +179,69 @@ async def _run_plan_agent(
     message: str,
     review_input: PlanReviewInput | None = None,
 ) -> None:
-    async def run_task(task: PlanTask, completed: dict[str, str]) -> str:
-        context = _completed_task_context(completed)
-        prompt = (
-            f"Execute plan task `{task.id}`.\n\nTask description:\n{task.description}\n\n{context}"
-        )
-        result = await agent.run_complete(prompt)
-        return result.text
+    # Build project memory for the planner
+    project_memory = _extract_project_memory(agent, message)
 
-    planner = JsonPlanner(agent.llm_client)
+    async def run_task(
+        task: PlanTask,
+        completed: dict[str, str],
+        *,
+        event_sink: Any = None,
+    ) -> str:
+        """Execute a single plan task with streaming output."""
+        context = build_task_context(plan, task)
+        task_system = build_task_system_prompt(task)
+        prompt = (
+            f"Execute plan task `{task.id}`.\n\n"
+            f"Task description:\n{task.description}\n\n{context}"
+        )
+
+        # Use streaming agent.run() to forward events to renderer
+        text = ""
+        async for event in agent.run(prompt):
+            event_type = event.get("type")
+            if event_type == "text_delta":
+                text += str(event.get("text") or "")
+                if event_sink:
+                    event_sink({
+                        "type": "task_text_delta",
+                        "task_id": task.id,
+                        "text": event.get("text"),
+                    })
+            elif event_type == "thinking_delta":
+                if event_sink:
+                    event_sink({
+                        "type": "task_thinking_delta",
+                        "task_id": task.id,
+                        "thinking": event.get("thinking"),
+                    })
+            elif event_type == "tool_call":
+                if event_sink:
+                    event_sink({
+                        "type": "task_tool_call",
+                        "task_id": task.id,
+                        "name": event.get("name"),
+                        "input": event.get("input"),
+                    })
+            elif event_type == "tool_result":
+                if event_sink:
+                    event_sink({
+                        "type": "task_tool_result",
+                        "task_id": task.id,
+                        "name": event.get("name"),
+                        "result": event.get("result"),
+                        "is_error": event.get("is_error"),
+                    })
+            elif event_type == "error":
+                raise event["error"]
+        return text
+
+    plan: ExecutionPlan | None = None
+
+    def event_sink(event: dict[str, Any]) -> None:
+        renderer.handle(event)
+
+    planner = JsonPlanner(agent.llm_client, project_memory=project_memory)
     executor = PlanExecutor()
     renderer.set_context_window(agent.llm_client.max_context_window)
     renderer.start_run()
@@ -265,8 +265,46 @@ async def _run_plan_agent(
             planning_goal = f"{original_goal}\n补充要求：{decision.feedback}"
             continue
 
-        async for event in executor.execute(plan, run_task):
+        # Execute the plan with streaming event forwarding
+        failed_tasks: dict[str, str] = {}
+        async for event in executor.execute(plan, run_task, event_sink=event_sink):
             renderer.handle(event)
+            if event.get("type") == "plan_failed" and event.get("failed"):
+                failed_tasks = event["failed"]
+
+        # Replan logic: if failures and progress < 50%, offer to replan
+        if failed_tasks and plan and plan.progress_ratio < 0.5:
+            completed = {
+                t.id: t.result
+                for t in plan.tasks
+                if t.status == TaskStatus.COMPLETED and t.result
+            }
+            failure_reason = "; ".join(
+                f"{tid}: {err}" for tid, err in failed_tasks.items()
+            )
+            renderer.handle({
+                "type": "plan_replan_prompt",
+                "failure_reason": failure_reason,
+                "progress": f"{plan.progress_ratio:.0%}",
+            })
+            replan_plan = await planner.replan(
+                original_goal, failure_reason, completed,
+            )
+            renderer.handle({
+                "type": "plan_review_summary",
+                "summary": replan_plan.summary(),
+            })
+            renderer.handle({"type": "plan_review_instructions"})
+            replan_decision = await _review_plan(replan_plan, renderer, review_input)
+            if replan_decision.action != "cancel":
+                plan = replan_plan
+                async for event in executor.execute(
+                    plan, run_task, event_sink=event_sink,
+                ):
+                    renderer.handle(event)
+            else:
+                renderer.handle({"type": "plan_cancelled"})
+
         break
 
     renderer.newline()
@@ -354,7 +392,7 @@ async def _handle_slash(
         agent.clear_history()
         console.clear()
     elif command == "/context":
-        memories = MemoryManager(config.memory.long_term_db_path, scope=cwd).list(limit=5)
+        memories = MemoryManager(config.memory.long_term_path, project_path=cwd).list(limit=5)
         table = Table(title="PaiCLI Context")
         table.add_column("Field")
         table.add_column("Value")
@@ -368,11 +406,15 @@ async def _handle_slash(
     elif command == "/memory":
         await _memory_command(arg, console, cwd, config)
     elif command == "/save":
-        if not arg:
+        save_fact, save_scope = _parse_memory_save(arg)
+        if not save_fact:
             console.print("[red]Usage:[/red] /save <fact>")
         else:
-            memory_id = MemoryManager(config.memory.long_term_db_path, scope=cwd).save(arg)
-            console.print(f"Saved memory #{memory_id}")
+            memory_id = MemoryManager(config.memory.long_term_path, project_path=cwd).save(
+                save_fact,
+                scope=save_scope,
+            )
+            console.print(f"Saved memory {memory_id} ({save_scope})")
     elif command == "/config":
         console.print_json(json.dumps(config_to_public_dict(config), ensure_ascii=False))
     elif command == "/tools":
@@ -397,14 +439,18 @@ async def _handle_slash(
         if not arg:
             console.print("[red]Usage:[/red] /plan <task>")
         else:
-            await _run_plan_agent(agent, RichRenderer(), arg)
+            await _run_plan_agent(
+                agent,
+                _interactive_renderer(config, provider=agent.llm_client.provider_name),
+                arg,
+            )
     elif command == "/team":
         if not arg:
             console.print("[red]Usage:[/red] /team <task>")
         else:
             await _run_agent(
                 agent,
-                RichRenderer(),
+                _interactive_renderer(config, provider=agent.llm_client.provider_name),
                 "Act as planner, worker, and reviewer. "
                 "Execute this task and review the result:\n" + arg,
             )
@@ -432,17 +478,47 @@ async def _handle_slash(
 
 
 async def _memory_command(arg: str, console: Console, cwd: str, config: PaiCliConfig) -> None:
-    manager = MemoryManager(config.memory.long_term_db_path, scope=cwd)
+    manager = MemoryManager(config.memory.long_term_path, project_path=cwd)
     sub, _, rest = arg.partition(" ")
-    if sub == "clear":
+    if sub in {"", "status"}:
+        console.print(manager.status())
+        console.print(f"Current project: {manager.project_path}")
+        console.print("/memory list | /memory search <query> | /memory delete <id> | /memory clear")
+    elif sub == "list":
+        rows = manager.list(limit=50)
+        console.print(_format_memory_entries(rows) or "(no memories)")
+    elif sub == "clear":
         count = manager.clear()
         console.print(f"Cleared {count} memories.")
     elif sub == "search":
         rows = manager.search(rest)
-        console.print("\n".join(f"#{row.id} {row.content}" for row in rows) or "(no matches)")
+        console.print(_format_memory_entries(rows) or "(no matches)")
+    elif sub == "delete":
+        memory_id = rest.strip()
+        if not memory_id:
+            console.print("[red]Usage:[/red] /memory delete <id>")
+        elif manager.delete(memory_id):
+            console.print(f"Deleted memory {memory_id}.")
+        else:
+            console.print(f"Memory not found: {memory_id}")
     else:
-        rows = manager.list()
-        console.print("\n".join(f"#{row.id} {row.content}" for row in rows) or "(no memories)")
+        console.print("[red]Usage:[/red] /memory [list|search <query>|delete <id>|clear]")
+
+
+def _format_memory_entries(rows: list[Any]) -> str:
+    return "\n".join(
+        f"{row.id} [{row.scope}] {row.content}"
+        for row in rows
+    )
+
+
+def _parse_memory_save(raw: str) -> tuple[str, str]:
+    text = raw.strip()
+    if not text:
+        return "", "project"
+    if text.startswith("--global "):
+        return text[len("--global ") :].strip(), "global"
+    return text, "project"
 
 
 def _hitl_command(arg: str, console: Console, config: PaiCliConfig) -> None:
@@ -612,6 +688,9 @@ async def _mcp_command(
 
 def _snapshot_command(arg: str, console: Console, cwd: str) -> None:
     service = SnapshotService(cwd)
+    if arg == "status":
+        console.print(service.status())
+        return
     if arg == "clean":
         console.print(f"Cleaned {service.clean()} snapshots.")
         return
@@ -620,6 +699,20 @@ def _snapshot_command(arg: str, console: Console, cwd: str) -> None:
         f"{index}. {row.id} {row.phase} {row.created_at}" for index, row in enumerate(rows, 1)
     )
     console.print(output or "(no snapshots)")
+
+
+def _interactive_renderer(
+    config: PaiCliConfig,
+    *,
+    context_window: int | None = None,
+    provider: str = "",
+) -> RichRenderer:
+    renderer = RichRenderer(
+        live_markdown=config.render_mode == "inline",
+        context_window=context_window,
+    )
+    renderer.set_provider(provider)
+    return renderer
 
 
 def _approval_prompt(request: dict[str, Any], console: Console, config: PaiCliConfig) -> str:
@@ -696,19 +789,75 @@ def _bottom_toolbar(
     model: str,
     stats: dict[str, Any] | None = None,
 ) -> list[tuple[str, str]]:
+    from paicli.render.rich_renderer import format_tokens, format_elapsed, format_cost
+
     stats = stats or {}
     has_usage = bool(stats.get("has_usage"))
     context_ratio = float(stats.get("context_ratio") or 0)
     context_text = _format_toolbar_percent(context_ratio) if has_usage else "0%"
-    return [
+    context_window = int(stats.get("context_window") or 0)
+
+    segments: list[tuple[str, str]] = [
+        # Phase indicator
+        ("class:toolbar.phase", f" {_format_phase(stats.get('phase', 'idle'))} "),
+        ("class:toolbar.gap", " "),
+        # Model name
         ("class:toolbar.model", model),
-        ("class:toolbar.gap", "    "),
+        ("class:toolbar.gap", "  "),
+        # Context bar
+        ("class:toolbar.ctx.label", "ctx "),
         ("class:toolbar.ctx.bar", _format_toolbar_bar(context_ratio if has_usage else 0)),
         ("class:toolbar.gap", " "),
         ("class:toolbar.ctx.value", context_text),
-        ("class:toolbar.gap", "  "),
-        ("class:toolbar.cwd.value", _shorten_home(cwd)),
     ]
+
+    # Add (used/window) format like (8.7k/1.0M)
+    # input_tokens = last API call's prompt_tokens = actual context window usage
+    if context_window > 0:
+        used_tokens = int(stats.get("input_tokens") or 0)
+        segments.append(("class:toolbar.gap", " "))
+        segments.append(("class:toolbar.ctx.detail", f"({format_tokens(used_tokens)}/{format_tokens(context_window)})"))
+
+    # Token details (only when we have usage data)
+    if has_usage:
+        in_tok = int(stats.get("input_tokens") or 0)
+        out_tok = int(stats.get("output_tokens") or 0)
+        cache_tok = int(stats.get("cached_tokens") or 0)
+        segments.append(("class:toolbar.gap", "  "))
+        segments.append(("class:toolbar.token.label", "in "))
+        segments.append(("class:toolbar.token.value", format_tokens(in_tok)))
+        segments.append(("class:toolbar.gap", " "))
+        segments.append(("class:toolbar.token.label", "out "))
+        segments.append(("class:toolbar.token.value", format_tokens(out_tok)))
+        if cache_tok:
+            segments.append(("class:toolbar.gap", " "))
+            segments.append(("class:toolbar.token.label", "cache "))
+            segments.append(("class:toolbar.token.value", format_tokens(cache_tok)))
+
+    # Cost
+    cost_val = float(stats.get("cost") or 0)
+    cost_str = format_cost(cost_val)
+    if cost_str:
+        segments.append(("class:toolbar.gap", " \u00b7 "))
+        segments.append(("class:toolbar.cost", cost_str))
+
+    # Elapsed
+    elapsed_val = float(stats.get("elapsed") or 0)
+    if elapsed_val > 0:
+        segments.append(("class:toolbar.gap", " "))
+        segments.append(("class:toolbar.elapsed", format_elapsed(elapsed_val)))
+
+    # CWD
+    segments.append(("class:toolbar.gap", "  "))
+    segments.append(("class:toolbar.cwd.value", _shorten_home(cwd)))
+
+    return segments
+
+
+def _format_phase(phase: str) -> str:
+    """Format phase for toolbar display."""
+    mapping = {"idle": "IDLE", "running": "RUNNING", "plan": "PLAN"}
+    return mapping.get(phase, phase.upper())
 
 
 def _plural_label(count: int, singular: str) -> str:
@@ -745,10 +894,29 @@ def help_text() -> str:
     return "\n".join(HELP_LINES)
 
 
+def _extract_project_memory(agent: Agent, query: str) -> str:
+    """Extract project and relevant long-term memory text for planner context."""
+    parts: list[str] = []
+    cwd = getattr(agent, "cwd", ".")
+    project_memory = ProjectMemoryLoader.create_default(cwd).load_for_prompt()
+    if project_memory:
+        parts.append(project_memory)
+    config = getattr(agent, "config", None)
+    if config and config.features.memory and config.memory.long_term_enabled:
+        try:
+            manager = MemoryManager(config.memory.long_term_path, project_path=cwd)
+            long_term = manager.build_context_for_query(query, max_tokens=2000)
+            if long_term:
+                parts.append(long_term)
+        except Exception:
+            pass
+    return "\n\n".join(parts)[:8000]
+
+
 def _completed_task_context(completed: dict[str, str]) -> str:
     if not completed:
-        return "No previous plan tasks have completed yet."
-    lines = ["Completed dependency results:"]
+        return "无已完成的依赖任务。"
+    lines = ["已完成的依赖任务结果:"]
     for task_id, result in completed.items():
         preview = result if len(result) <= 4000 else result[:4000] + "\n... [truncated]"
         lines.append(f"\n[{task_id}]\n{preview}")

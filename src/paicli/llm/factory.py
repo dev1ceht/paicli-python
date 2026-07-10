@@ -6,10 +6,14 @@ from paicli.llm.openai_compatible import OpenAICompatibleClient
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 PROVIDER_BASE_URLS = {
+    "aliyun": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "bailian": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "dashscope": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "glm": "https://open.bigmodel.cn/api/paas/v4",
     "zhipu": "https://open.bigmodel.cn/api/paas/v4",
     "kimi": "https://api.moonshot.cn/v1",
     "moonshot": "https://api.moonshot.cn/v1",
+    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "step": "https://api.stepfun.com/v1",
 }
 

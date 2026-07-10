@@ -4,7 +4,14 @@ from paicli.plan.executor import (
     PlanAndExecuteAgent,
     PlanExecutor,
     PlanReviewDecision,
+    PlanStatus,
     PlanTask,
+    TaskStatus,
+    TaskType,
+    build_task_context,
+    build_task_system_prompt,
+    create_minimal_plan,
+    is_simple_goal,
     parse_plan_review_input,
 )
 
@@ -14,6 +21,13 @@ __all__ = [
     "PlanAndExecuteAgent",
     "PlanExecutor",
     "PlanReviewDecision",
+    "PlanStatus",
     "PlanTask",
+    "TaskStatus",
+    "TaskType",
+    "build_task_context",
+    "build_task_system_prompt",
+    "create_minimal_plan",
+    "is_simple_goal",
     "parse_plan_review_input",
 ]

@@ -21,29 +21,44 @@ class AuditLog:
         approver: str,
         cwd: str,
     ) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(UTC)
+        target = self._path_for_timestamp(timestamp)
+        target.parent.mkdir(parents=True, exist_ok=True)
         event = {
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": timestamp.isoformat(),
             "tool_name": tool_name,
             "input": self._redact(input_data),
             "outcome": outcome,
             "approver": approver,
             "cwd": cwd,
         }
-        with self.path.open("a", encoding="utf-8") as handle:
+        with target.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False) + "\n")
 
     def tail(self, limit: int = 20) -> list[dict[str, Any]]:
+        paths = self._log_files()
+        if not paths:
+            return []
+        events = []
+        for path in paths:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return events[-limit:]
+
+    def _path_for_timestamp(self, timestamp: datetime) -> Path:
+        if self.path.suffix == ".jsonl":
+            return self.path
+        return self.path / f"audit-{timestamp.date().isoformat()}.jsonl"
+
+    def _log_files(self) -> list[Path]:
+        if self.path.is_file():
+            return [self.path]
         if not self.path.exists():
             return []
-        lines = self.path.read_text(encoding="utf-8").splitlines()[-limit:]
-        events = []
-        for line in lines:
-            try:
-                events.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        return events
+        return sorted(self.path.glob("*.jsonl"))
 
     def _redact(self, value: Any) -> Any:
         if isinstance(value, dict):

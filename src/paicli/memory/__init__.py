@@ -1,3 +1,3 @@
-from paicli.memory.manager import MemoryEntry, MemoryManager
+from paicli.memory.manager import MemoryEntry, MemoryManager, estimate_tokens, tokenize
 
-__all__ = ["MemoryEntry", "MemoryManager"]
+__all__ = ["MemoryEntry", "MemoryManager", "estimate_tokens", "tokenize"]

@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from paicli.config import PaiCliConfig
-from paicli.memory import MemoryManager
+from paicli.prompt.project_memory import ProjectMemoryLoader
 from paicli.skill import SkillRegistry
 
 
@@ -49,22 +49,4 @@ class PromptAssembler:
         return "\n".join(parts)
 
     def _project_memory(self) -> str:
-        memory_files = [
-            Path(self.cwd) / "PAI.md",
-            Path(self.cwd) / ".paicli" / "PAI.md",
-            Path(self.cwd) / "PAI.local.md",
-            Path(self.cwd) / ".paicli" / "PAI.local.md",
-        ]
-        chunks = []
-        for path in memory_files:
-            if path.exists():
-                try:
-                    chunks.append(path.read_text(encoding="utf-8")[:4000])
-                except OSError:
-                    continue
-        if self.config.features.memory and self.config.memory.long_term_enabled:
-            manager = MemoryManager(self.config.memory.long_term_db_path, scope=self.cwd)
-            memories = manager.list(limit=8)
-            if memories:
-                chunks.append("\n".join(f"- {item.content}" for item in memories))
-        return "\n\n".join(chunks)[:8000]
+        return ProjectMemoryLoader.create_default(self.cwd).load_for_prompt()
