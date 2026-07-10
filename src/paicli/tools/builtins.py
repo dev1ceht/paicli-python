@@ -217,12 +217,25 @@ def get_builtin_tools() -> list[Tool]:
         ),
         Tool(
             name="save_memory",
-            description="Save a stable fact to long-term project memory.",
-            parameters=object_schema(
-                {"content": {"type": "string", "description": "Fact to remember"}},
-                ["content"],
+            description=(
+                "Save a stable fact to long-term memory only when the user explicitly "
+                "asks to remember it. Use scope=project by default, scope=global for "
+                "cross-project preferences."
             ),
-            required_keys=["content"],
+            parameters=object_schema(
+                {
+                    "fact": {"type": "string", "description": "Stable fact to remember"},
+                    "content": {
+                        "type": "string",
+                        "description": "Legacy alias for fact",
+                    },
+                    "scope": {
+                        "type": "string",
+                        "description": "project or global; defaults to project",
+                    },
+                },
+                [],
+            ),
             handler=save_memory,
             is_read_only=False,
             is_concurrency_safe=False,
@@ -434,9 +447,13 @@ async def browser_tabs(_payload: dict[str, Any], context: ToolContext) -> ToolRe
 async def save_memory(payload: dict[str, Any], context: ToolContext) -> ToolResult:
     if not context.config.features.memory or not context.config.memory.long_term_enabled:
         return ToolResult("Long-term memory is disabled.", is_error=True)
-    manager = MemoryManager(context.config.memory.long_term_db_path, scope=context.cwd)
-    memory_id = manager.save(str(payload["content"]))
-    return ToolResult(f"Saved memory #{memory_id}")
+    fact = str(payload.get("fact") or payload.get("content") or "").strip()
+    if not fact:
+        return ToolResult("保存长期记忆失败: fact 不能为空", is_error=True)
+    scope = "global" if str(payload.get("scope") or "").lower() == "global" else "project"
+    manager = MemoryManager(context.config.memory.long_term_path, project_path=context.cwd)
+    manager.save(fact, scope=scope)
+    return ToolResult(f"已保存到长期记忆({scope}): {fact}")
 
 
 async def load_skill(payload: dict[str, Any], context: ToolContext) -> ToolResult:

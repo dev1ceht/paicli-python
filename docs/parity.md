@@ -70,10 +70,15 @@ This file tracks the Python port against the existing Java and TypeScript implem
   - PathGuard
   - CommandGuard
   - HITL approval
-  - JSONL AuditLog
+  - daily JSONL AuditLog under `~/.paicli/audit/audit-YYYY-MM-DD.jsonl`
 - Memory:
-  - SQLite long-term memory
-  - project memory files `PAI.md`, `.paicli/PAI.md`, local variants
+  - Java-compatible JSON long-term memory at `~/.paicli/memory/long_term_memory.json`
+  - project and global memory scope
+  - `/memory list`, `/memory search`, `/memory delete`, `/memory clear`, `/save --global`
+  - Java-style retrieval: exact containment priority, keyword overlap, recency decay,
+    long-term weighting, and token-budget truncation
+  - project memory files `~/.paicli/PAI.md`, `PAI.md`, `.paicli/PAI.md`, local variants,
+    and safe `@file` imports
 - Skills:
   - user/project `.paicli/skills/*/SKILL.md`
   - `load_skill`
@@ -118,7 +123,9 @@ This file tracks the Python port against the existing Java and TypeScript implem
   - SQLite durable task queue
 - Snapshot:
   - `pre-turn` / `post-turn`
+  - Dulwich Side-Git snapshots under `~/.paicli/snapshots/`
   - `/snapshot`
+  - `/snapshot status`
   - `/restore`
   - `revert_turn`
 - Image input:

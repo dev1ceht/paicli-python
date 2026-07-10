@@ -43,6 +43,7 @@ class McpConfig:
 class MemoryConfig:
     max_conversation_history: int = 100
     long_term_enabled: bool = True
+    long_term_path: str = "~/.paicli/memory/long_term_memory.json"
     long_term_db_path: str = "~/.paicli/memory.db"
     token_budget_mode: str = "balanced"
     compression_threshold: float = 0.8
@@ -67,7 +68,7 @@ class PolicyConfig:
             "reboot",
         ]
     )
-    audit_log_path: str = "~/.paicli/audit.jsonl"
+    audit_log_path: str = "~/.paicli/audit"
 
 
 @dataclass(slots=True)
@@ -88,6 +89,31 @@ class FeatureConfig:
 
 
 @dataclass(slots=True)
+class ContextConfig:
+    """上下文治理配置"""
+    
+    # 阶段一：动态预算计算
+    utilization_rate: float = 0.50
+    output_reserve_tokens: int = 4096
+    min_budget_chars: int = 60_000
+    max_budget_chars: int = 800_000
+    
+    # 阶段三：压力感知裁剪
+    tier1_threshold: float = 0.60
+    tier2_threshold: float = 0.80
+    tier3_threshold: float = 0.95
+    
+    # 阶段四：结构化压缩
+    protected_turns: int = 2
+    
+    # 工具结果裁剪
+    tool_result_keep_recent: int = 5
+    tool_result_max_total_bytes: int = 204_800  # 200KB
+    tool_result_preview_chars: int = 200
+    tool_result_storage_dir: str = "~/.paicli/tool_results"
+
+
+@dataclass(slots=True)
 class PaiCliConfig:
     llm: LlmConfig = field(default_factory=LlmConfig)
     render_mode: str = "inline"
@@ -97,6 +123,7 @@ class PaiCliConfig:
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     prompt: PromptConfig = field(default_factory=PromptConfig)
     features: FeatureConfig = field(default_factory=FeatureConfig)
+    context: ContextConfig = field(default_factory=ContextConfig)
 
 
 def load_config(
@@ -125,8 +152,10 @@ def load_config(
 
     data = _apply_env(data, env_map)
     config = _dict_to_config(data)
+    config.memory.long_term_path = _expand_home(config.memory.long_term_path)
     config.memory.long_term_db_path = _expand_home(config.memory.long_term_db_path)
     config.policy.audit_log_path = _expand_home(config.policy.audit_log_path)
+    config.context.tool_result_storage_dir = _expand_home(config.context.tool_result_storage_dir)
     return config
 
 
@@ -200,26 +229,67 @@ def _apply_env(data: dict[str, Any], env: dict[str, str | None]) -> dict[str, An
     provider = str(llm.get("provider") or "").lower()
     if not llm.get("api_key"):
         provider_key_map = {
+            "aliyun": [
+                "PAICLI_DASHSCOPE_API_KEY",
+                "PAICLI_QWEN_API_KEY",
+                "DASHSCOPE_API_KEY",
+                "QWEN_API_KEY",
+            ],
+            "bailian": [
+                "PAICLI_DASHSCOPE_API_KEY",
+                "PAICLI_QWEN_API_KEY",
+                "DASHSCOPE_API_KEY",
+                "QWEN_API_KEY",
+            ],
             "deepseek": "DEEPSEEK_API_KEY",
+            "dashscope": [
+                "PAICLI_DASHSCOPE_API_KEY",
+                "PAICLI_QWEN_API_KEY",
+                "DASHSCOPE_API_KEY",
+                "QWEN_API_KEY",
+            ],
             "glm": "GLM_API_KEY",
             "zhipu": "GLM_API_KEY",
             "step": "STEP_API_KEY",
             "kimi": "KIMI_API_KEY",
             "moonshot": "KIMI_API_KEY",
+            "qwen": [
+                "PAICLI_QWEN_API_KEY",
+                "PAICLI_DASHSCOPE_API_KEY",
+                "QWEN_API_KEY",
+                "DASHSCOPE_API_KEY",
+            ],
             "freellmapi": "FREELLMAPI_API_KEY",
             "xfyun": "XFYUN_API_KEY",
             "agnes": "AGNES_API_KEY",
         }
-        provider_key = provider_key_map.get(provider)
-        if provider_key and env.get(provider_key):
-            llm["api_key"] = env[provider_key]
+        prefixed_provider_key = f"PAICLI_{provider.upper()}_API_KEY" if provider else ""
+        provider_keys = provider_key_map.get(provider)
+        if isinstance(provider_keys, str):
+            provider_keys = [provider_keys]
+        candidate_keys = []
+        if prefixed_provider_key:
+            candidate_keys.append(prefixed_provider_key)
+        candidate_keys.extend(provider_keys or [])
+        for provider_key in candidate_keys:
+            if env.get(provider_key):
+                llm["api_key"] = env[provider_key]
+                break
 
     provider_model_key = f"{provider.upper()}_MODEL" if provider else ""
     provider_base_url_key = f"{provider.upper()}_BASE_URL" if provider else ""
-    if provider_model_key and env.get(provider_model_key):
-        llm["model"] = env[provider_model_key]
-    if provider_base_url_key and env.get(provider_base_url_key):
-        llm["base_url"] = env[provider_base_url_key]
+    prefixed_provider_model_key = f"PAICLI_{provider_model_key}" if provider_model_key else ""
+    prefixed_provider_base_url_key = (
+        f"PAICLI_{provider_base_url_key}" if provider_base_url_key else ""
+    )
+    for model_key in [prefixed_provider_model_key, provider_model_key]:
+        if model_key and env.get(model_key):
+            llm["model"] = env[model_key]
+            break
+    for base_url_key in [prefixed_provider_base_url_key, provider_base_url_key]:
+        if base_url_key and env.get(base_url_key):
+            llm["base_url"] = env[base_url_key]
+            break
 
     render_mode = env.get("PAICLI_RENDER_MODE") or env.get("PAICLI_RENDERER")
     if render_mode in {"plain", "inline"}:
@@ -273,6 +343,7 @@ def _dict_to_config(data: dict[str, Any]) -> PaiCliConfig:
         policy=PolicyConfig(**data.get("policy", {})),
         prompt=PromptConfig(**data.get("prompt", {})),
         features=FeatureConfig(**data.get("features", {})),
+        context=ContextConfig(**data.get("context", {})),
     )
 
 

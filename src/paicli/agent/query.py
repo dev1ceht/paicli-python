@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from paicli.config import PaiCliConfig
+from paicli.context import ContextManager
 from paicli.image import parse_image_references
 from paicli.llm.base import LlmClient
 from paicli.tools.base import ToolContext
@@ -24,6 +25,7 @@ async def query(
     config: PaiCliConfig,
     approval_callback=None,
     max_turns: int = 20,
+    context_manager: ContextManager | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     messages = [
         *(history or []),
@@ -35,6 +37,7 @@ async def query(
 
     total_tokens = 0
     turn = 0
+    last_actual_usage: dict[str, int] | None = None
 
     while turn < max_turns:
         turn += 1
@@ -45,28 +48,64 @@ async def query(
         usage_output = 0
         tool_states: dict[int, dict[str, Any]] = {}
 
-        async for event in llm_client.chat(messages, tool_definitions, system_prompt=system_prompt):
-            event_type = event.get("type")
-            if event_type == "text_delta":
-                delta = str(event.get("text") or "")
-                text += delta
-                yield {"type": "text_delta", "text": delta}
-            elif event_type == "thinking_delta":
-                delta = str(event.get("thinking") or "")
-                thinking += delta
-                yield {"type": "thinking_delta", "thinking": delta}
-            elif event_type == "tool_call_delta":
-                _merge_tool_delta(tool_states, event["tool_call"])
-            elif event_type == "message_end":
-                stop_reason = str(event.get("stop_reason") or "end_turn")
-            elif event_type == "usage":
-                usage = event.get("usage") or {}
-                usage_input += int(usage.get("input_tokens") or 0)
-                usage_output += int(usage.get("output_tokens") or 0)
-                yield {"type": "usage", "usage": usage}
-            elif event_type == "error":
-                yield {"type": "error", "error": event["error"]}
-                return
+        if context_manager:
+            context_result = await context_manager.build_turn_context(
+                prefix=system_prompt,
+                messages=messages,
+                actual_usage=last_actual_usage,
+            )
+            final_system_prompt = context_result.system_prompt
+            messages = context_result.messages
+        else:
+            final_system_prompt = system_prompt
+
+        try:
+            async for event in llm_client.chat(
+                messages,
+                tool_definitions,
+                system_prompt=final_system_prompt,
+            ):
+                event_type = event.get("type")
+                if event_type == "text_delta":
+                    delta = str(event.get("text") or "")
+                    text += delta
+                    yield {"type": "text_delta", "text": delta}
+                elif event_type == "thinking_delta":
+                    delta = str(event.get("thinking") or "")
+                    thinking += delta
+                    yield {"type": "thinking_delta", "thinking": delta}
+                elif event_type == "tool_call_delta":
+                    _merge_tool_delta(tool_states, event["tool_call"])
+                elif event_type == "message_end":
+                    stop_reason = str(event.get("stop_reason") or "end_turn")
+                elif event_type == "usage":
+                    usage = event.get("usage") or {}
+                    usage_input += int(usage.get("input_tokens") or 0)
+                    usage_output += int(usage.get("output_tokens") or 0)
+                    last_actual_usage = usage
+                    yield {"type": "usage", "usage": usage}
+                elif event_type == "error":
+                    yield {"type": "error", "error": event["error"]}
+                    return
+        except Exception as exc:  # noqa: BLE001 - keep REPL alive on model/network failures
+            exc_type = type(exc).__name__
+            exc_detail = str(exc) or "(无详细信息)"
+            # 对 httpx 状态码错误提取响应体，便于排查
+            exc_body = ""
+            if hasattr(exc, "response") and hasattr(exc.response, "text"):
+                try:
+                    body_text = exc.response.text
+                    if body_text:
+                        exc_body = f"\n响应体: {body_text[:500]}"
+                except Exception:  # noqa: BLE001
+                    pass
+            yield {
+                "type": "error",
+                "error": RuntimeError(
+                    f"调用 LLM 失败 [{exc_type}]: {exc_detail}{exc_body}"
+                ),
+            }
+            return
 
         total_tokens += usage_input + usage_output
         tool_calls = _finalize_tool_calls(tool_states)

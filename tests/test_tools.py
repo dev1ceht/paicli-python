@@ -46,3 +46,29 @@ def test_tool_registry_unregisters_prefix():
     assert removed == 1
     assert registry.get("mcp__fake__echo") is None
     assert registry.get("mcp__other__echo") is not None
+
+
+def test_save_memory_tool_accepts_fact_scope_and_legacy_content(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config = load_config(project_root=tmp_path)
+    config.memory.long_term_path = str(tmp_path / "memory" / "long_term_memory.json")
+    registry = ToolRegistry()
+    registry.register_all(get_builtin_tools())
+    context = ToolContext(cwd=str(tmp_path), config=config)
+
+    async def run():
+        tool = registry.get("save_memory")
+        assert tool
+        first = await tool.execute(
+            {"fact": "Always answer in Chinese", "scope": "global"},
+            context,
+        )
+        second = await tool.execute({"content": "Project uses pytest"}, context)
+        return first, second
+
+    first, second = asyncio.run(run())
+
+    assert not first.is_error
+    assert "global" in first.content
+    assert not second.is_error
+    assert "project" in second.content

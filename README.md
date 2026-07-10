@@ -105,6 +105,8 @@ PAICLI_API_KEY=your_key_here
 - `GLM_API_KEY`
 - `STEP_API_KEY`
 - `KIMI_API_KEY`
+- `QWEN_API_KEY`
+- `DASHSCOPE_API_KEY`
 
 通过命令行临时覆盖 provider 和 model：
 
@@ -131,9 +133,12 @@ uv run paicli -p "解释这个仓库"
 /clear
 /context
 /memory
+/memory list
 /memory search <query>
+/memory delete <id>
 /memory clear
 /save <fact>
+/save --global <fact>
 /config
 /tools
 /hitl on|off|always|auto|never
@@ -174,6 +179,7 @@ PaiCLI 内置了一组 Agent 可以调用的本地工具和联网工具：
 - `revert_turn`
 
 写文件、执行命令、远程 MCP 写操作、恢复快照等危险动作，会经过 policy、HITL 和 audit 处理。
+审计日志默认按天写入 `~/.paicli/audit/audit-YYYY-MM-DD.jsonl`。
 
 ## 联网工具
 
@@ -316,12 +322,15 @@ PaiCLI 支持在 prompt 里引用图片：
 - `pre-turn`
 - `post-turn`
 
-快照保存在 `~/.paicli/snapshots/`，不会写入项目 `.git`。
+快照通过 Dulwich 维护独立 Side-Git 仓库，保存在
+`~/.paicli/snapshots/<parent_hash>/<project_hash>/.git`，不会写入项目 `.git`，
+也不会为每个 turn 复制一整份项目目录。
 
 REPL 中可以使用：
 
 ```text
 /snapshot
+/snapshot status
 /restore 1
 /snapshot clean
 ```
