@@ -1,0 +1,858 @@
+"""PaiCLI Textual TUI application.
+
+Replaces the Rich + prompt_toolkit REPL loop with a full Textual app that
+provides interactive, mouse-driven collapsible tool results.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from pathlib import Path
+from typing import Any
+
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.widgets import Footer
+
+from paicli.render.textual_widgets import (
+    ChatLog,
+    InputBar,
+    StatusBar,
+    format_cost,
+    format_elapsed,
+    format_tokens,
+)
+
+
+class PaiCliApp(App):
+    """Main PaiCLI Textual application."""
+
+    TITLE = "PaiCLI"
+    CSS = """
+    Screen {
+        layout: vertical;
+        background: #0d1117;
+    }
+    """
+
+    BINDINGS = [
+        Binding("ctrl+c", "quit", "Quit", show=True),
+        Binding("ctrl+l", "clear_screen", "Clear", show=True),
+    ]
+
+    def __init__(
+        self,
+        *,
+        agent: Any = None,
+        config: Any = None,
+        cwd: str = ".",
+        registry: Any = None,
+        mcp_manager: Any = None,
+        console: Any = None,
+        handle_slash: Any = None,
+        approval_callback: Any = None,
+    ) -> None:
+        super().__init__()
+        self.agent = agent
+        self.config = config
+        self.cwd = cwd
+        self.registry = registry
+        self.mcp_manager = mcp_manager
+        self._handle_slash = handle_slash
+        self._approval_callback = approval_callback
+        # State
+        self._text_buffer: list[str] = []
+        self._thinking_buffer: list[str] = []
+        self._input_tokens = 0
+        self._output_tokens = 0
+        self._cached_tokens = 0
+        self._last_input_tokens = 0
+        self._last_total_tokens = 0
+        self._last_context_ratio = 0.0
+        self._last_has_usage = False
+        self._run_start_time: float | None = None
+        self._last_elapsed: float = 0.0
+        self._last_cost: float = 0.0
+        self._provider = ""
+        self._phase = "idle"
+        self._context_window = 0
+        self._model = ""
+        self._running = False
+        self._task_buffers: dict[str, list[str]] = {}
+        self._task_thinking_buffers: dict[str, list[str]] = {}
+
+    def compose(self) -> ComposeResult:
+        yield ChatLog(id="chat-log")
+        yield StatusBar(id="status-bar")
+        yield InputBar(id="input-bar")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.title = f"PaiCLI — {self.cwd}"
+        self._update_status_bar()
+        self._show_banner()
+
+    def _show_banner(self) -> None:
+        """Display a startup banner in the chat log."""
+        from paicli.render._common import PI_LOGO as _PI_LOGO, shorten_home as _shorten_home
+
+        chat_log = self.query_one("#chat-log", ChatLog)
+        # Logo
+        logo_text = "\n".join(_PI_LOGO)
+        chat_log.add_info(logo_text, style="bold #a8ff60")
+        # Identity line
+        version = "0.1.0"
+        model = self._model or (self.config.llm.model if self.config else "unknown")
+        provider = self._provider or (self.config.llm.provider if self.config else "unknown")
+        chat_log.add_info(f"PaiCLI v{version}", style="bold white")
+        # Workspace info
+        tools_count = len(self.registry.list_names()) if self.registry else 0
+        hitl_mode = self.config.policy.hitl_mode if self.config else "auto"
+        if hitl_mode == "never":
+            hitl_text = "HITL YOLO (Ctrl+Y to enable)"
+        else:
+            hitl_text = f"HITL {hitl_mode.upper()} (Ctrl+Y for YOLO)"
+        chat_log.add_info(
+            f"Model: {model} ({provider})  ·  {hitl_text}  ·  Tools: {tools_count}",
+            style="dim",
+        )
+        # CWD
+        chat_log.add_info(_shorten_home(self.cwd), style="dim")
+        chat_log.add_info("/help for commands", style="purple")
+        chat_log.add_info("")  # spacer
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle user pressing Enter in the input bar."""
+        message = event.value.strip()
+        event.input.value = ""
+        if not message:
+            return
+        if self._running:
+            return
+        if message.startswith("/"):
+            self._handle_slash_command(message)
+        else:
+            self.run_agent_task(message)
+
+    def _handle_slash_command(self, raw: str) -> None:
+        """Handle slash commands in the TUI."""
+        chat_log = self.query_one("#chat-log", ChatLog)
+        command, _, rest = raw.partition(" ")
+        arg = rest.strip()
+
+        if command in {"/exit", "/quit"}:
+            self.exit()
+            return
+        if command == "/help":
+            chat_log.add_info(self._help_text())
+            return
+        if command == "/clear":
+            if self.agent:
+                self.agent.clear_history()
+            chat_log.clear_log()
+            return
+        if command == "/context":
+            self._show_context(chat_log)
+            return
+        if command == "/tools":
+            if self.registry:
+                chat_log.add_info("\n".join(self.registry.list_names()))
+            return
+        if command == "/config":
+            from paicli.config import config_to_public_dict
+            chat_log.add_info(json.dumps(config_to_public_dict(self.config), ensure_ascii=False, indent=2))
+            return
+        if command == "/model":
+            self._model_command(arg, chat_log)
+            return
+        if command == "/hitl":
+            self._hitl_command(arg, chat_log)
+            return
+        if command == "/memory":
+            self._memory_command(arg, chat_log)
+            return
+        if command == "/save":
+            self._save_command(arg, chat_log)
+            return
+        if command == "/plan":
+            if not arg:
+                chat_log.add_info("[red]Usage:[/red] /plan <task>")
+            else:
+                self.run_agent_task(
+                    f"[PLAN MODE] {arg}",
+                )
+            return
+        if command == "/team":
+            if not arg:
+                chat_log.add_info("[red]Usage:[/red] /team <task>")
+            else:
+                self.run_agent_task(
+                    "Act as planner, worker, and reviewer. "
+                    "Execute this task and review the result:\n" + arg,
+                )
+            return
+        if command == "/index":
+            from paicli.rag import CodeIndex
+            count = CodeIndex(self.cwd).rebuild(arg or ".")
+            chat_log.add_info(f"Indexed {count} code lines.")
+            return
+        if command == "/search":
+            from paicli.rag import CodeIndex
+            results = CodeIndex(self.cwd).search(arg, limit=20)
+            output = "\n".join(f"{r.path}:{r.line}: {r.snippet}" for r in results)
+            chat_log.add_info(output or "(no matches)")
+            return
+        if command == "/mcp":
+            self._mcp_command_info(arg, chat_log)
+            return
+        if command == "/browser":
+            self._browser_command_info(arg, chat_log)
+            return
+        if command == "/task":
+            self._task_command_info(arg, chat_log)
+            return
+        if command == "/snapshot":
+            self._snapshot_command_info(arg, chat_log)
+            return
+        if command == "/restore":
+            if not arg:
+                chat_log.add_info("[red]Usage:[/red] /restore <snapshot-id-or-index>")
+            else:
+                from paicli.snapshot import SnapshotService
+                record = SnapshotService(self.cwd).restore(arg)
+                chat_log.add_info(f"Restored {record.id}")
+            return
+        if command == "/policy":
+            from paicli.config import config_to_public_dict
+            chat_log.add_info(json.dumps(config_to_public_dict(self.config)["policy"], ensure_ascii=False, indent=2))
+            return
+        if command == "/audit":
+            limit = int(arg or "20") if (arg or "20").isdigit() else 20
+            from paicli.policy import AuditLog
+            chat_log.add_info(json.dumps(AuditLog(self.config.policy.audit_log_path).tail(limit), ensure_ascii=False, indent=2))
+            return
+        if command == "/skill":
+            self._skill_command_info(arg, chat_log)
+            return
+
+        chat_log.add_info(f"[red]Unknown command:[/red] {command}")
+
+    def run_agent_task(self, message: str) -> None:
+        """Launch the agent as a background task."""
+        self._running = True
+        self._phase = "running"
+        self._run_start_time = time.monotonic()
+        self._text_buffer.clear()
+        self._thinking_buffer.clear()
+        self._input_tokens = 0
+        self._output_tokens = 0
+        self._cached_tokens = 0
+        self._task_buffers.clear()
+        self._task_thinking_buffers.clear()
+        self._update_status_bar()
+
+        chat_log = self.query_one("#chat-log", ChatLog)
+        chat_log.add_user_message(message)
+
+        async def _run() -> None:
+            try:
+                if self.agent is None:
+                    chat_log.add_info("[red]Agent not initialized[/red]")
+                    return
+                async for event in self.agent.run(message):
+                    self.handle_event(event)
+                    if event.get("type") == "error":
+                        break
+            except Exception as exc:
+                chat_log.add_info(f"[bold red]Error:[/bold red] {exc}")
+            finally:
+                self._running = False
+                self._phase = "idle"
+                self._update_status_bar()
+
+        self.run_worker(_run(), exclusive=True)
+
+    def handle_event(self, event: dict[str, Any]) -> None:
+        """Process an agent event and update the UI."""
+        event_type = event.get("type")
+
+        if event_type == "text_delta":
+            text = str(event.get("text") or "")
+            self._text_buffer.append(text)
+        elif event_type == "thinking_delta":
+            thinking = str(event.get("thinking") or "")
+            self._thinking_buffer.append(thinking)
+        elif event_type == "usage":
+            self._record_usage(event.get("usage") or {})
+        elif event_type == "turn_complete":
+            self._flush_thinking()
+            stop_reason = str(event.get("stop_reason") or "end_turn")
+            if stop_reason != "tool_use" and self._text_buffer:
+                self._flush_text("Final Output")
+            elif stop_reason == "tool_use":
+                self._flush_text("Assistant Output")
+        elif event_type == "tool_call":
+            self._flush_thinking()
+            self._flush_text("Assistant Output")
+            self._handle_tool_call(event)
+        elif event_type == "tool_result":
+            self._flush_thinking()
+            self._flush_text("Assistant Output")
+            self._handle_tool_result(event)
+        elif event_type == "error":
+            self._flush_thinking()
+            self._flush_text("Assistant Output")
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_info(f"[bold red]Error:[/bold red] {event.get('error')}")
+        elif event_type == "done":
+            self._flush_thinking()
+            if self._text_buffer:
+                self._flush_text("Final Output")
+            self._record_run_summary(event)
+        # Plan events
+        elif event_type == "plan_generation_started":
+            self._flush_thinking()
+            self._flush_text("Assistant Output")
+            self._phase = "plan"
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_info(f"[bold cyan]\U0001f4cb \u4f7f\u7528 Plan-and-Execute \u6a21\u5f0f[/bold cyan]")
+            chat_log.add_info(f"  \u6b63\u5728\u89c4\u5212\u4efb\u52a1: {event.get('goal')}")
+        elif event_type == "plan_thinking":
+            self._flush_thinking()
+            self._flush_text("Assistant Output")
+            thinking = str(event.get("thinking") or "")
+            if thinking.strip():
+                chat_log = self.query_one("#chat-log", ChatLog)
+                chat_log.add_thinking(thinking)
+        elif event_type == "plan_review_summary":
+            self._flush_thinking()
+            self._flush_text("Assistant Output")
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_info(str(event.get("summary") or ""))
+        elif event_type == "plan_review_instructions":
+            self._flush_thinking()
+            self._flush_text("Assistant Output")
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_info(
+                "[dim]\u8ba1\u5212\u5df2\u751f\u6210\u3002[/dim]\n"
+                "  [bold]Enter[/bold]  \u6309\u5f53\u524d\u8ba1\u5212\u6267\u884c\n"
+                "  [bold]Ctrl+O[/bold] \u5c55\u5f00\u5b8c\u6574\u8ba1\u5212\n"
+                "  [bold]ESC[/bold]    \u6298\u53e0\u6216\u53d6\u6d88\u672c\u6b21\u8ba1\u5212\n"
+                "  [bold]I[/bold]      \u8f93\u5165\u8865\u5145\u8981\u6c42\u540e\u91cd\u65b0\u89c4\u5212"
+            )
+        elif event_type == "plan_cancelled":
+            self._flush_thinking()
+            self._flush_text("Assistant Output")
+            self._phase = "idle"
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_info("[yellow]\u23f9\ufe0f \u5df2\u53d6\u6d88\u672c\u6b21\u8ba1\u5212\u6267\u884c\u3002[/yellow]")
+        elif event_type == "plan_started":
+            self._flush_thinking()
+            self._flush_text("Assistant Output")
+            self._phase = "plan"
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_info("[bold green]\U0001f680 \u5f00\u59cb\u6267\u884c\u8ba1\u5212...[/bold green]")
+        elif event_type == "plan_completed":
+            self._phase = "idle"
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_info("[bold green]\n\u2705 \u8ba1\u5212\u6267\u884c\u5b8c\u6210\uff01[/bold green]")
+            results = event.get("results") or {}
+            if results:
+                chat_log.add_info(f"  [dim]\u5171\u5b8c\u6210 {len(results)} \u4e2a\u4efb\u52a1[/dim]")
+        elif event_type == "plan_failed":
+            self._phase = "idle"
+            detail = event.get("error") or event.get("failed")
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_info(f"[bold red]\u274c \u8ba1\u5212\u5931\u8d25:[/bold red] {detail}")
+        elif event_type == "plan_visualization":
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_info(str(event.get("visualization") or ""))
+        elif event_type == "plan_replan_prompt":
+            self._flush_thinking()
+            self._flush_text("Assistant Output")
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_info(
+                f"[yellow]\u26a0\ufe0f \u8ba1\u5212\u6267\u884c\u5931\u8d25 "
+                f"(\u8fdb\u5ea6: {event.get('progress', '?')})[/yellow]\n"
+                f"[dim]\u5931\u8d25\u539f\u56e0: {event.get('failure_reason', '?')}[/dim]\n"
+                f"[yellow]\u662f\u5426\u91cd\u65b0\u89c4\u5212\u5269\u4f59\u4efb\u52a1\uff1f[/yellow]"
+            )
+        # Task events
+        elif event_type == "task_started":
+            self._flush_thinking()
+            self._flush_text("Assistant Output")
+            task = event.get("task") or {}
+            task_id = task.get("id", "?")
+            task_type = task.get("type", "COMMAND")
+            self._task_buffers[task_id] = []
+            self._task_thinking_buffers[task_id] = []
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_info(
+                f"\u25b6\ufe0f [bold #60a5fa]\u6267\u884c\u4efb\u52a1:[/bold #60a5fa] "
+                f"{task_id} [dim][{task_type}][/dim]"
+            )
+        elif event_type == "task_completed":
+            task_id = event.get("task_id")
+            duration = event.get("duration")
+            duration_str = f" ({format_elapsed(duration)})" if duration else ""
+            self._flush_task_output(task_id)
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_info(f"\u2705 [green]\u5b8c\u6210[/green] {task_id}{duration_str}")
+        elif event_type == "task_failed":
+            task_id = event.get("task_id")
+            self._flush_task_output(task_id)
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_info(f"\u274c [red]\u4efb\u52a1\u5931\u8d25:[/red] {task_id} {event.get('error')}")
+        elif event_type == "task_skipped":
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_info(f"\u23ed\ufe0f [yellow]\u4efb\u52a1\u8df3\u8fc7:[/yellow] {event.get('task_id')}")
+        elif event_type == "task_text_delta":
+            task_id = event.get("task_id")
+            text = str(event.get("text") or "")
+            if task_id and task_id in self._task_buffers:
+                self._task_buffers[task_id].append(text)
+        elif event_type == "task_thinking_delta":
+            task_id = event.get("task_id")
+            thinking = str(event.get("thinking") or "")
+            if task_id and task_id in self._task_thinking_buffers:
+                self._task_thinking_buffers[task_id].append(thinking)
+        elif event_type == "task_tool_call":
+            task_id = event.get("task_id")
+            self._flush_task_thinking(task_id)
+            self._flush_task_markdown(task_id)
+            self._handle_tool_call(event, task_id=task_id)
+        elif event_type == "task_tool_result":
+            task_id = event.get("task_id")
+            self._flush_task_thinking(task_id)
+            self._flush_task_markdown(task_id)
+            self._handle_tool_result(event, task_id=task_id)
+        # Diff events
+        elif event_type == "diff":
+            self._flush_thinking()
+            self._flush_text("Assistant Output")
+            self._handle_diff(event)
+
+        self._update_status_bar()
+
+    # -- Internal helpers -------------------------------------------------
+
+    def _handle_tool_call(self, event: dict[str, Any], *, task_id: str | None = None) -> None:
+        name = str(event.get("name") or "unknown")
+        payload = event.get("input") or {}
+        chat_log = self.query_one("#chat-log", ChatLog)
+        chat_log.add_tool_call(name, payload, task_id=task_id)
+
+    def _handle_tool_result(self, event: dict[str, Any], *, task_id: str | None = None) -> None:
+        is_error = bool(event.get("is_error"))
+        name = str(event.get("name") or "unknown")
+        result = str(event.get("result") or "")
+        chat_log = self.query_one("#chat-log", ChatLog)
+        chat_log.finish_tool_card(name, result, is_error=is_error, task_id=task_id)
+
+    def _handle_diff(self, event: dict[str, Any]) -> None:
+        from paicli.render._common import diff_ops as _diff_ops
+
+        file_path = str(event.get("file_path") or "")
+        before = event.get("before")
+        after = event.get("after")
+        chat_log = self.query_one("#chat-log", ChatLog)
+        chat_log.add_info(f"\U0001f4dd {file_path}", style="bold cyan")
+        if before is None:
+            # New file: all additions
+            lines = (after or "").splitlines()
+            for line in lines:
+                chat_log.add_info(f"+ {line}", style="green")
+        elif after is None:
+            # Deleted file: all removals
+            lines = (before or "").splitlines()
+            for line in lines:
+                chat_log.add_info(f"- {line}", style="red")
+        elif before == after:
+            chat_log.add_info("  \u5185\u5bb9\u672a\u53d8", style="dim")
+        else:
+            # LCS diff with context lines
+            before_lines = before.splitlines()
+            after_lines = after.splitlines()
+            ops = _diff_ops(before_lines, after_lines)
+            for op, line in ops:
+                if op == "+":
+                    chat_log.add_info(f"+ {line}", style="green")
+                elif op == "-":
+                    chat_log.add_info(f"- {line}", style="red")
+                else:
+                    chat_log.add_info(f"  {line}", style="dim")
+
+    def _flush_text(self, title: str = "Assistant Output") -> None:
+        if not self._text_buffer:
+            return
+        text = "".join(self._text_buffer)
+        self._text_buffer.clear()
+        if text.strip():
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_assistant_text(text)
+
+    def _flush_thinking(self) -> None:
+        if not self._thinking_buffer:
+            return
+        text = "".join(self._thinking_buffer)
+        self._thinking_buffer.clear()
+        if text.strip():
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_thinking(text)
+
+    def _flush_task_markdown(self, task_id: str | None) -> None:
+        if not task_id or task_id not in self._task_buffers:
+            return
+        buf = self._task_buffers[task_id]
+        if not buf:
+            return
+        text = "".join(buf)
+        self._task_buffers[task_id] = []
+        if text.strip():
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_assistant_text(text)
+
+    def _flush_task_thinking(self, task_id: str | None) -> None:
+        if not task_id or task_id not in self._task_thinking_buffers:
+            return
+        buf = self._task_thinking_buffers[task_id]
+        if not buf:
+            return
+        text = "".join(buf)
+        self._task_thinking_buffers[task_id] = []
+        if text.strip():
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_thinking(text)
+
+    def _flush_task_output(self, task_id: str | None) -> None:
+        self._flush_task_thinking(task_id)
+        self._flush_task_markdown(task_id)
+
+    def _record_usage(self, usage: dict[str, Any]) -> None:
+        input_tokens = int(usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("output_tokens") or 0)
+        cached = int(usage.get("cached_tokens") or 0)
+        self._input_tokens += input_tokens
+        self._output_tokens += output_tokens
+        self._cached_tokens += cached
+        if input_tokens:
+            self._last_input_tokens = input_tokens
+
+    def _record_run_summary(self, event: dict[str, Any]) -> None:
+        # The "done" event from query.py has top-level keys:
+        #   {"type": "done", "total_tokens": ..., "total_turns": ...}
+        # There is NO nested "usage" sub-key.
+        total_tokens = int(
+            event.get("total_tokens") or self._input_tokens + self._output_tokens
+        )
+        has_usage = total_tokens > 0 or self._input_tokens > 0 or self._output_tokens > 0
+        context_ratio = (
+            self._last_input_tokens / self._context_window
+            if self._context_window > 0
+            else 0
+        )
+        self._last_total_tokens = total_tokens
+        self._last_context_ratio = context_ratio
+        self._last_has_usage = has_usage
+        if self._run_start_time:
+            self._last_elapsed = time.monotonic() - self._run_start_time
+            self._run_start_time = None
+        if self._provider:
+            from paicli.render._common import estimate_cost
+            self._last_cost = estimate_cost(
+                self._provider,
+                self._input_tokens,
+                self._output_tokens,
+            )
+
+    def _update_status_bar(self) -> None:
+        status_bar = self.query_one("#status-bar", StatusBar)
+        status_bar.model = self._model
+        status_bar.phase = self._phase
+
+        has_usage = self._last_has_usage
+        context_ratio = self._last_context_ratio
+        context_text = f"ctx {context_ratio:.0%}" if has_usage else "ctx 0%"
+        status_bar.context_text = context_text
+
+        token_detail = ""
+        if has_usage:
+            in_tok = self._last_input_tokens
+            out_tok = self._output_tokens
+            cached = self._cached_tokens
+            parts = [f"in:{format_tokens(in_tok)}", f"out:{format_tokens(out_tok)}"]
+            if cached:
+                parts.append(f"cached:{format_tokens(cached)}")
+            token_detail = " ".join(parts)
+            if self._context_window > 0:
+                token_detail += f" ({format_tokens(in_tok)}/{format_tokens(self._context_window)})"
+        status_bar.token_detail = token_detail
+
+        cost_text = format_cost(self._last_cost)
+        status_bar.cost_text = cost_text
+
+        elapsed = self._last_elapsed
+        if self._run_start_time and self._phase == "running":
+            elapsed = time.monotonic() - self._run_start_time
+        status_bar.elapsed_text = format_elapsed(elapsed) if elapsed else ""
+
+    def action_clear_screen(self) -> None:
+        chat_log = self.query_one("#chat-log", ChatLog)
+        chat_log.clear_log()
+
+    # -- Slash command helpers -------------------------------------------
+
+    def _help_text(self) -> str:
+        return "\n".join([
+            "可用命令：",
+            "/help - 查看命令帮助",
+            "/exit - 退出 PaiCLI",
+            "/clear - 清空当前会话历史",
+            "/context - 查看当前上下文状态",
+            "/memory - 查看记忆系统状态",
+            "/save <事实> - 保存项目级长期记忆",
+            "/config - 查看当前配置",
+            "/tools - 查看可用工具",
+            "/model - 查看当前模型",
+            "/model <模型名> - 切换当前模型名",
+            "/plan <任务内容> - 用计划模式执行",
+            "/team <任务内容> - 用多 Agent 协作执行",
+            "/hitl on|off - 切换 HITL 审批",
+            "/policy - 查看安全策略",
+            "/audit [N] - 查看审计记录",
+            "/index [path] - 索引代码库",
+            "/search <查询> - 搜索本地代码索引",
+            "/mcp - 查看 MCP server 状态",
+            "/skill - 查看可用 Skill",
+            "/browser - 查看浏览器会话状态",
+            "/task - 查看后台任务列表",
+            "/snapshot - 查看快照",
+            "/restore <id> - 恢复到指定快照",
+        ])
+
+    def _show_context(self, chat_log: ChatLog) -> None:
+        if not self.agent:
+            return
+        from paicli.memory import MemoryManager
+        memories = MemoryManager(
+            self.config.memory.long_term_path, project_path=self.cwd
+        ).list(limit=5)
+        lines = [
+            f"cwd: {self.cwd}",
+            f"model: {self.config.llm.model} ({self.config.llm.provider})",
+            f"context window: {self.agent.llm_client.max_context_window}",
+            f"render: {self.config.render_mode}",
+            f"memory: {len(memories)} recent entries",
+            f"tools: {len(self.registry.list_names()) if self.registry else 0}",
+        ]
+        chat_log.add_info("\n".join(lines))
+
+    def _model_command(self, arg: str, chat_log: ChatLog) -> None:
+        if not arg:
+            chat_log.add_info(f"{self.config.llm.model} ({self.config.llm.provider})")
+            return
+        parts = arg.split()
+        if len(parts) == 1:
+            self.config.llm.model = parts[0]
+        else:
+            self.config.llm.provider = parts[0]
+            self.config.llm.model = parts[1]
+        chat_log.add_info(
+            "Model updated for newly created clients. Restart REPL to rebuild the active client."
+        )
+
+    def _hitl_command(self, arg: str, chat_log: ChatLog) -> None:
+        if arg in {"always", "auto", "never"}:
+            self.config.policy.hitl_mode = arg
+        elif arg == "on":
+            self.config.policy.hitl_mode = "always"
+        elif arg == "off":
+            self.config.policy.hitl_mode = "never"
+        chat_log.add_info(f"HITL mode: {self.config.policy.hitl_mode}")
+
+    def _memory_command(self, arg: str, chat_log: ChatLog) -> None:
+        from paicli.memory import MemoryManager
+        manager = MemoryManager(self.config.memory.long_term_path, project_path=self.cwd)
+        sub, _, rest = arg.partition(" ")
+        if sub in {"", "status"}:
+            chat_log.add_info(manager.status())
+            chat_log.add_info(f"Current project: {manager.project_path}")
+        elif sub == "list":
+            rows = manager.list(limit=50)
+            output = "\n".join(f"{row.id} [{row.scope}] {row.content}" for row in rows)
+            chat_log.add_info(output or "(no memories)")
+        elif sub == "clear":
+            count = manager.clear()
+            chat_log.add_info(f"Cleared {count} memories.")
+        elif sub == "search":
+            rows = manager.search(rest)
+            output = "\n".join(f"{row.id} [{row.scope}] {row.content}" for row in rows)
+            chat_log.add_info(output or "(no matches)")
+        elif sub == "delete":
+            memory_id = rest.strip()
+            if not memory_id:
+                chat_log.add_info("[red]Usage:[/red] /memory delete <id>")
+            elif manager.delete(memory_id):
+                chat_log.add_info(f"Deleted memory {memory_id}.")
+            else:
+                chat_log.add_info(f"Memory not found: {memory_id}")
+
+    def _save_command(self, arg: str, chat_log: ChatLog) -> None:
+        from paicli.memory import MemoryManager
+        text = arg.strip()
+        scope = "project"
+        if text.startswith("--global "):
+            text = text[len("--global "):].strip()
+            scope = "global"
+        if not text:
+            chat_log.add_info("[red]Usage:[/red] /save <fact>")
+            return
+        memory_id = MemoryManager(
+            self.config.memory.long_term_path, project_path=self.cwd
+        ).save(text, scope=scope)
+        chat_log.add_info(f"Saved memory {memory_id} ({scope})")
+
+    def _mcp_command_info(self, arg: str, chat_log: ChatLog) -> None:
+        if self.mcp_manager is None:
+            chat_log.add_info("MCP is disabled.")
+            return
+        sub, _, rest = arg.partition(" ")
+        name = rest.strip()
+        if not sub:
+            lines = []
+            for row in self.mcp_manager.status():
+                status = row["status"]
+                if row["error"]:
+                    status = f"{status}: {row['error']}"
+                lines.append(f"{row['name']} [{row['type']}] {status} -> {row['target']}")
+            chat_log.add_info("\n".join(lines) or "(no MCP servers)")
+            return
+        if sub in {"enable", "disable", "restart", "logs"} and not name:
+            chat_log.add_info(f"[red]Usage:[/red] /mcp {sub} <name>")
+            return
+        if sub == "disable":
+            if self.mcp_manager.disable(name):
+                removed = self.registry.unregister_prefix(f"mcp__{name}__") if self.registry else 0
+                chat_log.add_info(f"Disabled {name}; removed {removed} tools.")
+            else:
+                chat_log.add_info(f'MCP server "{name}" not found.')
+            return
+        # Async subcommands: enable / restart — must run in the event loop,
+        # not via run_until_complete (which cannot nest inside the running loop).
+        if sub in {"enable", "restart"}:
+            self.run_worker(
+                self._mcp_async_command(sub, name, chat_log),
+                exclusive=False,
+            )
+            return
+        if sub == "logs":
+            chat_log.add_info(self.mcp_manager.logs(name))
+            return
+        chat_log.add_info(f"[red]Usage:[/red] /mcp [restart|logs|disable|enable] <name>")
+
+    async def _mcp_async_command(self, sub: str, name: str, chat_log: ChatLog) -> None:
+        """Handle async MCP subcommands (enable / restart) inside the event loop."""
+        try:
+            if sub == "enable":
+                if not self.mcp_manager.enable(name):
+                    chat_log.add_info(f'MCP server "{name}" not found.')
+                    return
+                if self.registry:
+                    self.registry.unregister_prefix(f"mcp__{name}__")
+                tools = await self.mcp_manager.load_server_tools(name)
+                if self.registry:
+                    self.registry.register_all(tools)
+                chat_log.add_info(f"Enabled {name}; loaded {len(tools)} tools.")
+            elif sub == "restart":
+                if self.registry:
+                    self.registry.unregister_prefix(f"mcp__{name}__")
+                count = await self.mcp_manager.restart(name)
+                tools = await self.mcp_manager.load_server_tools(name)
+                if self.registry:
+                    self.registry.register_all(tools)
+                chat_log.add_info(f"Restarted {name}; loaded {len(tools) or count} tools.")
+        except Exception as exc:
+            chat_log.add_info(f"[red]MCP error:[/red] {exc}")
+
+    def _browser_command_info(self, arg: str, chat_log: ChatLog) -> None:
+        from paicli.browser import BrowserSession
+        session = BrowserSession(self.cwd)
+        sub, _, rest = arg.partition(" ")
+        try:
+            if sub in {"", "status"}:
+                state = session.status()
+            elif sub == "connect":
+                port = int(rest.strip()) if rest.strip() else None
+                state = session.connect(port=port)
+            elif sub == "disconnect":
+                state = session.disconnect()
+            elif sub == "tabs":
+                tabs = session.tabs()
+                if not tabs:
+                    chat_log.add_info("No browser tabs available.")
+                    return
+                for tab in tabs:
+                    chat_log.add_info(f"{tab.id} {tab.title} {tab.url}")
+                return
+            else:
+                chat_log.add_info("[red]Usage:[/red] /browser status|connect [port]|disconnect|tabs")
+                return
+        except ValueError as exc:
+            chat_log.add_info(f"[red]Browser error:[/red] {exc}")
+            return
+        suffix = f" ({state.browser_url})" if state.browser_url else ""
+        chat_log.add_info(f"Browser mode: {state.mode}{suffix}")
+
+    def _task_command_info(self, arg: str, chat_log: ChatLog) -> None:
+        from paicli.runtime import DurableTaskManager
+        manager = DurableTaskManager(Path.home() / ".paicli" / "tasks" / "tasks.db")
+        sub, _, rest = arg.partition(" ")
+        if sub == "add" and rest:
+            task_id = manager.add(rest)
+            chat_log.add_info(f"Queued {task_id}")
+        elif sub == "cancel" and rest:
+            chat_log.add_info(f"Canceled: {manager.cancel(rest.strip())}")
+        elif sub == "log" and rest:
+            task = manager.get(rest.strip())
+            if not task:
+                chat_log.add_info("(task not found)")
+            else:
+                chat_log.add_info(task.result or task.error or f"Task {task.id} is {task.status}")
+        else:
+            rows = manager.list(limit=20)
+            output = "\n".join(
+                f"{task.id} {task.status} {task.prompt[:80]}" for task in rows
+            )
+            chat_log.add_info(output or "(no tasks)")
+
+    def _snapshot_command_info(self, arg: str, chat_log: ChatLog) -> None:
+        from paicli.snapshot import SnapshotService
+        service = SnapshotService(self.cwd)
+        if arg == "status":
+            chat_log.add_info(str(service.status()))
+            return
+        if arg == "clean":
+            chat_log.add_info(f"Cleaned {service.clean()} snapshots.")
+            return
+        rows = service.list(limit=20)
+        output = "\n".join(
+            f"{index}. {row.id} {row.phase} {row.created_at}" for index, row in enumerate(rows, 1)
+        )
+        chat_log.add_info(output or "(no snapshots)")
+
+    def _skill_command_info(self, arg: str, chat_log: ChatLog) -> None:
+        from paicli.skill import SkillRegistry
+        registry = SkillRegistry(self.cwd)
+        sub, _, rest = arg.partition(" ")
+        if sub == "show" and rest:
+            skill = registry.load(rest.strip())
+            if not skill:
+                chat_log.add_info(f'Skill "{rest.strip()}" not found.')
+                return
+            chat_log.add_info(skill.content[:12_000])
+            return
+        rows = registry.list()
+        output = "\n".join(f"{item.name}: {item.description}" for item in rows)
+        chat_log.add_info(output or "(no skills)")
