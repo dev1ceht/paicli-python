@@ -17,7 +17,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
-from textual.widgets import Collapsible, Footer, Header, Input, Label, Static
+from textual.widgets import Collapsible, Footer, Header, Label, Static, TextArea
 
 # Import shared utilities from _common (single source of truth)
 from paicli.render._common import (
@@ -127,6 +127,8 @@ class ChatLog(VerticalScroll):
     """Scrollable chat log that holds assistant messages, user messages,
     and tool cards."""
 
+    can_focus = False
+
     DEFAULT_CSS = """
     ChatLog {
         width: 100%;
@@ -138,6 +140,16 @@ class ChatLog(VerticalScroll):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._running_tool_cards: dict[str, ToolCard] = {}
+        self._renderable_entries: list[str] = []
+
+    def renderable_text(self) -> str:
+        """Return the visible chat text in a stable test-friendly form."""
+        return "\n".join(entry for entry in self._renderable_entries if entry)
+
+    def _record_renderable_text(self, text: str) -> None:
+        text = str(text or "")
+        if text:
+            self._renderable_entries.append(text)
 
     def add_tool_call(self, name: str, args: dict | None = None, *, task_id: str | None = None) -> ToolCard:
         card = ToolCard(
@@ -148,6 +160,7 @@ class ChatLog(VerticalScroll):
         self.mount(card)
         key = f"{task_id or ''}:{name}"
         self._running_tool_cards[key] = card
+        self._record_renderable_text(f"{name} {_format_args_summary(name, args)}".strip())
         self.call_after_refresh(self.scroll_end, animate=False)
         return card
 
@@ -174,6 +187,7 @@ class ChatLog(VerticalScroll):
             card.set_error(content)
         else:
             card.set_success(content)
+        self._record_renderable_text(content)
         self.call_after_refresh(self.scroll_end, animate=False)
 
     def add_user_message(self, text: str) -> None:
@@ -186,6 +200,7 @@ class ChatLog(VerticalScroll):
             )
         )
         self.mount(widget)
+        self._record_renderable_text(f"You: {text}")
         self.call_after_refresh(self.scroll_end, animate=False)
 
     def add_assistant_text(self, text: str) -> None:
@@ -199,6 +214,7 @@ class ChatLog(VerticalScroll):
             )
         )
         self.mount(widget)
+        self._record_renderable_text(text)
         self.call_after_refresh(self.scroll_end, animate=False)
 
     def add_thinking(self, text: str) -> None:
@@ -211,16 +227,19 @@ class ChatLog(VerticalScroll):
             )
         )
         self.mount(widget)
+        self._record_renderable_text(text)
         self.call_after_refresh(self.scroll_end, animate=False)
 
     def add_info(self, text: str, *, style: str = "dim") -> None:
         widget = Static(Text(text, style=style))
         self.mount(widget)
+        self._record_renderable_text(text)
         self.call_after_refresh(self.scroll_end, animate=False)
 
     def clear_log(self) -> None:
         self.remove_children()
         self._running_tool_cards.clear()
+        self._renderable_entries.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -288,8 +307,9 @@ class InputBar(Horizontal):
         background: #000000;
         padding: 0 1;
     }
-    InputBar Input {
+    InputBar TextArea {
         width: 1fr;
+        height: 1;
     }
     InputBar Label {
         width: auto;
@@ -303,7 +323,11 @@ class InputBar(Horizontal):
 
     def compose(self) -> ComposeResult:
         yield Label("* ")
-        yield Input(placeholder="Type your message or /command")
+        yield CommandInput(placeholder="Type your message or /command", compact=True)
+
+
+class CommandInput(TextArea):
+    """Minimal TextArea seam for the Task 1 command input."""
 
 
 # ---------------------------------------------------------------------------

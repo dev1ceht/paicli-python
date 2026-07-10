@@ -14,7 +14,7 @@ from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Footer
+from textual.widgets import Footer, TextArea
 
 from paicli.render.textual_widgets import (
     ChatLog,
@@ -30,6 +30,7 @@ class PaiCliApp(App):
     """Main PaiCLI Textual application."""
 
     TITLE = "PaiCLI"
+    AUTO_FOCUS = "#input-bar TextArea"
     CSS = """
     Screen {
         layout: vertical;
@@ -40,6 +41,7 @@ class PaiCliApp(App):
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit", show=True),
         Binding("ctrl+l", "clear_screen", "Clear", show=True),
+        Binding("enter", "submit_message", "Send", show=True, priority=True),
     ]
 
     def __init__(
@@ -93,6 +95,7 @@ class PaiCliApp(App):
         self.title = f"PaiCLI — {self.cwd}"
         self._update_status_bar()
         self._show_banner()
+        self.call_after_refresh(self.query_one(TextArea).focus)
 
     def _show_banner(self) -> None:
         """Display a startup banner in the chat log."""
@@ -123,10 +126,11 @@ class PaiCliApp(App):
         chat_log.add_info("/help for commands", style="purple")
         chat_log.add_info("")  # spacer
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Handle user pressing Enter in the input bar."""
-        message = event.value.strip()
-        event.input.value = ""
+    def action_submit_message(self) -> None:
+        """Handle user pressing Enter in the input area."""
+        input_area = self.query_one(TextArea)
+        message = input_area.text.strip()
+        input_area.clear()
         if not message:
             return
         if self._running:
@@ -281,6 +285,7 @@ class PaiCliApp(App):
         if event_type == "text_delta":
             text = str(event.get("text") or "")
             self._text_buffer.append(text)
+            self._flush_text("Assistant Output")
         elif event_type == "thinking_delta":
             thinking = str(event.get("thinking") or "")
             self._thinking_buffer.append(thinking)
