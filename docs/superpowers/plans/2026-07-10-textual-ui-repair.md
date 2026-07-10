@@ -47,7 +47,7 @@ import asyncio
 
 from paicli.config import PaiCliConfig
 from paicli.render import PaiCliApp
-from textual.widgets import Input
+from textual.widgets import TextArea
 
 
 class FakeAgent:
@@ -61,7 +61,7 @@ def test_mount_focuses_the_message_input():
         app = PaiCliApp(config=PaiCliConfig(), cwd=".")
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.pause()
-            assert isinstance(app.focused, Input)
+            assert isinstance(app.focused, TextArea)
             app.exit()
     asyncio.run(scenario())
 
@@ -91,7 +91,7 @@ def renderable_text(self) -> str:
     return "\n".join(str(widget.render()) for widget in self.children)
 
 # PaiCliApp.on_mount
-self.query_one(Input).focus()
+self.query_one(TextArea).focus()
 ```
 
 Do not implement the full streaming widget in this task; only add the stable `renderable_text()` seam and initial focus needed by the two tests.
@@ -118,7 +118,7 @@ git commit -m "test: cover textual startup focus"
 
 **Interfaces:**
 - Produces `PromptHistory(path: Path, limit: int = 200)` with `append(text: str)`, `previous() -> str`, `next() -> str`, and `reset_cursor()`.
-- Produces `CommandInput(Input)` which posts `MessageSubmitted(value: str)` on Enter and inserts `"\n"` on Shift+Enter.
+- Produces `CommandInput(TextArea)` which posts `MessageSubmitted(value: str)` on Enter and delegates Shift+Enter to TextArea's native newline action.
 
 - [ ] **Step 1: Write failing history and markup tests**
 
@@ -388,8 +388,8 @@ def action_interrupt(self) -> None:
         self._worker.cancel()
         self._running = False
         self._phase = "idle"
-        self.query_one(Input).disabled = False
-        self.query_one(Input).focus()
+        self.query_one(TextArea).disabled = False
+        self.query_one(TextArea).focus()
         return
     self.exit()
 ```

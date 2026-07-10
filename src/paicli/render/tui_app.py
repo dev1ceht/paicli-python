@@ -41,7 +41,8 @@ class PaiCliApp(App):
     """
 
     BINDINGS = [
-        Binding("ctrl+c", "quit", "Quit", show=True),
+        Binding("ctrl+c", "interrupt", "Interrupt", show=True),
+        Binding("ctrl+q", "quit", "Quit", show=True),
         Binding("ctrl+l", "clear_screen", "Clear", show=True),
     ]
 
@@ -83,6 +84,7 @@ class PaiCliApp(App):
         self._context_window = 0
         self._model = ""
         self._running = False
+        self._worker = None  # Reference to current agent worker for cancellation
         self._task_buffers: dict[str, list[str]] = {}
         self._task_thinking_buffers: dict[str, list[str]] = {}
 
@@ -273,9 +275,10 @@ class PaiCliApp(App):
             finally:
                 self._running = False
                 self._phase = "idle"
+                self._worker = None
                 self._update_status_bar()
 
-        self.run_worker(_run(), exclusive=True)
+        self._worker = self.run_worker(_run(), exclusive=True)
 
     def handle_event(self, event: dict[str, Any]) -> None:
         """Process an agent event and update the UI."""
@@ -612,6 +615,22 @@ class PaiCliApp(App):
         chat_log = self.query_one("#chat-log", ChatLog)
         chat_log.clear_log()
 
+    def action_interrupt(self) -> None:
+        """Cancel running agent if active; otherwise exit."""
+        if self._running and self._worker and self._worker.is_running:
+            self._worker.cancel()
+            self._running = False
+            self._phase = "idle"
+            self._worker = None
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_info("[yellow]⚠️ Agent interrupted[/yellow]")
+            input_area = self.query_one(TextArea)
+            input_area.disabled = False
+            input_area.focus()
+            self._update_status_bar()
+        else:
+            self.exit()
+
     # -- Slash command helpers -------------------------------------------
 
     def _help_text(self) -> str:
@@ -640,6 +659,15 @@ class PaiCliApp(App):
             "/task - 查看后台任务列表",
             "/snapshot - 查看快照",
             "/restore <id> - 恢复到指定快照",
+            "",
+            "快捷键：",
+            "  Enter       - 发送消息",
+            "  Shift+Enter - 换行",
+            "  Ctrl+C      - 中断运行中任务 / 空闲时退出",
+            "  Ctrl+Q      - 立即退出",
+            "  Ctrl+L      - 清屏",
+            "  Up/Down     - 历史浏览",
+            "  Tab         - 补全 slash 命令",
         ])
 
     def _show_context(self, chat_log: ChatLog) -> None:
@@ -928,9 +956,10 @@ class PaiCliApp(App):
             finally:
                 self._running = False
                 self._phase = "idle"
+                self._worker = None
                 self._update_status_bar()
 
-        self.run_worker(_run(), exclusive=True)
+        self._worker = self.run_worker(_run(), exclusive=True)
 
     async def _tui_review_input(
         self,
