@@ -16,6 +16,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Footer, TextArea
 
+from paicli.render.tui_events import UiEvent
 from paicli.render.textual_widgets import (
     ChatLog,
     InputBar,
@@ -279,20 +280,27 @@ class PaiCliApp(App):
 
     def handle_event(self, event: dict[str, Any]) -> None:
         """Process an agent event and update the UI."""
-        event_type = event.get("type")
+        ui_event = UiEvent.from_agent(event)
+        event_type = ui_event.kind
+        payload = ui_event.payload
 
         if event_type == "text_delta":
-            text = str(event.get("text") or "")
+            text = str(payload.get("text") or "")
             self._text_buffer.append(text)
-            self._flush_text("Assistant Output")
+            if text:
+                chat_log = self.query_one("#chat-log", ChatLog)
+                chat_log.begin_stream("assistant").append(text)
         elif event_type == "thinking_delta":
-            thinking = str(event.get("thinking") or "")
+            thinking = str(payload.get("thinking") or "")
             self._thinking_buffer.append(thinking)
+            if thinking:
+                chat_log = self.query_one("#chat-log", ChatLog)
+                chat_log.begin_stream("thinking").append(thinking)
         elif event_type == "usage":
-            self._record_usage(event.get("usage") or {})
+            self._record_usage(payload.get("usage") or {})
         elif event_type == "turn_complete":
             self._flush_thinking()
-            stop_reason = str(event.get("stop_reason") or "end_turn")
+            stop_reason = str(payload.get("stop_reason") or "end_turn")
             if stop_reason != "tool_use" and self._text_buffer:
                 self._flush_text("Final Output")
             elif stop_reason == "tool_use":
@@ -300,21 +308,21 @@ class PaiCliApp(App):
         elif event_type == "tool_call":
             self._flush_thinking()
             self._flush_text("Assistant Output")
-            self._handle_tool_call(event)
+            self._handle_tool_call(payload)
         elif event_type == "tool_result":
             self._flush_thinking()
             self._flush_text("Assistant Output")
-            self._handle_tool_result(event)
+            self._handle_tool_result(payload)
         elif event_type == "error":
             self._flush_thinking()
             self._flush_text("Assistant Output")
             chat_log = self.query_one("#chat-log", ChatLog)
-            chat_log.add_info(f"[bold red]Error:[/bold red] {event.get('error')}")
+            chat_log.add_info(f"[bold red]Error:[/bold red] {payload.get('error')}")
         elif event_type == "done":
             self._flush_thinking()
             if self._text_buffer:
                 self._flush_text("Final Output")
-            self._record_run_summary(event)
+            self._record_run_summary(payload)
         # Plan events
         elif event_type == "plan_generation_started":
             self._flush_thinking()
@@ -322,11 +330,11 @@ class PaiCliApp(App):
             self._phase = "plan"
             chat_log = self.query_one("#chat-log", ChatLog)
             chat_log.add_info(f"[bold cyan]\U0001f4cb \u4f7f\u7528 Plan-and-Execute \u6a21\u5f0f[/bold cyan]")
-            chat_log.add_info(f"  \u6b63\u5728\u89c4\u5212\u4efb\u52a1: {event.get('goal')}")
+            chat_log.add_info(f"  \u6b63\u5728\u89c4\u5212\u4efb\u52a1: {payload.get('goal')}")
         elif event_type == "plan_thinking":
             self._flush_thinking()
             self._flush_text("Assistant Output")
-            thinking = str(event.get("thinking") or "")
+            thinking = str(payload.get("thinking") or "")
             if thinking.strip():
                 chat_log = self.query_one("#chat-log", ChatLog)
                 chat_log.add_thinking(thinking)
@@ -334,7 +342,7 @@ class PaiCliApp(App):
             self._flush_thinking()
             self._flush_text("Assistant Output")
             chat_log = self.query_one("#chat-log", ChatLog)
-            chat_log.add_info(str(event.get("summary") or ""))
+            chat_log.add_info(str(payload.get("summary") or ""))
         elif event_type == "plan_review_instructions":
             self._flush_thinking()
             self._flush_text("Assistant Output")
@@ -362,33 +370,33 @@ class PaiCliApp(App):
             self._phase = "idle"
             chat_log = self.query_one("#chat-log", ChatLog)
             chat_log.add_info("[bold green]\n\u2705 \u8ba1\u5212\u6267\u884c\u5b8c\u6210\uff01[/bold green]")
-            results = event.get("results") or {}
+            results = payload.get("results") or {}
             if results:
                 chat_log.add_info(f"  [dim]\u5171\u5b8c\u6210 {len(results)} \u4e2a\u4efb\u52a1[/dim]")
         elif event_type == "plan_failed":
             self._phase = "idle"
-            detail = event.get("error") or event.get("failed")
+            detail = payload.get("error") or payload.get("failed")
             chat_log = self.query_one("#chat-log", ChatLog)
             chat_log.add_info(f"[bold red]\u274c \u8ba1\u5212\u5931\u8d25:[/bold red] {detail}")
         elif event_type == "plan_visualization":
             chat_log = self.query_one("#chat-log", ChatLog)
-            chat_log.add_info(str(event.get("visualization") or ""))
+            chat_log.add_info(str(payload.get("visualization") or ""))
         elif event_type == "plan_replan_prompt":
             self._flush_thinking()
             self._flush_text("Assistant Output")
             chat_log = self.query_one("#chat-log", ChatLog)
             chat_log.add_info(
                 f"[yellow]\u26a0\ufe0f \u8ba1\u5212\u6267\u884c\u5931\u8d25 "
-                f"(\u8fdb\u5ea6: {event.get('progress', '?')})[/yellow]\n"
-                f"[dim]\u5931\u8d25\u539f\u56e0: {event.get('failure_reason', '?')}[/dim]\n"
+                f"(\u8fdb\u5ea6: {payload.get('progress', '?')})[/yellow]\n"
+                f"[dim]\u5931\u8d25\u539f\u56e0: {payload.get('failure_reason', '?')}[/dim]\n"
                 f"[yellow]\u662f\u5426\u91cd\u65b0\u89c4\u5212\u5269\u4f59\u4efb\u52a1\uff1f[/yellow]"
             )
         # Task events
         elif event_type == "task_started":
             self._flush_thinking()
             self._flush_text("Assistant Output")
-            task = event.get("task") or {}
-            task_id = task.get("id", "?")
+            task = payload.get("task") or {}
+            task_id = ui_event.task_id or "?"
             task_type = task.get("type", "COMMAND")
             self._task_buffers[task_id] = []
             self._task_thinking_buffers[task_id] = []
@@ -398,45 +406,51 @@ class PaiCliApp(App):
                 f"{task_id} [dim][{task_type}][/dim]"
             )
         elif event_type == "task_completed":
-            task_id = event.get("task_id")
-            duration = event.get("duration")
+            task_id = ui_event.task_id
+            duration = payload.get("duration")
             duration_str = f" ({format_elapsed(duration)})" if duration else ""
             self._flush_task_output(task_id)
             chat_log = self.query_one("#chat-log", ChatLog)
             chat_log.add_info(f"\u2705 [green]\u5b8c\u6210[/green] {task_id}{duration_str}")
         elif event_type == "task_failed":
-            task_id = event.get("task_id")
+            task_id = ui_event.task_id
             self._flush_task_output(task_id)
             chat_log = self.query_one("#chat-log", ChatLog)
-            chat_log.add_info(f"\u274c [red]\u4efb\u52a1\u5931\u8d25:[/red] {task_id} {event.get('error')}")
+            chat_log.add_info(f"\u274c [red]\u4efb\u52a1\u5931\u8d25:[/red] {task_id} {payload.get('error')}")
         elif event_type == "task_skipped":
             chat_log = self.query_one("#chat-log", ChatLog)
-            chat_log.add_info(f"\u23ed\ufe0f [yellow]\u4efb\u52a1\u8df3\u8fc7:[/yellow] {event.get('task_id')}")
+            chat_log.add_info(f"\u23ed\ufe0f [yellow]\u4efb\u52a1\u8df3\u8fc7:[/yellow] {ui_event.task_id}")
         elif event_type == "task_text_delta":
-            task_id = event.get("task_id")
-            text = str(event.get("text") or "")
+            task_id = ui_event.task_id
+            text = str(payload.get("text") or "")
             if task_id and task_id in self._task_buffers:
                 self._task_buffers[task_id].append(text)
+                if text:
+                    chat_log = self.query_one("#chat-log", ChatLog)
+                    chat_log.begin_stream("assistant", task_id=task_id).append(text)
         elif event_type == "task_thinking_delta":
-            task_id = event.get("task_id")
-            thinking = str(event.get("thinking") or "")
+            task_id = ui_event.task_id
+            thinking = str(payload.get("thinking") or "")
             if task_id and task_id in self._task_thinking_buffers:
                 self._task_thinking_buffers[task_id].append(thinking)
+                if thinking:
+                    chat_log = self.query_one("#chat-log", ChatLog)
+                    chat_log.begin_stream("thinking", task_id=task_id).append(thinking)
         elif event_type == "task_tool_call":
-            task_id = event.get("task_id")
+            task_id = ui_event.task_id
             self._flush_task_thinking(task_id)
             self._flush_task_markdown(task_id)
-            self._handle_tool_call(event, task_id=task_id)
+            self._handle_tool_call(payload, task_id=task_id)
         elif event_type == "task_tool_result":
-            task_id = event.get("task_id")
+            task_id = ui_event.task_id
             self._flush_task_thinking(task_id)
             self._flush_task_markdown(task_id)
-            self._handle_tool_result(event, task_id=task_id)
+            self._handle_tool_result(payload, task_id=task_id)
         # Diff events
         elif event_type == "diff":
             self._flush_thinking()
             self._flush_text("Assistant Output")
-            self._handle_diff(event)
+            self._handle_diff(payload)
 
         self._update_status_bar()
 
@@ -489,22 +503,19 @@ class PaiCliApp(App):
                     chat_log.add_info(f"  {line}", style="dim")
 
     def _flush_text(self, title: str = "Assistant Output") -> None:
+        del title
         if not self._text_buffer:
             return
-        text = "".join(self._text_buffer)
         self._text_buffer.clear()
-        if text.strip():
-            chat_log = self.query_one("#chat-log", ChatLog)
-            chat_log.add_assistant_text(text)
+        chat_log = self.query_one("#chat-log", ChatLog)
+        chat_log.finish_stream("assistant")
 
     def _flush_thinking(self) -> None:
         if not self._thinking_buffer:
             return
-        text = "".join(self._thinking_buffer)
         self._thinking_buffer.clear()
-        if text.strip():
-            chat_log = self.query_one("#chat-log", ChatLog)
-            chat_log.add_thinking(text)
+        chat_log = self.query_one("#chat-log", ChatLog)
+        chat_log.finish_stream("thinking")
 
     def _flush_task_markdown(self, task_id: str | None) -> None:
         if not task_id or task_id not in self._task_buffers:
@@ -512,11 +523,9 @@ class PaiCliApp(App):
         buf = self._task_buffers[task_id]
         if not buf:
             return
-        text = "".join(buf)
         self._task_buffers[task_id] = []
-        if text.strip():
-            chat_log = self.query_one("#chat-log", ChatLog)
-            chat_log.add_assistant_text(text)
+        chat_log = self.query_one("#chat-log", ChatLog)
+        chat_log.finish_stream("assistant", task_id=task_id)
 
     def _flush_task_thinking(self, task_id: str | None) -> None:
         if not task_id or task_id not in self._task_thinking_buffers:
@@ -524,11 +533,9 @@ class PaiCliApp(App):
         buf = self._task_thinking_buffers[task_id]
         if not buf:
             return
-        text = "".join(buf)
         self._task_thinking_buffers[task_id] = []
-        if text.strip():
-            chat_log = self.query_one("#chat-log", ChatLog)
-            chat_log.add_thinking(text)
+        chat_log = self.query_one("#chat-log", ChatLog)
+        chat_log.finish_stream("thinking", task_id=task_id)
 
     def _flush_task_output(self, task_id: str | None) -> None:
         self._flush_task_thinking(task_id)

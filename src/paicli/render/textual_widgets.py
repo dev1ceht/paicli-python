@@ -6,38 +6,94 @@ that replace the Rich-based rendering with interactive Textual UI.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from dataclasses import dataclass, field
 from typing import Any
 
 from rich.errors import MarkupError
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.table import Table
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
 from textual.message import Message
 from textual.reactive import reactive
-from textual.widgets import Collapsible, Footer, Header, Label, Static, TextArea
+from textual.widgets import Collapsible, Label, Static, TextArea
 
 # Import shared utilities from _common (single source of truth)
 from paicli.render._common import (
     TOOL_LABELS as _TOOL_LABELS,
     format_cost,
     format_elapsed,
-    format_payload as _format_payload,
     format_tokens,
-    tool_label as _tool_label,
 )
 from paicli.render.history import PromptHistory
 
 
-def _clip(text: str, limit: int = 1200) -> str:
-    text = str(text or "")
-    return text if len(text) <= limit else text[: limit - 3] + "..."
+class MessageBlock(Static):
+    """Mounted message block with test-visible content."""
+
+    def __init__(self, role: str, text: str = "", *, task_id: str | None = None) -> None:
+        super().__init__()
+        self.role = role
+        self.task_id = task_id
+        self._content = str(text or "")
+        self.update(self._renderable())
+
+    @property
+    def plain_text(self) -> str:
+        return self._content
+
+    def append(self, text: str) -> None:
+        self._content += str(text or "")
+        self.update(self._renderable())
+
+    def finish(self, collapsed: bool = False) -> None:
+        del collapsed
+        self.update(self._renderable())
+
+    def _title(self) -> Text:
+        prefix = f"[{self.task_id}] " if self.task_id else ""
+        if self.role == "user":
+            return Text(f"{prefix}You", style="bold #60a5fa")
+        if self.role == "thinking":
+            return Text(f"{prefix}Thinking", style="bold #c084fc")
+        return Text(f"{prefix}Assistant Output", style="bold #a8ff60")
+
+    def _body(self) -> Text | Markdown:
+        if self.role == "assistant":
+            return Markdown(self._content)
+        if self.role == "user":
+            return Text(self._content, style="bold #ffffff")
+        return Text(self._content, style="dim")
+
+    def _border_style(self) -> str:
+        if self.role == "user":
+            return "#60a5fa"
+        if self.role == "thinking":
+            return "#6d28d9"
+        return "#3f3f46"
+
+    def _renderable(self) -> Panel:
+        return Panel(
+            self._body(),
+            title=self._title(),
+            border_style=self._border_style(),
+            expand=True,
+        )
+
+
+class InfoBlock(Static):
+    """Simple info widget that keeps plain text aligned with rendered output."""
+
+    def __init__(self, text: str, *, style: str = "dim") -> None:
+        super().__init__()
+        self._renderable = _rich_markup_text(text, style=style)
+        self.update(self._renderable)
+
+    @property
+    def plain_text(self) -> str:
+        return self._renderable.plain
 
 
 # ---------------------------------------------------------------------------
@@ -63,10 +119,13 @@ class ToolCard(Static):
         border: tall #60d8ff;
     }
     ToolCard .tool-output {
-        max-height: 14;
         color: #60d8ff;
         padding: 0 1;
         overflow-x: hidden;
+    }
+    ToolCard .tool-output-scroll {
+        max-height: 14;
+        overflow-y: auto;
     }
     """
 
@@ -83,6 +142,8 @@ class ToolCard(Static):
         self.tool_name = tool_name
         self.args_summary = args_summary[:120]
         self.task_id = task_id
+        self._content = ""
+        self._collapsed = False
         self._collapsible: Collapsible | None = None
         self._output_widget: Static | None = None
 
@@ -96,31 +157,53 @@ class ToolCard(Static):
     def compose(self) -> ComposeResult:
         self._output_widget = Static("", classes="tool-output")
         self._collapsible = Collapsible(
-            self._output_widget,
+            VerticalScroll(self._output_widget, classes="tool-output-scroll"),
             title=self._label(),
-            collapsed=False,
+            collapsed=self._collapsed,
         )
+        self._sync_state()
         yield self._collapsible
+
+    @property
+    def is_expanded(self) -> bool:
+        return not self._collapsed
+
+    @property
+    def output_text(self) -> str:
+        return self._content
+
+    @property
+    def plain_text(self) -> str:
+        parts = [self._label()]
+        if self._content:
+            parts.append(self._content)
+        return "\n".join(parts)
+
+    def _set_content(self, content: str) -> None:
+        self._content = str(content or "")
+        self._sync_state()
+
+    def _sync_state(self) -> None:
+        if self._output_widget:
+            self._output_widget.update(Text(self._content))
+        if self._collapsible:
+            self._collapsible.title = self._label()
+            self._collapsible.collapsed = self._collapsed
 
     def set_running(self) -> None:
         self.status = "running"
-        if self._collapsible:
-            self._collapsible.title = self._label()
-            self._collapsible.collapsed = False
+        self._collapsed = False
+        self._sync_state()
 
     def set_success(self, content: str) -> None:
         self.status = "success"
-        if self._collapsible and self._output_widget:
-            self._output_widget.update(_clip(content))
-            self._collapsible.title = self._label()
-            self._collapsible.collapsed = True
+        self._collapsed = True
+        self._set_content(content)
 
     def set_error(self, content: str) -> None:
         self.status = "error"
-        if self._collapsible and self._output_widget:
-            self._output_widget.update(_clip(content))
-            self._collapsible.title = self._label()
-            self._collapsible.collapsed = False
+        self._collapsed = False
+        self._set_content(content)
 
 
 # ---------------------------------------------------------------------------
@@ -148,16 +231,43 @@ class ChatLog(VerticalScroll):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._running_tool_cards: dict[str, ToolCard] = {}
-        self._renderable_entries: list[str] = []
+        self._active_streams: dict[str, MessageBlock] = {}
 
     def renderable_text(self) -> str:
         """Return the visible chat text in a stable test-friendly form."""
-        return "\n".join(entry for entry in self._renderable_entries if entry)
+        entries: list[str] = []
+        for child in self.children:
+            text = getattr(child, "plain_text", "")
+            if text:
+                entries.append(str(text))
+        return "\n".join(entries)
 
-    def _record_renderable_text(self, text: str) -> None:
-        text = str(text or "")
-        if text:
-            self._renderable_entries.append(text)
+    def _stream_key(self, role: str, task_id: str | None = None) -> str:
+        return f"{task_id or 'root'}:{role}"
+
+    def begin_stream(self, role: str, *, task_id: str | None = None) -> MessageBlock:
+        key = self._stream_key(role, task_id=task_id)
+        stream = self._active_streams.get(key)
+        if stream is None:
+            stream = MessageBlock(role, task_id=task_id)
+            self.mount(stream)
+            self._active_streams[key] = stream
+        self.call_after_refresh(self.scroll_end, animate=False)
+        return stream
+
+    def finish_stream(
+        self,
+        role: str,
+        *,
+        task_id: str | None = None,
+        collapsed: bool = False,
+    ) -> None:
+        key = self._stream_key(role, task_id=task_id)
+        stream = self._active_streams.pop(key, None)
+        if stream is None:
+            return
+        stream.finish(collapsed=collapsed)
+        self.call_after_refresh(self.scroll_end, animate=False)
 
     def add_tool_call(self, name: str, args: dict | None = None, *, task_id: str | None = None) -> ToolCard:
         card = ToolCard(
@@ -168,7 +278,6 @@ class ChatLog(VerticalScroll):
         self.mount(card)
         key = f"{task_id or ''}:{name}"
         self._running_tool_cards[key] = card
-        self._record_renderable_text(f"{name} {_format_args_summary(name, args)}".strip())
         self.call_after_refresh(self.scroll_end, animate=False)
         return card
 
@@ -195,60 +304,32 @@ class ChatLog(VerticalScroll):
             card.set_error(content)
         else:
             card.set_success(content)
-        self._record_renderable_text(content)
         self.call_after_refresh(self.scroll_end, animate=False)
 
     def add_user_message(self, text: str) -> None:
-        widget = Static(
-            Panel(
-                Text(text, style="bold #ffffff"),
-                title=Text("\U0001f464 You", style="bold #60a5fa"),
-                border_style="#60a5fa",
-                expand=True,
-            )
-        )
+        widget = MessageBlock("user", text)
         self.mount(widget)
-        self._record_renderable_text(f"You: {text}")
         self.call_after_refresh(self.scroll_end, animate=False)
 
     def add_assistant_text(self, text: str) -> None:
-        """Append streaming text to the current assistant message block."""
-        widget = Static(
-            Panel(
-                Markdown(text),
-                title=Text("Assistant Output", style="bold #a8ff60"),
-                border_style="#3f3f46",
-                expand=True,
-            )
-        )
+        widget = MessageBlock("assistant", text)
         self.mount(widget)
-        self._record_renderable_text(text)
         self.call_after_refresh(self.scroll_end, animate=False)
 
     def add_thinking(self, text: str) -> None:
-        widget = Static(
-            Panel(
-                Text(text, style="dim"),
-                title=Text("\U0001f9e0 \u601d\u8003\u8fc7\u7a0b", style="bold #c084fc"),
-                border_style="#6d28d9",
-                expand=True,
-            )
-        )
+        widget = MessageBlock("thinking", text)
         self.mount(widget)
-        self._record_renderable_text(text)
         self.call_after_refresh(self.scroll_end, animate=False)
 
     def add_info(self, text: str, *, style: str = "dim") -> None:
-        renderable = _rich_markup_text(text, style=style)
-        widget = Static(renderable)
+        widget = InfoBlock(text, style=style)
         self.mount(widget)
-        self._record_renderable_text(renderable.plain)
         self.call_after_refresh(self.scroll_end, animate=False)
 
     def clear_log(self) -> None:
         self.remove_children()
         self._running_tool_cards.clear()
-        self._renderable_entries.clear()
+        self._active_streams.clear()
 
 
 # ---------------------------------------------------------------------------
