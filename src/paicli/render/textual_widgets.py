@@ -15,6 +15,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.widgets import Collapsible, Footer, Header, Label, Static, TextArea
@@ -327,7 +328,20 @@ class InputBar(Horizontal):
 
 
 class CommandInput(TextArea):
-    """Minimal TextArea seam for the Task 1 command input."""
+    """TextArea that owns chat submission while it has focus."""
+
+    BINDINGS = [
+        Binding("enter", "submit_message", "Send", show=False, priority=True),
+        Binding("shift+enter", "insert_newline", "New line", show=False, priority=True),
+    ]
+
+    def action_submit_message(self) -> None:
+        """Delegate Enter to the app only from the focused command input."""
+        self.app.action_submit_message()
+
+    def action_insert_newline(self) -> None:
+        """Keep Shift+Enter available for a multiline draft."""
+        self.insert("\n")
 
 
 # ---------------------------------------------------------------------------
