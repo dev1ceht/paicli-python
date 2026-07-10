@@ -8,7 +8,7 @@ from textual.binding import Binding
 from textual.widgets import Static, TextArea
 
 from paicli.render.history import PromptHistory
-from paicli.render.textual_widgets import ChatLog, CommandInput, StatusBar
+from paicli.render.textual_widgets import ChatLog, CommandInput, StatusBar, ToolCard
 from paicli.render.tui_app import PaiCliApp
 
 
@@ -30,6 +30,101 @@ def test_tui_focuses_text_area_and_streams_text_before_done():
             assert "hello" in chat_log.renderable_text()
 
     asyncio.run(run())
+
+
+def test_tui_merges_incremental_text_deltas_into_one_visible_stream():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            chat_log = app.query_one(ChatLog)
+
+            app.handle_event({"type": "text_delta", "text": "hello"})
+            app.handle_event({"type": "text_delta", "text": " world"})
+            await pilot.pause()
+
+            assert "hello world" in chat_log.renderable_text()
+
+            app.handle_event({"type": "done", "total_tokens": 0, "total_turns": 1})
+            assert "hello world" in chat_log.renderable_text()
+
+    asyncio.run(run())
+
+
+def test_tui_shows_thinking_delta_before_done():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            chat_log = app.query_one(ChatLog)
+
+            app.handle_event({"type": "thinking_delta", "thinking": "pondering"})
+            await pilot.pause()
+
+            assert "pondering" in chat_log.renderable_text()
+
+    asyncio.run(run())
+
+
+def test_tool_success_card_collapses_after_result():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.handle_event(
+                {"type": "tool_call", "name": "read_file", "input": {"path": "a.py"}}
+            )
+            app.handle_event(
+                {"type": "tool_result", "name": "read_file", "result": "ok", "is_error": False}
+            )
+            await pilot.pause()
+
+            card = app.query_one(ToolCard)
+            assert card.status == "success"
+            assert card.is_expanded is False
+            assert card.output_text == "ok"
+
+    asyncio.run(run())
+
+
+def test_tool_error_card_stays_expanded_and_retains_full_result():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            result = "x" * 5000
+            app.handle_event(
+                {"type": "tool_call", "name": "read_file", "input": {"path": "a.py"}}
+            )
+            app.handle_event(
+                {
+                    "type": "tool_result",
+                    "name": "read_file",
+                    "result": result,
+                    "is_error": True,
+                }
+            )
+            await pilot.pause()
+
+            card = app.query_one(ToolCard)
+            assert card.status == "error"
+            assert card.is_expanded is True
+            assert card.output_text == result
+
+    asyncio.run(run())
+
+
+def test_ui_event_from_agent_preserves_task_id():
+    from paicli.render.tui_events import UiEvent
+
+    event = UiEvent.from_agent(
+        {
+            "type": "task_tool_result",
+            "task_id": "task-7",
+            "name": "read_file",
+            "result": "done",
+        }
+    )
+
+    assert event.kind == "task_tool_result"
+    assert event.task_id == "task-7"
+    assert event.payload["name"] == "read_file"
 
 
 def test_prompt_history_round_trips_utf8_messages(tmp_path):
