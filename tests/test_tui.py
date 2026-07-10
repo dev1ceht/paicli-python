@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Static, TextArea
 
 from paicli.render.history import PromptHistory
-from paicli.render.textual_widgets import ChatLog, CommandInput
+from paicli.render.textual_widgets import ChatLog, CommandInput, StatusBar
 from paicli.render.tui_app import PaiCliApp
 
 
@@ -187,3 +188,38 @@ def test_command_input_tab_completes_slash_commands():
             assert command_input.text == "/help"
 
     asyncio.run(run())
+
+
+def test_tui_mounted_input_uses_persisted_prompt_history(tmp_path, monkeypatch):
+    home_dir = tmp_path / "home"
+    history_path = home_dir / ".paicli" / "history" / "prompt_history.txt"
+    PromptHistory(history_path).append("saved prompt")
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home_dir))
+
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            command_input = app.query_one(CommandInput)
+            command_input.focus()
+
+            await pilot.press("up")
+            assert command_input.text == "saved prompt"
+
+            await pilot.press("down")
+            assert command_input.text == ""
+
+    asyncio.run(run())
+
+
+def test_status_bar_render_uses_exact_phase_and_cost_colors():
+    status_bar = StatusBar()
+    status_bar.phase = "running"
+    status_bar.model = "test-model"
+    status_bar.context_text = "ctx 12%"
+    status_bar.cost_text = "$0.1234"
+
+    rendered = status_bar.render()
+
+    assert "[bold #a8ff60]● running[/bold #a8ff60]" in rendered
+    assert "[bold #facc15]$0.1234[/bold #facc15]" in rendered

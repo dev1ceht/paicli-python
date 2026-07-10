@@ -7,6 +7,7 @@ that replace the Rich-based rendering with interactive Textual UI.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -283,7 +284,7 @@ class StatusBar(Static):
         phase_icon = {"idle": "\u25cb", "running": "\u25cf", "plan": "\U0001f4cb"}.get(
             self.phase, "\u25cb"
         )
-        parts.append(f"[bold #a3e635]{phase_icon} {self.phase}[/bold #a3e635]")
+        parts.append(f"[bold #a8ff60]{phase_icon} {self.phase}[/bold #a8ff60]")
         # Model
         if self.model:
             parts.append(f"  [bold]{self.model}[/bold]")
@@ -294,7 +295,7 @@ class StatusBar(Static):
             parts.append(f"  [dim]{self.token_detail}[/dim]")
         # Cost
         if self.cost_text:
-            parts.append(f"  [bold #f97316]{self.cost_text}[/bold #f97316]")
+            parts.append(f"  [bold #facc15]{self.cost_text}[/bold #facc15]")
         # Elapsed
         if self.elapsed_text:
             parts.append(f"  [dim]{self.elapsed_text}[/dim]")
@@ -332,10 +333,15 @@ class InputBar(Horizontal):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        self.prompt_history = PromptHistory(_default_prompt_history_path())
 
     def compose(self) -> ComposeResult:
         yield Label("> ")
-        yield CommandInput(placeholder="Type your message or /command", compact=True)
+        yield CommandInput(
+            history=self.prompt_history,
+            placeholder="Type your message or /command",
+            compact=True,
+        )
 
 
 class CommandInput(TextArea):
@@ -437,6 +443,10 @@ def _rich_markup_text(text: str, *, style: str = "dim") -> Text:
         return Text.from_markup(text, style=style)
     except MarkupError:
         return Text(text, style=style)
+
+
+def _default_prompt_history_path() -> Path:
+    return Path.home() / ".paicli" / "history" / "prompt_history.txt"
 
 
 # format_tokens, format_elapsed, format_cost are re-exported from _common above
