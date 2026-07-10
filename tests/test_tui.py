@@ -356,3 +356,122 @@ def test_status_bar_render_uses_exact_phase_and_cost_colors():
 
     assert "[bold #a8ff60]● running[/bold #a8ff60]" in rendered
     assert "[bold #facc15]$0.1234[/bold #facc15]" in rendered
+
+
+def test_plan_review_screen_execute_returns_decision():
+    from paicli.plan import ExecutionPlan, PlanTask, TaskType
+    from paicli.render.tui_dialogs import PlanReviewScreen
+
+    async def run() -> None:
+        plan = ExecutionPlan(
+            tasks=[
+                PlanTask(
+                    id="one",
+                    description="read file",
+                    type=TaskType.FILE_READ,
+                )
+            ]
+        )
+
+        result = [None]
+
+        class ReviewApp(App[None]):
+            def compose(self) -> ComposeResult:
+                from textual.widgets import Footer, Label
+                yield Label("Test App")
+                yield Footer()
+
+        app = ReviewApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            # Push the screen directly in a worker
+            async def push_and_test():
+                screen = PlanReviewScreen(plan)
+                result[0] = await app.push_screen_wait(screen)
+
+            worker = app.run_worker(push_and_test)
+            
+            # Wait for screen to be pushed and mounted
+            await pilot.pause()
+            await pilot.pause()
+            await pilot.pause()
+            
+            # Directly call the action (key bindings are tested separately)
+            if isinstance(app.screen, PlanReviewScreen):
+                app.screen.action_execute()
+                await pilot.pause()
+                await pilot.pause()
+
+        assert result[0] is not None, f"Result is None"
+        assert result[0].action == "execute"
+
+    asyncio.run(run())
+
+
+def test_approval_screen_approve_returns_approve():
+    from paicli.render.tui_dialogs import ApprovalScreen
+
+    async def run() -> None:
+        request = {
+            "tool_name": "read_file",
+            "danger_level": "safe",
+            "input": "test.txt",
+        }
+
+        result: str | None = None
+
+        class ApprovalApp(App[None]):
+            def compose(self) -> ComposeResult:
+                from textual.widgets import Footer
+                yield Footer()
+
+            def on_mount(self) -> None:
+                async def _push():
+                    nonlocal result
+                    screen = ApprovalScreen(request)
+                    result = await self.push_screen_wait(screen)
+                self.run_worker(_push)
+
+        app = ApprovalApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            await pilot.press("y")
+            await pilot.pause()
+
+        assert result == "approve"
+
+    asyncio.run(run())
+
+
+def test_approval_screen_deny_returns_deny():
+    from paicli.render.tui_dialogs import ApprovalScreen
+
+    async def run() -> None:
+        request = {
+            "tool_name": "read_file",
+            "danger_level": "safe",
+            "input": "test.txt",
+        }
+
+        result: str | None = None
+
+        class DenyApp(App[None]):
+            def compose(self) -> ComposeResult:
+                from textual.widgets import Footer
+                yield Footer()
+
+            def on_mount(self) -> None:
+                async def _push():
+                    nonlocal result
+                    screen = ApprovalScreen(request)
+                    result = await self.push_screen_wait(screen)
+                self.run_worker(_push)
+
+        app = DenyApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            await pilot.press("n")
+            await pilot.pause()
+
+        assert result == "deny"
+
+    asyncio.run(run())
