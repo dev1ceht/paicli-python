@@ -33,9 +33,13 @@ class PromptHistory:
         return items
 
     def _persist(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in self._items)
-        self.path.write_text(payload, encoding="utf-8")
+        """Write history to disk; silently keep items in memory on failure."""
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            payload = "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in self._items)
+            self.path.write_text(payload, encoding="utf-8")
+        except OSError:
+            pass
 
     def append(self, text: str) -> None:
         if text and (not self._items or self._items[-1] != text):

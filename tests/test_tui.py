@@ -140,6 +140,44 @@ def test_prompt_history_round_trips_utf8_messages(tmp_path):
     assert reloaded.previous() == message
 
 
+def test_prompt_history_append_survives_write_failure(tmp_path):
+    """append() must keep the item in memory even when the file cannot be written."""
+    from unittest.mock import patch
+
+    history_file = tmp_path / "prompt_history.txt"
+    history = PromptHistory(history_file)
+
+    with patch.object(Path, "write_text", side_effect=PermissionError("denied")):
+        # Must not raise despite the write failing
+        history.append("hello")
+
+    # Item is still navigable in memory
+    assert history.previous() == "hello"
+
+
+def test_command_input_submits_even_when_history_write_fails(tmp_path):
+    """Enter must still reach the app when PromptHistory cannot persist."""
+    from unittest.mock import patch
+
+    history_file = tmp_path / "prompt_history.txt"
+    history = PromptHistory(history_file)
+
+    async def run() -> None:
+        app = CommandInputHarness(history=history)
+        async with app.run_test(size=(80, 24)) as pilot:
+            inp = app.query_one(CommandInput)
+            inp.focus()
+            await pilot.pause()
+            with patch.object(Path, "write_text", side_effect=PermissionError("denied")):
+                inp.load_text("test message")
+                await pilot.press("enter")
+                await pilot.pause()
+            assert app.submit_actions == 1
+            assert app.submissions == ["test message"]
+
+    asyncio.run(run())
+
+
 def test_info_markup_is_rendered_not_shown_as_literal_tags():
     class LogApp(App[None]):
         def compose(self) -> ComposeResult:
