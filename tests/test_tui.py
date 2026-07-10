@@ -475,3 +475,55 @@ def test_approval_screen_deny_returns_deny():
         assert result == "deny"
 
     asyncio.run(run())
+
+
+def test_interrupt_exits_when_idle():
+    """Ctrl+C exits the app when not running."""
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        exited = False
+        original_exit = app.exit
+        def mock_exit():
+            nonlocal exited
+            exited = True
+            original_exit()
+        app.exit = mock_exit
+        
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            # App is idle, Ctrl+C should exit
+            app.action_interrupt()
+            await pilot.pause()
+        
+        assert exited is True
+
+    asyncio.run(run())
+
+
+def test_interrupt_cancels_worker_when_running():
+    """Ctrl+C cancels the worker when running."""
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        
+        async def long_task():
+            await asyncio.sleep(10)  # Long-running task
+        
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            # Start a worker
+            app._running = True
+            app._phase = "running"
+            worker = app.run_worker(long_task())
+            app._worker = worker
+            await pilot.pause()
+            
+            # App is running, Ctrl+C should cancel
+            app.action_interrupt()
+            await pilot.pause()
+            
+            # Worker should be cancelled
+            assert app._running is False
+            assert app._phase == "idle"
+            assert app._worker is None
+
+    asyncio.run(run())
