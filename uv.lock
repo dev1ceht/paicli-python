@@ -446,6 +446,7 @@ source = { editable = "." }
 dependencies = [
     { name = "dulwich" },
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "mcp" },
     { name = "pillow" },
     { name = "prompt-toolkit" },
@@ -464,6 +465,7 @@ dev = [
 requires-dist = [
     { name = "dulwich", specifier = ">=0.25,<0.26" },
     { name = "httpx", specifier = ">=0.27.0" },
+    { name = "jsonschema", specifier = ">=4.0,<5" },
     { name = "mcp", specifier = ">=1.27,<2" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "prompt-toolkit", specifier = ">=3.0.43" },

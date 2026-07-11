@@ -5,6 +5,7 @@ import asyncio
 from paicli.config import load_config
 from paicli.tools import ToolRegistry, get_builtin_tools
 from paicli.tools.base import Tool, ToolContext
+from paicli.tools.executor import ToolExecutor
 
 
 def test_read_write_file_tool(tmp_path, monkeypatch):
@@ -72,3 +73,46 @@ def test_save_memory_tool_accepts_fact_scope_and_legacy_content(tmp_path, monkey
     assert "global" in first.content
     assert not second.is_error
     assert "project" in second.content
+
+
+def test_executor_rejects_tool_arguments_that_violate_json_schema(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config = load_config(project_root=tmp_path)
+    executed = False
+
+    async def handler(_payload, _context):
+        nonlocal executed
+        executed = True
+        raise AssertionError("invalid payload must not execute the tool")
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="bounded_search",
+            description="",
+            parameters={
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 5}},
+                "required": ["limit"],
+            },
+            handler=handler,
+        )
+    )
+    context = ToolContext(cwd=str(tmp_path), config=config)
+
+    async def run():
+        return await ToolExecutor(registry).execute_all(
+            [
+                {
+                    "id": "call_invalid",
+                    "function": {"name": "bounded_search", "arguments": '{"limit": 0}'},
+                }
+            ],
+            context,
+        )
+
+    results = asyncio.run(run())
+
+    assert results[0].is_error
+    assert "minimum" in results[0].content
+    assert not executed

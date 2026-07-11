@@ -6,12 +6,14 @@ that replace the Rich-based rendering with interactive Textual UI.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
-from rich.errors import MarkupError
+from rich.errors import MarkupError, StyleSyntaxError
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -521,9 +523,24 @@ def _format_args_summary(name: str, args: dict | None) -> str:
 
 def _rich_markup_text(text: str, *, style: str = "dim") -> Text:
     try:
-        return Text.from_markup(text, style=style)
+        return Text.from_markup(_escape_invalid_markup_tags(text), style=style)
     except MarkupError:
         return Text(text, style=style)
+
+
+def _escape_invalid_markup_tags(text: str) -> str:
+    """Keep Rich markup while rendering bracketed command parameters literally."""
+
+    def escape_if_invalid(match: re.Match[str]) -> str:
+        tag = match.group(1)
+        style = tag[1:] if tag.startswith("/") else tag
+        try:
+            Style.parse(style)
+        except StyleSyntaxError:
+            return f"\\[{tag}]"
+        return match.group(0)
+
+    return re.sub(r"(?<!\\)\[([^]]*)\]", escape_if_invalid, text)
 
 
 def _default_prompt_history_path() -> Path:

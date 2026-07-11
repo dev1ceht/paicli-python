@@ -34,6 +34,15 @@ class ToolsConfig:
 
 
 @dataclass(slots=True)
+class AgentConfig:
+    max_turns: int = 20
+    max_tool_calls: int = 40
+    max_elapsed_seconds: float = 600.0
+    max_total_tokens: int = 100_000
+    stagnation_threshold: int = 3
+
+
+@dataclass(slots=True)
 class McpConfig:
     servers: list[dict[str, Any]] = field(default_factory=list)
     auto_start: bool = True
@@ -69,6 +78,7 @@ class PolicyConfig:
         ]
     )
     audit_log_path: str = "~/.paicli/audit"
+    require_approval_for_writes: bool = False
 
 
 @dataclass(slots=True)
@@ -118,6 +128,7 @@ class PaiCliConfig:
     llm: LlmConfig = field(default_factory=LlmConfig)
     render_mode: str = "inline"
     tools: ToolsConfig = field(default_factory=ToolsConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     policy: PolicyConfig = field(default_factory=PolicyConfig)
@@ -338,6 +349,7 @@ def _dict_to_config(data: dict[str, Any]) -> PaiCliConfig:
         llm=LlmConfig(**data.get("llm", {})),
         render_mode=data.get("render_mode", "inline"),
         tools=ToolsConfig(**data.get("tools", {})),
+        agent=AgentConfig(**data.get("agent", {})),
         mcp=McpConfig(**data.get("mcp", {})),
         memory=MemoryConfig(**data.get("memory", {})),
         policy=PolicyConfig(**data.get("policy", {})),

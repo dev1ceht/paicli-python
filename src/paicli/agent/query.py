@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -24,7 +25,7 @@ async def query(
     cwd: str,
     config: PaiCliConfig,
     approval_callback=None,
-    max_turns: int = 20,
+    max_turns: int | None = None,
     context_manager: ContextManager | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     messages = [
@@ -37,9 +38,26 @@ async def query(
 
     total_tokens = 0
     turn = 0
+    tool_call_count = 0
+    started_at = time.monotonic()
+    finalizing = False
+    limit_reason = ""
+    last_signature = ""
+    repeated_batches = 0
     last_actual_usage: dict[str, int] | None = None
 
-    while turn < max_turns:
+    turn_limit = max_turns if max_turns is not None else config.agent.max_turns
+    while turn < turn_limit or finalizing:
+        if not finalizing:
+            if time.monotonic() - started_at >= config.agent.max_elapsed_seconds:
+                limit_reason = "elapsed time limit reached"
+            elif total_tokens >= config.agent.max_total_tokens:
+                limit_reason = "token limit reached"
+            if limit_reason:
+                finalizing = True
+                messages.append(Message(role="user", content=_finalization_prompt(limit_reason)))
+                yield {"type": "guarded_finalization", "reason": limit_reason}
+                continue
         turn += 1
         text = ""
         thinking = ""
@@ -62,7 +80,7 @@ async def query(
         try:
             async for event in llm_client.chat(
                 messages,
-                tool_definitions,
+                [] if finalizing else tool_definitions,
                 system_prompt=final_system_prompt,
             ):
                 event_type = event.get("type")
@@ -117,9 +135,26 @@ async def query(
         messages.append(assistant_message)
         yield {"type": "turn_complete", "turn": turn, "stop_reason": stop_reason}
 
+        if finalizing:
+            break
+
         if stop_reason != "tool_use" and not tool_calls:
             break
 
+        signature = _tool_batch_signature(tool_calls)
+        repeated_batches = repeated_batches + 1 if signature and signature == last_signature else 1
+        last_signature = signature
+        if tool_call_count + len(tool_calls) > config.agent.max_tool_calls:
+            limit_reason = "tool call limit reached"
+        elif repeated_batches >= config.agent.stagnation_threshold:
+            limit_reason = "repeated-call stagnation detected"
+        if limit_reason:
+            finalizing = True
+            messages.append(Message(role="user", content=_finalization_prompt(limit_reason)))
+            yield {"type": "guarded_finalization", "reason": limit_reason}
+            continue
+
+        tool_call_count += len(tool_calls)
         for call in tool_calls:
             name = call.get("function", {}).get("name", "unknown")
             yield {"type": "tool_call", "name": name, "input": _tool_input(call)}
@@ -190,3 +225,21 @@ def _tool_name_by_id(calls: list[dict[str, Any]], tool_call_id: str) -> str:
         if call.get("id") == tool_call_id:
             return str(call.get("function", {}).get("name") or "unknown")
     return "unknown"
+
+
+def _tool_batch_signature(calls: list[dict[str, Any]]) -> str:
+    normalized = []
+    for call in calls:
+        normalized.append((
+            _tool_name_by_id([call], str(call.get("id") or "")),
+            _tool_input(call),
+        ))
+    return json.dumps(normalized, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def _finalization_prompt(reason: str) -> str:
+    return (
+        f"Agent safety protection triggered: {reason}. Do not call tools. "
+        "Provide your best final answer from the evidence already collected, including "
+        "the conclusion, unresolved blockers, and a recommended next step."
+    )
