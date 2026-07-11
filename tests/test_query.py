@@ -7,6 +7,7 @@ from paicli.agent import QueryEngine
 from paicli.agent.agent import Agent
 from paicli.config import load_config
 from paicli.tools import ToolRegistry, get_builtin_tools
+from paicli.tools.base import Tool, ToolResult
 from paicli.types import Message
 
 
@@ -73,6 +74,33 @@ class CapturingSummaryClient:
             return
         yield {"type": "text_delta", "text": "done"}
         yield {"type": "message_end", "stop_reason": "end_turn"}
+
+
+class RepeatingToolClient:
+    model_name = "fake-model"
+    provider_name = "fake-provider"
+    max_context_window = 1000
+
+    def __init__(self):
+        self.calls = 0
+        self.tool_counts = []
+
+    async def chat(self, messages, tools, *, system_prompt):  # noqa: ARG002
+        self.calls += 1
+        self.tool_counts.append(len(tools))
+        if not tools:
+            yield {"type": "text_delta", "text": "final summary"}
+            yield {"type": "message_end", "stop_reason": "end_turn"}
+            return
+        yield {
+            "type": "tool_call_delta",
+            "tool_call": {
+                "index": 0,
+                "id": f"call_{self.calls}",
+                "function": {"name": "inspect", "arguments": "{}"},
+            },
+        }
+        yield {"type": "message_end", "stop_reason": "tool_use"}
 
 
 def test_query_engine_executes_tool_and_replays_result(tmp_path, monkeypatch):
@@ -215,3 +243,22 @@ def test_agent_compacts_actual_messages_and_writes_back_history(tmp_path, monkey
     written_history = "\n".join(str(message.content) for message in agent.history)
     assert "Summarized old query history" in written_history
     assert old_secret not in written_history
+
+
+def test_query_engine_finalizes_without_tools_after_repeated_tool_batches(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config = load_config(project_root=tmp_path)
+    config.agent.stagnation_threshold = 3
+    client = RepeatingToolClient()
+    registry = ToolRegistry()
+
+    async def inspect(_payload, _context):
+        return ToolResult("unchanged")
+
+    registry.register(Tool(name="inspect", description="", parameters={"type": "object"}, handler=inspect))
+    engine = QueryEngine(llm_client=client, tool_registry=registry, config=config, cwd=str(tmp_path))
+
+    result = asyncio.run(engine.ask_complete_async("inspect repeatedly"))
+
+    assert result.text == "final summary"
+    assert client.tool_counts == [1, 1, 1, 0]

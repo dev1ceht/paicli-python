@@ -5,6 +5,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from jsonschema import ValidationError, validate
+
 from paicli.config import PaiCliConfig
 
 DangerLevel = Literal["safe", "medium", "high"]
@@ -54,6 +56,14 @@ class Tool:
     def validate(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError(f'tool "{self.name}" input must be an object')
+        try:
+            validate(payload, self.parameters)
+        except ValidationError as exc:
+            path = ".".join(str(part) for part in exc.path)
+            location = f" at {path}" if path else ""
+            raise ValueError(
+                f'tool "{self.name}" schema validation failed{location}: {exc.message}'
+            ) from exc
         for key in self.required_keys:
             if key not in payload:
                 raise ValueError(f'tool "{self.name}" missing required input: {key}')

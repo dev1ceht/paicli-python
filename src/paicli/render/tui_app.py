@@ -83,7 +83,7 @@ class PaiCliApp(App):
         self._phase = "idle"
         self._context_window = 0
         self._model = ""
-        self._running = False
+        self._agent_running = False
         self._worker = None  # Reference to current agent worker for cancellation
         self._task_buffers: dict[str, list[str]] = {}
         self._task_thinking_buffers: dict[str, list[str]] = {}
@@ -130,13 +130,17 @@ class PaiCliApp(App):
         chat_log.add_info("")  # spacer
 
     def action_submit_message(self) -> None:
-        """Handle user pressing Enter in the input area."""
+        """Fallback action for callers that submit through the application."""
+        self._submit_message(self.query_one(TextArea).text)
+
+    def _submit_message(self, raw_message: str) -> None:
+        """Route one normalized user submission to a slash command or agent run."""
+        message = raw_message.strip()
         input_area = self.query_one(TextArea)
-        message = input_area.text.strip()
         input_area.clear()
         if not message:
             return
-        if self._running:
+        if self._agent_running:
             return
         if message.startswith("/"):
             self._handle_slash_command(message)
@@ -246,7 +250,7 @@ class PaiCliApp(App):
 
     def run_agent_task(self, message: str) -> None:
         """Launch the agent as a background task."""
-        self._running = True
+        self._agent_running = True
         self._phase = "running"
         self._run_start_time = time.monotonic()
         self._text_buffer.clear()
@@ -273,7 +277,7 @@ class PaiCliApp(App):
             except Exception as exc:
                 chat_log.add_info(f"[bold red]Error:[/bold red] {exc}")
             finally:
-                self._running = False
+                self._agent_running = False
                 self._phase = "idle"
                 self._worker = None
                 self._update_status_bar()
@@ -617,9 +621,9 @@ class PaiCliApp(App):
 
     def action_interrupt(self) -> None:
         """Cancel running agent if active; otherwise exit."""
-        if self._running and self._worker and self._worker.is_running:
+        if self._agent_running and self._worker and self._worker.is_running:
             self._worker.cancel()
-            self._running = False
+            self._agent_running = False
             self._phase = "idle"
             self._worker = None
             chat_log = self.query_one("#chat-log", ChatLog)
@@ -924,7 +928,7 @@ class PaiCliApp(App):
 
     def run_plan_task(self, message: str) -> None:
         """Launch a plan-and-execute loop via the TUI's native modal flow."""
-        self._running = True
+        self._agent_running = True
         self._phase = "plan"
         self._run_start_time = time.monotonic()
         self._text_buffer.clear()
@@ -954,7 +958,7 @@ class PaiCliApp(App):
                 chat_log = self.query_one("#chat-log", ChatLog)
                 chat_log.add_info(f"[bold red]Plan error:[/bold red] {exc}")
             finally:
-                self._running = False
+                self._agent_running = False
                 self._phase = "idle"
                 self._worker = None
                 self._update_status_bar()

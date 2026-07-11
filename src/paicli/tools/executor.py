@@ -122,7 +122,11 @@ class ToolExecutor:
         mode = context.config.policy.hitl_mode
         if mode == "never":
             return "approve"
-        if mode == "auto" and not tool.requires_approval:
+        if (
+            mode == "auto"
+            and not tool.requires_approval
+            and not (context.config.policy.require_approval_for_writes and not tool.is_read_only)
+        ):
             return "approve"
         if not context.approval_callback:
             return "deny"

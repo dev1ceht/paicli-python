@@ -25,7 +25,7 @@ class Agent:
         cwd: str,
         config: PaiCliConfig,
         approval_callback=None,
-        max_turns: int = 20,
+        max_turns: int | None = None,
     ):
         self.llm_client = llm_client
         self.tool_registry = tool_registry
@@ -33,7 +33,7 @@ class Agent:
         self.cwd = cwd
         self.config = config
         self.approval_callback = approval_callback
-        self.max_turns = max_turns
+        self.max_turns = max_turns if max_turns is not None else config.agent.max_turns
         self.history: list[Message] = []
         
         # 初始化上下文管理器

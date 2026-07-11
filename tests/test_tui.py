@@ -32,6 +32,49 @@ def test_tui_focuses_text_area_and_streams_text_before_done():
     asyncio.run(run())
 
 
+def test_tui_enter_submits_message_and_sets_running_state():
+    class WaitingAgent:
+        async def run(self, message: str):
+            assert message == "hello"
+            await asyncio.Event().wait()
+            yield {"type": "done", "total_tokens": 0, "total_turns": 1}
+
+    async def run() -> None:
+        app = PaiCliApp(agent=WaitingAgent(), cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            command_input = app.query_one(CommandInput)
+            command_input.insert("hello")
+
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert app._agent_running is True
+            log_text = app.query_one(ChatLog).renderable_text()
+            assert app._phase == "running", log_text
+            assert "hello" in log_text
+
+            app.action_interrupt()
+            await pilot.pause()
+            assert app._agent_running is False
+
+    asyncio.run(run())
+
+
+def test_tui_help_renders_literal_bracketed_arguments():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            command_input = app.query_one(CommandInput)
+            command_input.insert("/help")
+
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert "/index [path]" in app.query_one(ChatLog).renderable_text()
+
+    asyncio.run(run())
+
+
 def test_tui_merges_incremental_text_deltas_into_one_visible_stream():
     async def run() -> None:
         app = PaiCliApp(cwd=".")
@@ -511,7 +554,7 @@ def test_interrupt_cancels_worker_when_running():
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.pause()
             # Start a worker
-            app._running = True
+            app._agent_running = True
             app._phase = "running"
             worker = app.run_worker(long_task())
             app._worker = worker
@@ -522,7 +565,7 @@ def test_interrupt_cancels_worker_when_running():
             await pilot.pause()
             
             # Worker should be cancelled
-            assert app._running is False
+            assert app._agent_running is False
             assert app._phase == "idle"
             assert app._worker is None
 
