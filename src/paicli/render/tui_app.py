@@ -21,6 +21,7 @@ from paicli.render.tui_events import UiEvent
 from paicli.render.textual_widgets import (
     ChatLog,
     InputBar,
+    StartupBanner,
     StatusBar,
     format_cost,
     format_elapsed,
@@ -102,32 +103,42 @@ class PaiCliApp(App):
 
     def _show_banner(self) -> None:
         """Display a startup banner in the chat log."""
-        from paicli.render._common import PI_LOGO as _PI_LOGO, shorten_home as _shorten_home
+        from paicli.render._common import shorten_home as _shorten_home
 
         chat_log = self.query_one("#chat-log", ChatLog)
-        # Logo
-        logo_text = "\n".join(_PI_LOGO)
-        chat_log.add_info(logo_text, style="bold #a8ff60")
-        # Identity line
         version = "0.1.0"
         model = self._model or (self.config.llm.model if self.config else "unknown")
         provider = self._provider or (self.config.llm.provider if self.config else "unknown")
-        chat_log.add_info(f"PaiCLI v{version}", style="bold white")
-        # Workspace info
-        tools_count = len(self.registry.list_names()) if self.registry else 0
         hitl_mode = self.config.policy.hitl_mode if self.config else "auto"
         if hitl_mode == "never":
             hitl_text = "HITL YOLO (Ctrl+Y to enable)"
         else:
             hitl_text = f"HITL {hitl_mode.upper()} (Ctrl+Y for YOLO)"
-        chat_log.add_info(
-            f"Model: {model} ({provider})  ·  {hitl_text}  ·  Tools: {tools_count}",
-            style="dim",
+        counts = self._startup_capability_counts()
+        chat_log.mount(
+            StartupBanner(
+                version=version,
+                model=model,
+                provider=provider,
+                hitl=hitl_text,
+                tools=counts["tools"],
+                skills=counts["skills"],
+                mcp_servers=counts["mcp_servers"],
+                cwd=_shorten_home(self.cwd),
+            )
         )
-        # CWD
-        chat_log.add_info(_shorten_home(self.cwd), style="dim")
-        chat_log.add_info("/help for commands", style="purple")
-        chat_log.add_info("")  # spacer
+
+    def _startup_capability_counts(self) -> dict[str, int]:
+        """Return independently reported capability totals for the startup banner."""
+        tool_names = self.registry.list_names() if self.registry else []
+        tools = sum(not name.startswith("mcp__") for name in tool_names)
+
+        from paicli.skill import SkillRegistry
+
+        skills = len(SkillRegistry(self.cwd).list())
+        specs = getattr(self.mcp_manager, "specs", {}).values() if self.mcp_manager else []
+        mcp_servers = sum(bool(getattr(spec, "enabled", False)) for spec in specs)
+        return {"tools": tools, "skills": skills, "mcp_servers": mcp_servers}
 
     def action_submit_message(self) -> None:
         """Fallback action for callers that submit through the application."""

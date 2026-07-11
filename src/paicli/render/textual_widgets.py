@@ -17,7 +17,7 @@ from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Collapsible, Label, Static, TextArea
@@ -96,6 +96,164 @@ class InfoBlock(Static):
     @property
     def plain_text(self) -> str:
         return self._renderable.plain
+
+
+class StartupBanner(Vertical):
+    """Full-width session summary shown before the first conversation turn."""
+
+    DEFAULT_CSS = """
+    StartupBanner {
+        width: 100%;
+        height: auto;
+        margin: 0 0 1 0;
+        padding: 1 1;
+        background: #0d1117;
+        border: round #30363d;
+    }
+    StartupBanner .banner-identity {
+        width: 26;
+        height: 10;
+    }
+    StartupBanner .banner-main {
+        width: 100%;
+        height: 10;
+    }
+    StartupBanner .banner-logo {
+        height: 5;
+        color: #a8ff60;
+        text-style: bold;
+        content-align: left middle;
+    }
+    StartupBanner .banner-name {
+        height: 3;
+        color: #f0f6fc;
+        text-style: bold;
+        content-align: left middle;
+    }
+    StartupBanner .banner-version {
+        height: 2;
+        color: #8b949e;
+    }
+    StartupBanner .banner-details {
+        width: 1fr;
+        height: 10;
+        color: #8b949e;
+    }
+    StartupBanner .banner-title {
+        height: 2;
+        color: #f0f6fc;
+        text-style: bold;
+        content-align: left middle;
+    }
+    StartupBanner .banner-pills {
+        width: 100%;
+        height: 3;
+        margin-top: 0;
+    }
+    StartupBanner .banner-capabilities {
+        width: 100%;
+        height: 3;
+        margin-top: 0;
+    }
+    StartupBanner .banner-pill {
+        width: auto;
+        height: 3;
+        margin-right: 1;
+        padding: 0 1;
+        border: round #484f58;
+        content-align: center middle;
+    }
+    StartupBanner .banner-workspace {
+        height: 1;
+        margin-top: 0;
+        color: #8b949e;
+    }
+    StartupBanner .banner-hint {
+        height: 1;
+        margin-top: 0;
+        color: #8b949e;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        version: str,
+        model: str,
+        provider: str,
+        hitl: str,
+        tools: int,
+        skills: int,
+        mcp_servers: int,
+        cwd: str,
+    ) -> None:
+        super().__init__()
+        self._version = version
+        self._logo_text = "▀▀▀▀▀▀▀▀▀\n ▐█▌  ▐█▌\n ▐█▌  ▐█▌\n ▐█▌  ▐█▌"
+        self._identity_text = f"{self._logo_text}\nＰａｉＣＬＩ\nv{version}"
+        self._model = model
+        self._provider = provider
+        self._hitl = hitl
+        self._tools = tools
+        self._skills = skills
+        self._mcp_servers = mcp_servers
+        self._cwd = cwd
+        self._details_text = (
+            "Ready to build\n"
+            f"{model}  {provider}  {hitl}  Tools: {tools}  Skills: {skills}  "
+            f"MCP: {mcp_servers} servers\n"
+            f"{cwd}\n/help commands  ·  Ctrl+Y YOLO mode"
+        )
+
+    @property
+    def plain_text(self) -> str:
+        return f"{self._identity_text}\n{self._details_text}"
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(classes="banner-main"):
+            with Vertical(classes="banner-identity"):
+                yield Static(self._logo_text, classes="banner-logo")
+                yield Static("ＰａｉＣＬＩ", classes="banner-name")
+                yield Static(f"v{self._version}", classes="banner-version")
+            with Vertical(classes="banner-details"):
+                yield Static("Ready to build", classes="banner-title")
+                with Horizontal(classes="banner-pills"):
+                    yield Static(
+                        Text.assemble(("● ", "#a8ff60"), (self._model, "#f0f6fc")),
+                        classes="banner-pill",
+                    )
+                    yield Static(
+                        Text.assemble(("● ", "#60d8ff"), (self._provider, "#f0f6fc")),
+                        classes="banner-pill",
+                    )
+                    yield Static(Text(self._hitl, style="#60d8ff"), classes="banner-pill")
+                with Horizontal(classes="banner-capabilities"):
+                    yield Static(
+                        Text(f"Tools: {self._tools}", style="#60d8ff"),
+                        classes="banner-pill",
+                    )
+                    yield Static(
+                        Text(f"Skills: {self._skills}", style="#c084fc"),
+                        classes="banner-pill",
+                    )
+                    yield Static(
+                        Text(f"MCP: {self._mcp_servers} servers", style="#60d8ff"),
+                        classes="banner-pill",
+                    )
+                yield Static(
+                    Text.assemble(("▢  ", "#8b949e"), (self._cwd, "#8b949e")),
+                    classes="banner-workspace",
+                )
+                yield Static(
+                    Text.assemble(
+                        ("/help", "#a8ff60"),
+                        ("  commands", "#8b949e"),
+                        ("  ·  ", "#8b949e"),
+                        ("Ctrl+Y", "#60d8ff"),
+                        ("  YOLO mode", "#8b949e"),
+                    ),
+                    classes="banner-hint",
+                )
 
 
 # ---------------------------------------------------------------------------

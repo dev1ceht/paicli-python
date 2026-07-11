@@ -2,14 +2,79 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Static, TextArea
 
 from paicli.render.history import PromptHistory
-from paicli.render.textual_widgets import ChatLog, CommandInput, StatusBar, ToolCard
+from paicli.render.textual_widgets import (
+    ChatLog,
+    CommandInput,
+    StartupBanner,
+    StatusBar,
+    ToolCard,
+)
 from paicli.render.tui_app import PaiCliApp
+
+
+def test_startup_banner_counts_builtin_tools_skills_and_enabled_mcp_servers(monkeypatch):
+    class FakeRegistry:
+        def list_names(self):
+            return ["read_file", "write_file", "mcp__github__search", "mcp__browser__tabs"]
+
+    class FakeMcpManager:
+        specs = {
+            "github": SimpleNamespace(enabled=True),
+            "browser": SimpleNamespace(enabled=True),
+            "disabled": SimpleNamespace(enabled=False),
+        }
+
+    monkeypatch.setattr(
+        "paicli.skill.registry.SkillRegistry.list",
+        lambda _self: [SimpleNamespace(name="code-review"), SimpleNamespace(name="research")],
+    )
+
+    app = PaiCliApp(registry=FakeRegistry(), mcp_manager=FakeMcpManager(), cwd=".")
+
+    assert app._startup_capability_counts() == {"tools": 2, "skills": 2, "mcp_servers": 2}
+
+
+def test_tui_renders_compact_full_width_startup_banner(monkeypatch):
+    class FakeRegistry:
+        def list_names(self):
+            return ["read_file", "mcp__github__search"]
+
+    class FakeMcpManager:
+        specs = {"github": SimpleNamespace(enabled=True)}
+
+    config = SimpleNamespace(
+        llm=SimpleNamespace(model="test-model", provider="test-provider"),
+        policy=SimpleNamespace(hitl_mode="auto"),
+    )
+    monkeypatch.setattr("paicli.skill.registry.SkillRegistry.list", lambda _self: [object()])
+
+    async def run() -> None:
+        app = PaiCliApp(
+            config=config,
+            cwd="D:/project/PaiCLI-Python",
+            registry=FakeRegistry(),
+            mcp_manager=FakeMcpManager(),
+        )
+        async with app.run_test(size=(120, 24)) as pilot:
+            await pilot.pause()
+            banner = app.query_one(StartupBanner)
+
+            assert "ＰａｉＣＬＩ\nv0.1.0" in banner.plain_text
+            assert "Ready to build" in banner.plain_text
+            assert "Tools: 1" in banner.plain_text
+            assert "Skills: 1" in banner.plain_text
+            assert "MCP: 1 servers" in banner.plain_text
+            assert "D:/project/PaiCLI-Python" in banner.plain_text
+            assert "/help commands" in banner.plain_text
+
+    asyncio.run(run())
 
 
 def test_tui_focuses_text_area_and_streams_text_before_done():
