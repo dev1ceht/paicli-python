@@ -169,7 +169,7 @@ class McpClientManager:
                     is_read_only=read_only,
                     is_concurrency_safe=False,
                     danger_level="safe" if read_only else "medium",
-                    requires_approval=not read_only,
+                    requires_approval=True,
                 )
             )
         return wrapped

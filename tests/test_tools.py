@@ -116,3 +116,36 @@ def test_executor_rejects_tool_arguments_that_violate_json_schema(tmp_path, monk
     assert results[0].is_error
     assert "minimum" in results[0].content
     assert not executed
+
+
+def test_executor_allows_only_the_exact_tool_for_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config = load_config(project_root=tmp_path)
+    config.policy.audit_log_path = str(tmp_path / "audit")
+    calls: list[str] = []
+
+    async def handler(_payload, _context):
+        calls.append("executed")
+        from paicli.tools.base import ToolResult
+        return ToolResult("ok")
+
+    registry = ToolRegistry()
+    registry.register(Tool(name="first", description="", parameters={}, handler=handler, is_read_only=False, requires_approval=True))
+    registry.register(Tool(name="second", description="", parameters={}, handler=handler, is_read_only=False, requires_approval=True))
+
+    async def approve_once(request):
+        return "allow_session" if request["tool_name"] == "first" else "deny"
+
+    context = ToolContext(cwd=str(tmp_path), config=config, approval_callback=approve_once)
+
+    async def run():
+        executor = ToolExecutor(registry)
+        first = await executor.execute_all([{"id": "1", "name": "first", "arguments": {}}], context)
+        second = await executor.execute_all([{"id": "2", "name": "second", "arguments": {}}], context)
+        return first, second
+
+    first, second = asyncio.run(run())
+    assert not first[0].is_error
+    assert second[0].is_error
+    assert calls == ["executed"]
+    assert context.session_allowed_tools == {"first"}

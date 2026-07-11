@@ -35,6 +35,7 @@ class Agent:
         self.approval_callback = approval_callback
         self.max_turns = max_turns if max_turns is not None else config.agent.max_turns
         self.history: list[Message] = []
+        self.session_allowed_tools: set[str] = set()
         
         # 初始化上下文管理器
         self.context_manager = ContextManager(
@@ -58,6 +59,7 @@ class Agent:
                 cwd=self.cwd,
                 config=self.config,
                 approval_callback=self.approval_callback,
+                session_allowed_tools=self.session_allowed_tools,
                 max_turns=self.max_turns,
                 context_manager=self.context_manager,
             ):

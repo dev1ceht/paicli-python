@@ -25,6 +25,7 @@ async def query(
     cwd: str,
     config: PaiCliConfig,
     approval_callback=None,
+    session_allowed_tools: set[str] | None = None,
     max_turns: int | None = None,
     context_manager: ContextManager | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
@@ -34,7 +35,12 @@ async def query(
     ]
     tool_definitions = tool_registry.definitions()
     executor = ToolExecutor(tool_registry)
-    context = ToolContext(cwd=cwd, config=config, approval_callback=approval_callback)
+    context = ToolContext(
+        cwd=cwd,
+        config=config,
+        approval_callback=approval_callback,
+        session_allowed_tools=session_allowed_tools if session_allowed_tools is not None else set(),
+    )
 
     total_tokens = 0
     turn = 0

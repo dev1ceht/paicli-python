@@ -50,6 +50,7 @@ def get_builtin_tools() -> list[Tool]:
             is_read_only=False,
             is_concurrency_safe=False,
             danger_level="medium",
+            requires_approval=True,
         ),
         Tool(
             name="list_dir",
@@ -277,6 +278,7 @@ def get_builtin_tools() -> list[Tool]:
             is_concurrency_safe=False,
             danger_level="high",
             requires_approval=True,
+            mandatory_confirmation=True,
         ),
     ]
     return tools

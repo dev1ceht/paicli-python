@@ -71,6 +71,7 @@ class SnapshotService:
             / _hash_key(str(self.project_root))
         )
         self.git_dir = self.root / ".git"
+        self.skipped_symlink_count = 0
         self.root.mkdir(parents=True, exist_ok=True)
 
     def create(self, phase: str) -> SnapshotRecord:
@@ -172,6 +173,9 @@ class SnapshotService:
         for item in sorted(directory.iterdir(), key=lambda candidate: candidate.name):
             relative = item.relative_to(self.project_root).as_posix()
             if self._is_excluded(relative):
+                continue
+            if item.is_symlink():
+                self.skipped_symlink_count += 1
                 continue
             name = item.name.encode("utf-8")
             if item.is_dir():

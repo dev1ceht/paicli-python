@@ -10,7 +10,7 @@ from jsonschema import ValidationError, validate
 from paicli.config import PaiCliConfig
 
 DangerLevel = Literal["safe", "medium", "high"]
-ToolDecision = Literal["approve", "deny", "skip"]
+ToolDecision = Literal["approve", "allow_session", "deny", "skip"]
 
 
 @dataclass(slots=True)
@@ -28,6 +28,7 @@ class ToolContext:
     approval_callback: Callable[[dict[str, Any]], Awaitable[ToolDecision] | ToolDecision] | None = (
         None
     )
+    session_allowed_tools: set[str] = field(default_factory=set)
 
 
 @dataclass(slots=True)
@@ -40,6 +41,7 @@ class Tool:
     is_concurrency_safe: bool = True
     danger_level: DangerLevel = "safe"
     requires_approval: bool = False
+    mandatory_confirmation: bool = False
     timeout: float = 60.0
     required_keys: list[str] = field(default_factory=list)
 

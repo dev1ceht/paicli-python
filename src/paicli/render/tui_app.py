@@ -929,12 +929,6 @@ class PaiCliApp(App):
         """Push an ApprovalScreen and return the decision string."""
         screen = ApprovalScreen(request)
         result = await self.push_screen_wait(screen)
-        # "approve_all" means approve + switch to YOLO
-        if result == "approve_all" and self.config:
-            self.config.policy.hitl_mode = "never"
-            chat_log = self.query_one("#chat-log", ChatLog)
-            chat_log.add_info("[bold green]HITL switched to YOLO mode[/bold green]")
-            result = "approve"
         return result
 
     def run_plan_task(self, message: str) -> None:

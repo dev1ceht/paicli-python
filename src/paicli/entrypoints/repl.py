@@ -727,8 +727,7 @@ def _approval_prompt(request: dict[str, Any], console: Console, config: PaiCliCo
     )
     answer = Prompt.ask("Approve?", choices=["y", "n", "a", "s"], default="n")
     if answer == "a":
-        config.policy.hitl_mode = "never"
-        return "approve"
+        return "allow_session"
     if answer == "y":
         return "approve"
     if answer == "s":
