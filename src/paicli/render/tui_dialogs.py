@@ -176,14 +176,14 @@ class ApprovalScreen(ModalScreen[str]):
     ------------
     * **y** — approve this call
     * **n** / **Escape** — deny
-    * **a** — approve and switch to YOLO (hitl_mode=never)
+    * **a** — allow this exact tool for the current session
     * **s** — skip this call
     """
 
     BINDINGS = [
         Binding("y", "approve", "Approve", show=True),
         Binding("n", "deny", "Deny", show=True),
-        Binding("a", "approve_all", "Approve All", show=True),
+        Binding("a", "allow_session", "Allow Tool", show=True),
         Binding("s", "skip", "Skip", show=True),
         Binding("escape", "deny", "Deny", show=True),
     ]
@@ -233,7 +233,7 @@ class ApprovalScreen(ModalScreen[str]):
             )
             yield Static(inp[:2000], id="approval-body")
             yield Static(
-                "y=Approve  n=Deny  a=Approve All (YOLO)  s=Skip",
+                "y=Approve  n=Deny  a=Allow Tool This Session  s=Skip",
                 id="approval-footer",
             )
 
@@ -243,8 +243,8 @@ class ApprovalScreen(ModalScreen[str]):
     def action_deny(self) -> None:
         self.dismiss("deny")
 
-    def action_approve_all(self) -> None:
-        self.dismiss("approve_all")
+    def action_allow_session(self) -> None:
+        self.dismiss("allow_session")
 
     def action_skip(self) -> None:
         self.dismiss("skip")

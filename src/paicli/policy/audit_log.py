@@ -20,6 +20,9 @@ class AuditLog:
         outcome: str,
         approver: str,
         cwd: str,
+        result_summary: str | None = None,
+        decision_source: str | None = None,
+        reason: str | None = None,
     ) -> None:
         timestamp = datetime.now(UTC)
         target = self._path_for_timestamp(timestamp)
@@ -32,8 +35,20 @@ class AuditLog:
             "approver": approver,
             "cwd": cwd,
         }
+        if result_summary is not None:
+            event["result_summary"] = self._redact(result_summary)[:2000]
+        if decision_source:
+            event["decision_source"] = decision_source
+        if reason:
+            event["reason"] = reason
         with target.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    def ensure_available(self) -> None:
+        target = self._path_for_timestamp(datetime.now(UTC))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8"):
+            pass
 
     def tail(self, limit: int = 20) -> list[dict[str, Any]]:
         paths = self._log_files()
