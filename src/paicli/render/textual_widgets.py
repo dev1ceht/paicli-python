@@ -491,6 +491,15 @@ class ChatLog(VerticalScroll):
         self._running_tool_cards.clear()
         self._active_streams.clear()
 
+    def clear_conversation(self) -> None:
+        """Remove conversation widgets while preserving the startup banner."""
+        for child in list(self.children):
+            if isinstance(child, StartupBanner):
+                continue
+            child.remove()
+        self._running_tool_cards.clear()
+        self._active_streams.clear()
+
 
 # ---------------------------------------------------------------------------
 # StatusBar — bottom status bar showing model, tokens, cost, etc.

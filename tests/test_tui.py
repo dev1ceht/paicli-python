@@ -145,6 +145,7 @@ def test_tui_clear_preserves_startup_banner():
         app = PaiCliApp(cwd=".")
         async with app.run_test(size=(80, 24)) as pilot:
             chat_log = app.query_one(ChatLog)
+            banner = app.query_one(StartupBanner)
             chat_log.add_user_message("temporary conversation")
             app._handle_slash_command("/clear")
             await pilot.pause()
@@ -152,6 +153,7 @@ def test_tui_clear_preserves_startup_banner():
             text = chat_log.renderable_text()
             assert "Ready to build" in text
             assert "temporary conversation" not in text
+            assert app.query_one(StartupBanner) is banner
 
     asyncio.run(run())
 
