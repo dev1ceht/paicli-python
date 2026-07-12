@@ -110,11 +110,7 @@ class PaiCliApp(App):
         version = "0.1.0"
         model = self._model or (self.config.llm.model if self.config else "unknown")
         provider = self._provider or (self.config.llm.provider if self.config else "unknown")
-        hitl_mode = self.config.policy.hitl_mode if self.config else "auto"
-        if hitl_mode == "never":
-            hitl_text = "HITL YOLO (Ctrl+Y to enable)"
-        else:
-            hitl_text = f"HITL {hitl_mode.upper()} (Ctrl+Y for YOLO)"
+        hitl_text = self._hitl_banner_text()
         counts = self._startup_capability_counts()
         chat_log.mount(
             StartupBanner(
@@ -128,6 +124,15 @@ class PaiCliApp(App):
                 cwd=_shorten_home(self.cwd),
             )
         )
+
+    def _hitl_banner_text(self) -> str:
+        mode = self.config.policy.hitl_mode if self.config else "auto"
+        if mode == "never":
+            return "HITL YOLO (Ctrl+Y to enable)"
+        return f"HITL {mode.upper()} (Ctrl+Y for YOLO)"
+
+    def _refresh_hitl_banner(self) -> None:
+        self.query_one(StartupBanner).update_hitl(self._hitl_banner_text())
 
     def _startup_capability_counts(self) -> dict[str, int]:
         """Return independently reported capability totals for the startup banner."""
@@ -639,12 +644,7 @@ class PaiCliApp(App):
         next_mode = "auto" if current == "never" else "never"
         self.config.policy.hitl_mode = next_mode
         chat_log = self.query_one("#chat-log", ChatLog)
-        hitl_text = (
-            "HITL YOLO (Ctrl+Y to enable)"
-            if next_mode == "never"
-            else "HITL AUTO (Ctrl+Y for YOLO)"
-        )
-        self.query_one(StartupBanner).update_hitl(hitl_text)
+        self._refresh_hitl_banner()
         label = "auto" if next_mode == "auto" else "unattended"
         chat_log.add_info(f"[yellow]HITL switched to {label} mode[/yellow]")
         self._update_status_bar()
@@ -745,6 +745,7 @@ class PaiCliApp(App):
             self.config.policy.hitl_mode = "always"
         elif arg == "off":
             self.config.policy.hitl_mode = "never"
+        self._refresh_hitl_banner()
         chat_log.add_info(f"HITL mode: {self.config.policy.hitl_mode}")
 
     def _memory_command(self, arg: str, chat_log: ChatLog) -> None:
