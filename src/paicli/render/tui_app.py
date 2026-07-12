@@ -174,6 +174,7 @@ class PaiCliApp(App):
             if self.agent:
                 self.agent.clear_history()
             chat_log.clear_log()
+            self._show_banner()
             return
         if command == "/context":
             self._show_context(chat_log)

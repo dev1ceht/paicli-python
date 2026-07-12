@@ -140,6 +140,22 @@ def test_tui_help_renders_literal_bracketed_arguments():
     asyncio.run(run())
 
 
+def test_tui_clear_preserves_startup_banner():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            chat_log = app.query_one(ChatLog)
+            chat_log.add_user_message("temporary conversation")
+            app._handle_slash_command("/clear")
+            await pilot.pause()
+
+            text = chat_log.renderable_text()
+            assert "Ready to build" in text
+            assert "temporary conversation" not in text
+
+    asyncio.run(run())
+
+
 def test_tui_merges_incremental_text_deltas_into_one_visible_stream():
     async def run() -> None:
         app = PaiCliApp(cwd=".")
