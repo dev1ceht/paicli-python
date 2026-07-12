@@ -649,6 +649,9 @@ class PaiCliApp(App):
     # -- Slash command helpers -------------------------------------------
 
     def _help_text(self) -> str:
+        from paicli.entrypoints.repl import help_text
+
+        return help_text()
         return "\n".join([
             "可用命令：",
             "/help - 查看命令帮助",

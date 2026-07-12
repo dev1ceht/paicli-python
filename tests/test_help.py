@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from paicli.entrypoints.repl import help_text
+from paicli.entrypoints.repl import SLASH_COMMANDS
+from paicli.render.tui_app import PaiCliApp
 
 
 def test_help_text_lists_commands_with_descriptions():
@@ -12,3 +14,13 @@ def test_help_text_lists_commands_with_descriptions():
     assert "/task add <任务内容> - 提交后台任务" in text
     assert "/mcp restart <name> - 重启 MCP server" in text
     assert "/wechat" not in text
+
+
+def test_help_lists_every_slash_command_in_repl_and_tui():
+    repl_help = help_text()
+    tui_help = PaiCliApp._help_text(None)
+
+    assert tui_help == repl_help
+    for command in SLASH_COMMANDS:
+        assert command in repl_help
+        assert command in tui_help
