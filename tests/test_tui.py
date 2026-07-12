@@ -158,6 +158,28 @@ def test_tui_clear_preserves_startup_banner():
     asyncio.run(run())
 
 
+def test_ctrl_y_toggles_hitl_between_auto_and_unattended():
+    config = SimpleNamespace(
+        llm=SimpleNamespace(model="test-model", provider="test-provider"),
+        policy=SimpleNamespace(hitl_mode="auto"),
+    )
+
+    async def run() -> None:
+        app = PaiCliApp(config=config, cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.press("ctrl+y")
+            await pilot.pause()
+            assert config.policy.hitl_mode == "never"
+            assert "HITL switched to unattended mode" in app.query_one(ChatLog).renderable_text()
+
+            await pilot.press("ctrl+y")
+            await pilot.pause()
+            assert config.policy.hitl_mode == "auto"
+            assert "HITL switched to auto mode" in app.query_one(ChatLog).renderable_text()
+
+    asyncio.run(run())
+
+
 def test_tui_merges_incremental_text_deltas_into_one_visible_stream():
     async def run() -> None:
         app = PaiCliApp(cwd=".")
