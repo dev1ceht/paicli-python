@@ -45,6 +45,7 @@ class PaiCliApp(App):
         Binding("ctrl+c", "interrupt", "Interrupt", show=True),
         Binding("ctrl+q", "quit", "Quit", show=True),
         Binding("ctrl+l", "clear_screen", "Clear", show=True),
+        Binding("ctrl+y", "toggle_hitl", "Toggle HITL", show=True, priority=True),
     ]
 
     def __init__(
@@ -628,7 +629,22 @@ class PaiCliApp(App):
 
     def action_clear_screen(self) -> None:
         chat_log = self.query_one("#chat-log", ChatLog)
-        chat_log.clear_log()
+        chat_log.clear_conversation()
+
+    def action_toggle_hitl(self) -> None:
+        """Toggle between default approval and explicit unattended mode."""
+        if not self.config:
+            return
+        current = self.config.policy.hitl_mode
+        next_mode = "auto" if current == "never" else "never"
+        self.config.policy.hitl_mode = next_mode
+        chat_log = self.query_one("#chat-log", ChatLog)
+        for banner in list(self.query(StartupBanner)):
+            banner.remove()
+        self._show_banner()
+        label = "auto" if next_mode == "auto" else "unattended"
+        chat_log.add_info(f"[yellow]HITL switched to {label} mode[/yellow]")
+        self._update_status_bar()
 
     def action_interrupt(self) -> None:
         """Cancel running agent if active; otherwise exit."""
