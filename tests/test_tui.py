@@ -167,15 +167,19 @@ def test_ctrl_y_toggles_hitl_between_auto_and_unattended():
     async def run() -> None:
         app = PaiCliApp(config=config, cwd=".")
         async with app.run_test(size=(80, 24)) as pilot:
+            chat_log = app.query_one(ChatLog)
+            banner = app.query_one(StartupBanner)
             await pilot.press("ctrl+y")
             await pilot.pause()
             assert config.policy.hitl_mode == "never"
-            assert "HITL switched to unattended mode" in app.query_one(ChatLog).renderable_text()
+            assert "HITL switched to unattended mode" in chat_log.renderable_text()
+            assert app.query_one(StartupBanner) is banner
+            assert list(chat_log.children)[0] is banner
 
             await pilot.press("ctrl+y")
             await pilot.pause()
             assert config.policy.hitl_mode == "auto"
-            assert "HITL switched to auto mode" in app.query_one(ChatLog).renderable_text()
+            assert "HITL switched to auto mode" in chat_log.renderable_text()
 
     asyncio.run(run())
 

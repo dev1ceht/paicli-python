@@ -209,6 +209,17 @@ class StartupBanner(Vertical):
     def plain_text(self) -> str:
         return f"{self._identity_text}\n{self._details_text}"
 
+    def update_hitl(self, hitl: str) -> None:
+        """Refresh the HITL pill without changing the banner's position."""
+        self._hitl = hitl
+        self._details_text = (
+            "Ready to build\n"
+            f"{self._model}  {self._provider}  {hitl}  Tools: {self._tools}  "
+            f"Skills: {self._skills}  MCP: {self._mcp_servers} servers\n"
+            f"{self._cwd}\n/help commands  ·  Ctrl+Y YOLO mode"
+        )
+        self.query_one("#banner-hitl", Static).update(Text(hitl, style="#60d8ff"))
+
     def compose(self) -> ComposeResult:
         with Horizontal(classes="banner-main"):
             with Vertical(classes="banner-identity"):
@@ -226,7 +237,11 @@ class StartupBanner(Vertical):
                         Text.assemble(("● ", "#60d8ff"), (self._provider, "#f0f6fc")),
                         classes="banner-pill",
                     )
-                    yield Static(Text(self._hitl, style="#60d8ff"), classes="banner-pill")
+                    yield Static(
+                        Text(self._hitl, style="#60d8ff"),
+                        id="banner-hitl",
+                        classes="banner-pill",
+                    )
                 with Horizontal(classes="banner-capabilities"):
                     yield Static(
                         Text(f"Tools: {self._tools}", style="#60d8ff"),
