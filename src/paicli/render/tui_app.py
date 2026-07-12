@@ -639,9 +639,12 @@ class PaiCliApp(App):
         next_mode = "auto" if current == "never" else "never"
         self.config.policy.hitl_mode = next_mode
         chat_log = self.query_one("#chat-log", ChatLog)
-        for banner in list(self.query(StartupBanner)):
-            banner.remove()
-        self._show_banner()
+        hitl_text = (
+            "HITL YOLO (Ctrl+Y to enable)"
+            if next_mode == "never"
+            else "HITL AUTO (Ctrl+Y for YOLO)"
+        )
+        self.query_one(StartupBanner).update_hitl(hitl_text)
         label = "auto" if next_mode == "auto" else "unattended"
         chat_log.add_info(f"[yellow]HITL switched to {label} mode[/yellow]")
         self._update_status_bar()
