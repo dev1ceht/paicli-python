@@ -8,6 +8,7 @@ from typing import Any, Literal
 from jsonschema import ValidationError, validate
 
 from paicli.config import PaiCliConfig
+from paicli.llm.base import LlmClient
 
 DangerLevel = Literal["safe", "medium", "high"]
 ToolDecision = Literal["approve", "allow_session", "deny", "skip"]
@@ -29,6 +30,7 @@ class ToolContext:
         None
     )
     session_allowed_tools: set[str] = field(default_factory=set)
+    llm_client: LlmClient | None = None
 
 
 @dataclass(slots=True)

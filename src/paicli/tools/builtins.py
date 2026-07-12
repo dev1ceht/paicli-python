@@ -454,7 +454,11 @@ async def save_memory(payload: dict[str, Any], context: ToolContext) -> ToolResu
         return ToolResult("保存长期记忆失败: fact 不能为空", is_error=True)
     scope = "global" if str(payload.get("scope") or "").lower() == "global" else "project"
     manager = MemoryManager(context.config.memory.long_term_path, project_path=context.cwd)
-    manager.save(fact, scope=scope)
+    result = await manager.save_with_classification(fact, scope=scope, llm_client=context.llm_client)
+    if result.status == "pending":
+        return ToolResult(f"Created pending memory change: {result.change_id}")
+    if result.status == "duplicate":
+        return ToolResult(f"Memory already exists: {result.memory_id}")
     return ToolResult(f"已保存到长期记忆({scope}): {fact}")
 
 

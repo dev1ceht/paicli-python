@@ -78,6 +78,9 @@ HELP_LINES = [
     "/memory search <关键词> - 搜索当前项目可见长期记忆",
     "/memory delete <id> - 删除单条长期记忆",
     "/memory clear - 清空全部长期记忆",
+    "/memory pending - 查看待确认的记忆变更",
+    "/memory apply <id> - 确认待处理记忆变更",
+    "/memory reject <id> - 拒绝待处理记忆变更",
     "/save <事实> - 保存项目级长期记忆",
     "/save --global <事实> - 保存全局长期记忆",
     "/config - 查看当前配置",
@@ -161,7 +164,6 @@ async def start_repl(cwd: str, config: PaiCliConfig) -> None:
     await tui_app.run_async()
 
 
-
 async def _run_agent(agent: Agent, renderer: RichRenderer, message: str) -> None:
     renderer.set_context_window(agent.llm_client.max_context_window)
     renderer.start_run()
@@ -195,8 +197,7 @@ async def _run_plan_agent(
         context = build_task_context(plan, task)
         task_system = build_task_system_prompt(task)
         prompt = (
-            f"Execute plan task `{task.id}`.\n\n"
-            f"Task description:\n{task.description}\n\n{context}"
+            f"Execute plan task `{task.id}`.\n\nTask description:\n{task.description}\n\n{context}"
         )
 
         # Use streaming agent.run() to forward events to renderer
@@ -206,35 +207,43 @@ async def _run_plan_agent(
             if event_type == "text_delta":
                 text += str(event.get("text") or "")
                 if event_sink:
-                    event_sink({
-                        "type": "task_text_delta",
-                        "task_id": task.id,
-                        "text": event.get("text"),
-                    })
+                    event_sink(
+                        {
+                            "type": "task_text_delta",
+                            "task_id": task.id,
+                            "text": event.get("text"),
+                        }
+                    )
             elif event_type == "thinking_delta":
                 if event_sink:
-                    event_sink({
-                        "type": "task_thinking_delta",
-                        "task_id": task.id,
-                        "thinking": event.get("thinking"),
-                    })
+                    event_sink(
+                        {
+                            "type": "task_thinking_delta",
+                            "task_id": task.id,
+                            "thinking": event.get("thinking"),
+                        }
+                    )
             elif event_type == "tool_call":
                 if event_sink:
-                    event_sink({
-                        "type": "task_tool_call",
-                        "task_id": task.id,
-                        "name": event.get("name"),
-                        "input": event.get("input"),
-                    })
+                    event_sink(
+                        {
+                            "type": "task_tool_call",
+                            "task_id": task.id,
+                            "name": event.get("name"),
+                            "input": event.get("input"),
+                        }
+                    )
             elif event_type == "tool_result":
                 if event_sink:
-                    event_sink({
-                        "type": "task_tool_result",
-                        "task_id": task.id,
-                        "name": event.get("name"),
-                        "result": event.get("result"),
-                        "is_error": event.get("is_error"),
-                    })
+                    event_sink(
+                        {
+                            "type": "task_tool_result",
+                            "task_id": task.id,
+                            "name": event.get("name"),
+                            "result": event.get("result"),
+                            "is_error": event.get("is_error"),
+                        }
+                    )
             elif event_type == "error":
                 raise event["error"]
         return text
@@ -278,31 +287,35 @@ async def _run_plan_agent(
         # Replan logic: if failures and progress < 50%, offer to replan
         if failed_tasks and plan and plan.progress_ratio < 0.5:
             completed = {
-                t.id: t.result
-                for t in plan.tasks
-                if t.status == TaskStatus.COMPLETED and t.result
+                t.id: t.result for t in plan.tasks if t.status == TaskStatus.COMPLETED and t.result
             }
-            failure_reason = "; ".join(
-                f"{tid}: {err}" for tid, err in failed_tasks.items()
+            failure_reason = "; ".join(f"{tid}: {err}" for tid, err in failed_tasks.items())
+            renderer.handle(
+                {
+                    "type": "plan_replan_prompt",
+                    "failure_reason": failure_reason,
+                    "progress": f"{plan.progress_ratio:.0%}",
+                }
             )
-            renderer.handle({
-                "type": "plan_replan_prompt",
-                "failure_reason": failure_reason,
-                "progress": f"{plan.progress_ratio:.0%}",
-            })
             replan_plan = await planner.replan(
-                original_goal, failure_reason, completed,
+                original_goal,
+                failure_reason,
+                completed,
             )
-            renderer.handle({
-                "type": "plan_review_summary",
-                "summary": replan_plan.summary(),
-            })
+            renderer.handle(
+                {
+                    "type": "plan_review_summary",
+                    "summary": replan_plan.summary(),
+                }
+            )
             renderer.handle({"type": "plan_review_instructions"})
             replan_decision = await _review_plan(replan_plan, renderer, review_input)
             if replan_decision.action != "cancel":
                 plan = replan_plan
                 async for event in executor.execute(
-                    plan, run_task, event_sink=event_sink,
+                    plan,
+                    run_task,
+                    event_sink=event_sink,
                 ):
                     renderer.handle(event)
             else:
@@ -413,11 +426,17 @@ async def _handle_slash(
         if not save_fact:
             console.print("[red]Usage:[/red] /save <fact>")
         else:
-            memory_id = MemoryManager(config.memory.long_term_path, project_path=cwd).save(
-                save_fact,
-                scope=save_scope,
+            result = await MemoryManager(
+                config.memory.long_term_path, project_path=cwd
+            ).save_with_classification(
+                save_fact, scope=save_scope, llm_client=agent.llm_client
             )
-            console.print(f"Saved memory {memory_id} ({save_scope})")
+            if result.status == "pending":
+                console.print(f"Created pending memory change: {result.change_id}")
+            elif result.status == "duplicate":
+                console.print(f"Memory already exists: {result.memory_id}")
+            else:
+                console.print(f"Saved memory {result.memory_id} ({save_scope})")
     elif command == "/config":
         console.print_json(json.dumps(config_to_public_dict(config), ensure_ascii=False))
     elif command == "/tools":
@@ -486,7 +505,7 @@ async def _memory_command(arg: str, console: Console, cwd: str, config: PaiCliCo
     if sub in {"", "status"}:
         console.print(manager.status())
         console.print(f"Current project: {manager.project_path}")
-        console.print("/memory list | /memory search <query> | /memory delete <id> | /memory clear")
+        console.print("/memory list | /memory search <query> | /memory delete <id> | /memory clear | /memory pending | /memory apply <id> | /memory reject <id>")
     elif sub == "list":
         rows = manager.list(limit=50)
         console.print(_format_memory_entries(rows) or "(no memories)")
@@ -504,15 +523,31 @@ async def _memory_command(arg: str, console: Console, cwd: str, config: PaiCliCo
             console.print(f"Deleted memory {memory_id}.")
         else:
             console.print(f"Memory not found: {memory_id}")
+    elif sub == "pending":
+        rows = manager.list_pending()
+        console.print(
+            "\n".join(f"{row.id} [{row.operation}] {row.reason}" for row in rows)
+            or "(no pending changes)"
+        )
+    elif sub == "apply":
+        result = manager.apply_pending(rest.strip())
+        console.print(
+            f"Applied memory change: {result or 'retired'}"
+            if result is not None
+            else "Pending change not found"
+        )
+    elif sub == "reject":
+        console.print(
+            "Rejected pending change."
+            if manager.reject_pending(rest.strip())
+            else "Pending change not found"
+        )
     else:
         console.print("[red]Usage:[/red] /memory [list|search <query>|delete <id>|clear]")
 
 
 def _format_memory_entries(rows: list[Any]) -> str:
-    return "\n".join(
-        f"{row.id} [{row.scope}] {row.content}"
-        for row in rows
-    )
+    return "\n".join(f"{row.id} [{row.scope}] {row.content}" for row in rows)
 
 
 def _parse_memory_save(raw: str) -> tuple[str, str]:
@@ -818,7 +853,12 @@ def _bottom_toolbar(
     if context_window > 0:
         used_tokens = int(stats.get("input_tokens") or 0)
         segments.append(("class:toolbar.gap", " "))
-        segments.append(("class:toolbar.ctx.detail", f"({format_tokens(used_tokens)}/{format_tokens(context_window)})"))
+        segments.append(
+            (
+                "class:toolbar.ctx.detail",
+                f"({format_tokens(used_tokens)}/{format_tokens(context_window)})",
+            )
+        )
 
     # Token details (only when we have usage data)
     if has_usage:

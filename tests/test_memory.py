@@ -75,3 +75,36 @@ def test_memory_manager_delete_clear_and_deduplicate(tmp_path):
 
     assert manager.clear() == 2
     assert manager.list() == []
+
+
+def test_memory_manager_applies_and_rejects_pending_changes(tmp_path):
+    storage = tmp_path / "long_term_memory.json"
+    project = tmp_path / "project"
+    project.mkdir()
+    manager = MemoryManager(storage, project_path=project)
+    old_id = manager.save("Use pytest for verification")
+
+    change = manager.propose_change(
+        operation="replace",
+        target_memory_ids=[old_id],
+        proposed_content="Use unittest for verification",
+        reason="The test framework was migrated.",
+        source_fact="Use unittest for verification",
+    )
+
+    assert [item.id for item in manager.list_pending()] == [change.id]
+    assert [item.content for item in manager.list()] == ["Use pytest for verification"]
+    applied_id = manager.apply_pending(change.id)
+    assert [item.content for item in manager.list()] == ["Use unittest for verification"]
+    assert applied_id
+    assert manager.list_pending() == []
+
+    rejected = manager.propose_change(
+        operation="retire",
+        target_memory_ids=[applied_id],
+        proposed_content="",
+        reason="No longer applicable.",
+        source_fact="Forget the test framework preference",
+    )
+    assert manager.reject_pending(rejected.id)
+    assert [item.content for item in manager.list()] == ["Use unittest for verification"]
