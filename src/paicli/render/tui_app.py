@@ -202,7 +202,7 @@ class PaiCliApp(App):
             self._memory_command(arg, chat_log)
             return
         if command == "/save":
-            self._save_command(arg, chat_log)
+            self.run_worker(self._save_command_async(arg, chat_log))
             return
         if command == "/plan":
             if not arg:
@@ -679,6 +679,9 @@ class PaiCliApp(App):
             "/context - 查看当前上下文状态",
             "/memory - 查看记忆系统状态",
             "/save <事实> - 保存项目级长期记忆",
+            "/memory pending - 查看待确认的记忆变更",
+            "/memory apply <id> - 确认待处理记忆变更",
+            "/memory reject <id> - 拒绝待处理记忆变更",
             "/config - 查看当前配置",
             "/tools - 查看可用工具",
             "/model - 查看当前模型",
@@ -774,6 +777,23 @@ class PaiCliApp(App):
                 chat_log.add_info(f"Deleted memory {memory_id}.")
             else:
                 chat_log.add_info(f"Memory not found: {memory_id}")
+        elif sub == "pending":
+            rows = manager.list_pending()
+            chat_log.add_info(
+                "\n".join(f"{row.id} [{row.operation}] {row.reason}" for row in rows)
+                or "(no pending changes)"
+            )
+        elif sub == "apply":
+            result = manager.apply_pending(rest.strip())
+            chat_log.add_info(
+                f"Applied memory change: {result}" if result is not None else "Pending change not found"
+            )
+        elif sub == "reject":
+            chat_log.add_info(
+                "Rejected pending change."
+                if manager.reject_pending(rest.strip())
+                else "Pending change not found"
+            )
 
     def _save_command(self, arg: str, chat_log: ChatLog) -> None:
         from paicli.memory import MemoryManager
@@ -789,6 +809,25 @@ class PaiCliApp(App):
             self.config.memory.long_term_path, project_path=self.cwd
         ).save(text, scope=scope)
         chat_log.add_info(f"Saved memory {memory_id} ({scope})")
+
+    async def _save_command_async(self, arg: str, chat_log: ChatLog) -> None:
+        text = arg.strip()
+        scope = "global" if text.startswith("--global ") else "project"
+        if scope == "global":
+            text = text[len("--global ") :].strip()
+        if not text:
+            chat_log.add_info("[red]Usage:[/red] /save <fact>")
+            return
+        from paicli.memory import MemoryManager
+        result = await MemoryManager(
+            self.config.memory.long_term_path, project_path=self.cwd
+        ).save_with_classification(text, scope=scope, llm_client=self.agent.llm_client)
+        if result.status == "pending":
+            chat_log.add_info(f"Created pending memory change: {result.change_id}")
+        elif result.status == "duplicate":
+            chat_log.add_info(f"Memory already exists: {result.memory_id}")
+        else:
+            chat_log.add_info(f"Saved memory {result.memory_id} ({scope})")
 
     def _mcp_command_info(self, arg: str, chat_log: ChatLog) -> None:
         if self.mcp_manager is None:

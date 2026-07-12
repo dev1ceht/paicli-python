@@ -38,6 +38,7 @@ async def query(
     context = ToolContext(
         cwd=cwd,
         config=config,
+        llm_client=llm_client,
         approval_callback=approval_callback,
         session_allowed_tools=session_allowed_tools if session_allowed_tools is not None else set(),
     )

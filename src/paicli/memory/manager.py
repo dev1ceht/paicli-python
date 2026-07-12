@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from paicli.llm.base import LlmClient
+from paicli.types import Message
+
 
 @dataclass(slots=True)
 class MemoryEntry:
@@ -28,6 +31,26 @@ class MemoryEntry:
         return self.timestamp
 
 
+@dataclass(slots=True)
+class PendingMemoryChange:
+    id: str
+    operation: str
+    scope: str
+    target_memory_ids: list[str]
+    proposed_content: str
+    reason: str
+    source_fact: str
+    timestamp: str
+    project: str = ""
+
+
+@dataclass(slots=True)
+class MemorySaveResult:
+    status: str
+    memory_id: str = ""
+    change_id: str = ""
+
+
 class MemoryManager:
     def __init__(
         self,
@@ -37,9 +60,12 @@ class MemoryManager:
         scope: str | Path | None = None,
     ):
         self.storage_path = Path(storage_path).expanduser()
+        self.pending_path = self.storage_path.with_name("pending_changes.json")
         self.project_path = _normalize_project_path(project_path or scope or Path.cwd())
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_file()
+        if not self.pending_path.exists():
+            self.pending_path.write_text("[]", encoding="utf-8")
 
     def save(
         self,
@@ -73,6 +99,37 @@ class MemoryManager:
         entries.append(entry)
         self._save(entries)
         return entry.id
+
+    async def save_with_classification(
+        self, content: str, *, scope: str, llm_client: LlmClient | None
+    ) -> MemorySaveResult:
+        candidates = self.search(content, limit=5)
+        if not candidates or llm_client is None:
+            return MemorySaveResult("saved", memory_id=self.save(content, scope=scope))
+        try:
+            response = ""
+            prompt = json.dumps({"fact": content, "candidates": [
+                {"id": item.id, "content": item.content} for item in candidates
+            ]}, ensure_ascii=False)
+            async for event in llm_client.chat([Message(role="user", content=prompt)], [], system_prompt=(
+                "Classify the fact against candidates. Return JSON only with relationship "
+                "(duplicate, merge, replace, independent), target_memory_ids, proposed_content, reason."
+            )):
+                if event.get("type") == "text_delta":
+                    response += str(event.get("text") or "")
+            result = json.loads(response)
+            relationship = str(result.get("relationship") or "independent")
+            targets = [str(value) for value in result.get("target_memory_ids") or []]
+            if relationship == "duplicate" and targets:
+                return MemorySaveResult("duplicate", memory_id=targets[0])
+            if relationship in {"merge", "replace"} and targets:
+                change = self.propose_change(operation=relationship, target_memory_ids=targets,
+                    proposed_content=str(result.get("proposed_content") or content),
+                    reason=str(result.get("reason") or "Related memory"), source_fact=content, scope=scope)
+                return MemorySaveResult("pending", change_id=change.id)
+        except Exception:
+            pass
+        return MemorySaveResult("saved", memory_id=self.save(content, scope=scope))
 
     def list(self, limit: int = 20, *, visible_only: bool = True) -> list[MemoryEntry]:
         entries = self._load()
@@ -124,6 +181,85 @@ class MemoryManager:
         entries = self._load()
         self._save([])
         return len(entries)
+
+    def propose_change(
+        self,
+        *,
+        operation: str,
+        target_memory_ids: list[str],
+        proposed_content: str,
+        reason: str,
+        source_fact: str,
+        scope: str = "project",
+    ) -> PendingMemoryChange:
+        if operation not in {"merge", "replace", "retire"}:
+            raise ValueError("unsupported pending memory operation")
+        change = PendingMemoryChange(
+            id=f"change-{uuid4().hex[:8]}",
+            operation=operation,
+            scope=scope,
+            target_memory_ids=target_memory_ids,
+            proposed_content=proposed_content.strip(),
+            reason=reason.strip(),
+            source_fact=source_fact.strip(),
+            timestamp=_format_timestamp(None),
+            project=self.project_path if scope == "project" else "",
+        )
+        changes = self.list_pending(visible_only=False)
+        changes.append(change)
+        self._save_pending(changes)
+        return change
+
+    def list_pending(self, *, visible_only: bool = True) -> list[PendingMemoryChange]:
+        try:
+            raw = json.loads(self.pending_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        changes = [_pending_from_dict(item) for item in raw if isinstance(item, dict)]
+        values = [change for change in changes if change]
+        if visible_only:
+            values = [
+                change
+                for change in values
+                if change.scope == "global" or change.project == self.project_path
+            ]
+        return values
+
+    def reject_pending(self, change_id: str) -> bool:
+        visible = self.list_pending()
+        if not any(change.id == change_id for change in visible):
+            return False
+        changes = self.list_pending(visible_only=False)
+        self._save_pending([change for change in changes if change.id != change_id])
+        return True
+
+    def apply_pending(self, change_id: str) -> str | None:
+        change = next((item for item in self.list_pending() if item.id == change_id), None)
+        if not change:
+            return None
+        changes = self.list_pending(visible_only=False)
+        entries = self._load()
+        if change.operation == "retire":
+            entries = [entry for entry in entries if entry.id not in change.target_memory_ids]
+            result_id = "retired"
+        else:
+            entries = [entry for entry in entries if entry.id not in change.target_memory_ids]
+            metadata = {"source": "fact", "scope": change.scope}
+            if change.scope == "project":
+                metadata["project"] = change.project
+            entry = MemoryEntry(
+                id=f"fact-{uuid4().hex[:8]}",
+                content=change.proposed_content,
+                type="FACT",
+                timestamp=_format_timestamp(None),
+                metadata=metadata,
+                tokenCount=estimate_tokens(change.proposed_content),
+            )
+            entries.append(entry)
+            result_id = entry.id
+        self._save(entries)
+        self._save_pending([item for item in changes if item.id != change_id])
+        return result_id
 
     def status(self) -> str:
         entries = self._load()
@@ -188,6 +324,30 @@ class MemoryManager:
             encoding="utf-8",
         )
 
+    def _save_pending(self, changes: list[PendingMemoryChange]) -> None:
+        self.pending_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": item.id,
+                        "status": "pending",
+                        "operation": item.operation,
+                        "scope": item.scope,
+                        "project": item.project,
+                        "target_memory_ids": item.target_memory_ids,
+                        "proposed_content": item.proposed_content,
+                        "reason": item.reason,
+                        "source_fact": item.source_fact,
+                        "created_at": item.timestamp,
+                    }
+                    for item in changes
+                ],
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
 
 def estimate_tokens(text: str) -> int:
     if not text:
@@ -223,10 +383,30 @@ def _entry_from_dict(item: dict[str, Any]) -> MemoryEntry | None:
         timestamp=str(item.get("timestamp") or datetime.now(UTC).isoformat()),
         metadata=clean_metadata,
         tokenCount=(
-            int(token_count)
-            if isinstance(token_count, int | float)
-            else estimate_tokens(content)
+            int(token_count) if isinstance(token_count, int | float) else estimate_tokens(content)
         ),
+    )
+
+
+def _pending_from_dict(item: dict[str, Any]) -> PendingMemoryChange | None:
+    if str(item.get("status") or "pending") != "pending":
+        return None
+    operation = str(item.get("operation") or "")
+    if operation not in {"merge", "replace", "retire"}:
+        return None
+    targets = item.get("target_memory_ids")
+    if not isinstance(targets, list):
+        return None
+    return PendingMemoryChange(
+        id=str(item.get("id") or f"change-{uuid4().hex[:8]}"),
+        operation=operation,
+        scope="global" if str(item.get("scope") or "").lower() == "global" else "project",
+        target_memory_ids=[str(value) for value in targets],
+        proposed_content=str(item.get("proposed_content") or ""),
+        reason=str(item.get("reason") or ""),
+        source_fact=str(item.get("source_fact") or ""),
+        timestamp=str(item.get("created_at") or ""),
+        project=str(item.get("project") or ""),
     )
 
 

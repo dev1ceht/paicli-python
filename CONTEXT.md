@@ -87,3 +87,19 @@ _Avoid_: advisory warning, approval check
 **Execution sandbox**:
 An optional operating-system-enforced environment in which command tools run with access limited to the workspace and explicitly allowed capabilities. It is distinct from approval, path guards, and command policy; those controls do not constitute a sandbox.
 _Avoid_: working directory, command guard, path sandbox
+
+**Pending memory change**:
+A proposed update, merge, or retirement discovered while an explicitly requested long-term memory is being saved. It does not affect retrieval or stored memories until the user explicitly confirms it.
+_Avoid_: automatic memory update, uncommitted memory
+
+**Long-term memory**:
+A user-requested persistent fact scoped to one project or all projects. It is stable background context, not an automatically extracted transcript of a conversation.
+_Avoid_: conversation archive, automatic user profile
+
+**Memory relationship**:
+The classification of a requested memory against a retrieved existing memory: `duplicate` states the same fact, `merge` adds compatible detail, `replace` supersedes it, and `independent` is a separate fact.
+_Avoid_: similarity score, conflict type
+
+**Structured conversation summary**:
+A compact, fixed-format account of compressed session history. It records the user goal, constraints, files read and modified, completed operations and results, key decisions, current workspace state, blockers, and next steps.
+_Avoid_: transcript, free-form chat summary
