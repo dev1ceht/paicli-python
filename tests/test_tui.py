@@ -184,6 +184,26 @@ def test_ctrl_y_toggles_hitl_between_auto_and_unattended():
     asyncio.run(run())
 
 
+def test_hitl_command_refreshes_startup_banner():
+    config = SimpleNamespace(
+        llm=SimpleNamespace(model="test-model", provider="test-provider"),
+        policy=SimpleNamespace(hitl_mode="auto"),
+    )
+
+    async def run() -> None:
+        app = PaiCliApp(config=config, cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            banner = app.query_one(StartupBanner)
+            app._handle_slash_command("/hitl always")
+            await pilot.pause()
+
+            assert config.policy.hitl_mode == "always"
+            assert app.query_one(StartupBanner) is banner
+            assert "HITL ALWAYS" in banner.plain_text
+
+    asyncio.run(run())
+
+
 def test_tui_merges_incremental_text_deltas_into_one_visible_stream():
     async def run() -> None:
         app = PaiCliApp(cwd=".")
