@@ -8,6 +8,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Static, TextArea
 
+from paicli.config import PaiCliConfig
 from paicli.render.history import PromptHistory
 from paicli.render.textual_widgets import (
     ChatLog,
@@ -200,6 +201,45 @@ def test_hitl_command_refreshes_startup_banner():
             assert config.policy.hitl_mode == "always"
             assert app.query_one(StartupBanner) is banner
             assert "HITL ALWAYS" in banner.plain_text
+
+    asyncio.run(run())
+
+
+def test_tui_model_command_rebuilds_the_idle_agent_and_refreshes_ui(tmp_path):
+    class SwitchingAgent:
+        def __init__(self, config):
+            self.config = config
+            self.history = ["preserved"]
+
+        def reconfigure_llm(self, llm_config):
+            self.config.llm = llm_config
+            return SimpleNamespace(
+                model_name=llm_config.model,
+                provider_name=llm_config.provider,
+                max_context_window=128_000,
+            )
+
+    (tmp_path / ".env").write_text(
+        "PAICLI_QWEN_API_KEY=qwen-key\nPAICLI_QWEN_BASE_URL=https://qwen.example/v1\n",
+        encoding="utf-8",
+    )
+    config = PaiCliConfig()
+    agent = SwitchingAgent(config)
+
+    async def run() -> None:
+        app = PaiCliApp(agent=agent, config=config, cwd=str(tmp_path))
+        app._model = config.llm.model
+        app._provider = config.llm.provider
+        async with app.run_test(size=(80, 24)) as pilot:
+            app._model_command("qwen qwen-turbo", app.query_one(ChatLog))
+            await pilot.pause()
+
+            assert config.llm.provider == "qwen"
+            assert config.llm.model == "qwen-turbo"
+            assert agent.history == ["preserved"]
+            assert app._context_window == 128_000
+            assert "qwen-turbo" in app.query_one(StartupBanner).plain_text
+            assert "Model switched to qwen-turbo (qwen)." in app.query_one(ChatLog).renderable_text()
 
     asyncio.run(run())
 

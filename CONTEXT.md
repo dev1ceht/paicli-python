@@ -4,6 +4,34 @@ PaiCLI is a terminal AI agent that accepts user input in a Textual TUI and relay
 
 ## Language
 
+**Background task**:
+A durable, independently executed agent request whose lifecycle is recorded outside an interactive session.
+_Avoid_: job, async request
+
+**Queued task**:
+A background task accepted for execution but not yet exclusively claimed by a worker.
+_Avoid_: pending task, enqueued task
+
+**Exclusive task claim**:
+The single successful transition of a queued task to `running` by one worker, even when workers compete concurrently.
+_Avoid_: dequeue, task pickup
+
+**Terminal task status**:
+One of `completed`, `failed`, or `canceled`; a task in a terminal status cannot transition again.
+_Avoid_: final state, done state
+
+**Background-task lifecycle**:
+The permitted task transitions are `queued` to `running` or `canceled`, and `running` to `completed`, `failed`, or `canceled`; invalid or stale transitions are ignored.
+_Avoid_: task progress, task state flow
+
+**Background-task cancellation**:
+The irreversible transition of a background task to `canceled`; it prevents later result writes but does not guarantee interruption of an in-flight external operation.
+_Avoid_: force stop, thread kill
+
+**Cooperative task cancellation**:
+The stopping of a canceled background task at the next Agent or tool execution boundary, without forcibly interrupting an in-flight operation or presenting cancellation to the Agent as a tool failure.
+_Avoid_: immediate cancellation, request abort
+
 **TUI submission**:
 A non-empty message or slash command accepted by the focused PaiCLI input field after Enter is pressed.
 _Avoid_: typing, draft
@@ -31,6 +59,18 @@ _Avoid_: loaded skill, built-in tool
 **Model endpoint**:
 The configured OpenAI-compatible HTTP service that produces streaming agent events for a submitted message.
 _Avoid_: frontend, terminal UI
+
+**Hot model switch**:
+A session-scoped change to the active model endpoint that takes effect only while the Agent is idle, so the next submitted message uses the replacement endpoint and its provider-specific connection settings.
+_Avoid_: mid-run switch, live migration
+
+**Provider-specific connection settings**:
+The API key and base URL selected for a model provider from the project's environment configuration.
+_Avoid_: shared credentials, endpoint defaults
+
+**Session history**:
+The accumulated conversation messages retained by an Agent across completed submissions; it remains available after a hot model switch.
+_Avoid_: transcript, chat log
 
 **Context-management evaluation**:
 A paired experiment that compares PaiCLI context-reduction variants for task quality and context consumption.

@@ -4,10 +4,12 @@ from collections.abc import AsyncIterator
 from contextlib import suppress
 from typing import Any
 
-from paicli.config import PaiCliConfig
+from paicli.config import LlmConfig, PaiCliConfig
 from paicli.context import ContextManager
+from paicli.llm import create_llm_client
 from paicli.llm.base import LlmClient
 from paicli.memory import MemoryManager
+from paicli.prompt import PromptAssembler
 from paicli.snapshot import SnapshotService
 from paicli.tools.registry import ToolRegistry
 from paicli.types import Message, QueryResult
@@ -86,6 +88,27 @@ class Agent:
 
     def clear_history(self) -> None:
         self.history = []
+
+    def reconfigure_llm(self, llm_config: LlmConfig) -> LlmClient:
+        """Replace the idle session's client while retaining its conversation history."""
+        client = create_llm_client(llm_config)
+        system_prompt = PromptAssembler(
+            config=self.config,
+            cwd=self.cwd,
+            tool_names=self.tool_registry.list_names(),
+            model=client.model_name,
+            provider=client.provider_name,
+        ).build()
+
+        self.config.llm = llm_config
+        self.llm_client = client
+        self.system_prompt = system_prompt
+        self.context_manager = ContextManager(
+            config=self.config,
+            llm_client=client,
+            cwd=self.cwd,
+        )
+        return client
 
     def _system_prompt_for_message(self, message: str) -> str:
         memory_context = self._memory_context_for_message(message)

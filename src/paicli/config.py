@@ -170,6 +170,31 @@ def load_config(
     return config
 
 
+def load_llm_config_for_provider(
+    project_root: str | Path,
+    provider: str,
+    model: str,
+    env: dict[str, str | None] | None = None,
+) -> LlmConfig:
+    """Resolve one provider's LLM settings without changing persisted configuration."""
+    root = Path(project_root).resolve()
+    data = _config_to_dict(PaiCliConfig())
+
+    user_config = _read_json(_home() / ".paicli" / "config.json")
+    if user_config:
+        data = _deep_merge(data, user_config)
+    project_config = _read_json(root / ".paicli" / "config.json")
+    if project_config:
+        data = _deep_merge(data, project_config)
+
+    resolved_env: dict[str, str | None] = _read_env(root / ".env")
+    resolved_env.update(env if env is not None else os.environ)
+    resolved_env["PAICLI_PROVIDER"] = provider
+    resolved_env["PAICLI_MODEL"] = model
+    data = _apply_env(data, resolved_env)
+    return _dict_to_config(data).llm
+
+
 def get_config_paths(project_root: str | Path | None = None) -> list[Path]:
     paths = [_home() / ".paicli" / "config.json"]
     if project_root:
