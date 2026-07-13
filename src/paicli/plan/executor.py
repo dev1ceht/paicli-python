@@ -616,10 +616,9 @@ _MULTI_STEP_CUES = frozenset([
 
 _ACTION_WORDS = frozenset([
     "列出", "查看", "读取", "显示", "执行", "运行", "搜索",
-    "当前目录", "文件",
 ])
 
-_FILE_READ_WORDS = frozenset(["读取", "查看", "显示", "列出", "搜索", "文件"])
+_FILE_READ_WORDS = frozenset(["读取", "查看", "显示", "列出", "搜索"])
 _COMMAND_WORDS = frozenset(["执行", "运行"])
 
 

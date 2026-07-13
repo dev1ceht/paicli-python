@@ -309,6 +309,7 @@ def test_simple_goal_detection():
     # Multi-step cues should make it complex
     assert is_simple_goal("先读取文件然后修改代码") is False
     assert is_simple_goal("查看配置并运行测试") is False
+    assert is_simple_goal("在work文件夹下实现一个学生管理系统") is False
 
     # Long goals are complex
     assert is_simple_goal("这是一个非常非常长的任务描述需要多个步骤来完成并且需要验证结果") is False
