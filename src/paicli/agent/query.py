@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import time
 from collections.abc import AsyncIterator
@@ -10,7 +11,7 @@ from paicli.config import PaiCliConfig
 from paicli.context import ContextManager
 from paicli.image import parse_image_references
 from paicli.llm.base import LlmClient
-from paicli.tools.base import ToolContext
+from paicli.tools.base import ApprovalPending, ToolContext
 from paicli.tools.executor import ToolExecutor
 from paicli.tools.registry import ToolRegistry
 from paicli.types import Message
@@ -30,35 +31,111 @@ async def query(
     max_turns: int | None = None,
     context_manager: ContextManager | None = None,
     cancellation_check: CancellationCheck | None = None,
+    execution_state: dict[str, Any] | None = None,
+    checkpoint_callback=None,
 ) -> AsyncIterator[dict[str, Any]]:
-    messages = [
-        *(history or []),
-        Message(role="user", content=parse_image_references(user_message, cwd)),
-    ]
+    restored_state = dict(execution_state or {})
+    if restored_state:
+        messages = [_message_from_dict(item) for item in restored_state["messages"]]
+        pending_tool_calls = list(restored_state.get("pending_tool_calls") or [])
+        next_tool_index = int(restored_state.get("next_tool_index") or 0)
+    else:
+        messages = [
+            *(history or []),
+            Message(role="user", content=parse_image_references(user_message, cwd)),
+        ]
+        pending_tool_calls: list[dict[str, Any]] = []
+        next_tool_index = 0
     tool_definitions = tool_registry.definitions()
     executor = ToolExecutor(tool_registry)
+
+    total_tokens = int(restored_state.get("total_tokens") or 0)
+    turn = int(restored_state.get("turn") or 0)
+    tool_call_count = int(restored_state.get("tool_call_count") or 0)
+    started_at = time.monotonic()
+    finalizing = bool(restored_state.get("finalizing", False))
+    limit_reason = str(restored_state.get("limit_reason") or "")
+    last_signature = str(restored_state.get("last_signature") or "")
+    repeated_batches = int(restored_state.get("repeated_batches") or 0)
+    last_actual_usage: dict[str, int] | None = restored_state.get("last_actual_usage")
+    resumed_approval_request = restored_state.get("approval_request")
+    resumed_approval_decision = restored_state.get("approval_decision")
+
+    def checkpoint_state() -> dict[str, Any]:
+        return {
+            "messages": [_message_to_dict(message) for message in messages],
+            "pending_tool_calls": pending_tool_calls,
+            "next_tool_index": next_tool_index,
+            "total_tokens": total_tokens,
+            "turn": turn,
+            "tool_call_count": tool_call_count,
+            "finalizing": finalizing,
+            "limit_reason": limit_reason,
+            "last_signature": last_signature,
+            "repeated_batches": repeated_batches,
+            "last_actual_usage": last_actual_usage,
+        }
+
+    async def background_approval_callback(request: dict[str, Any]) -> str:
+        nonlocal resumed_approval_decision
+        if resumed_approval_decision:
+            if request != resumed_approval_request:
+                raise RuntimeError("approval checkpoint does not match the pending tool call")
+            decision = str(resumed_approval_decision)
+            resumed_approval_decision = None
+            return "approve" if decision == "approved" else "deny"
+        if checkpoint_callback:
+            state = checkpoint_state()
+            state["approval_request"] = request
+            result = checkpoint_callback(state, request)
+            if inspect.isawaitable(result):
+                await result
+            raise ApprovalPending()
+        if not approval_callback:
+            return "deny"
+        result = approval_callback(request)
+        if inspect.isawaitable(result):
+            result = await result
+        return str(result)
+
     context = ToolContext(
         cwd=cwd,
         config=config,
         llm_client=llm_client,
-        approval_callback=approval_callback,
+        approval_callback=background_approval_callback,
         session_allowed_tools=session_allowed_tools if session_allowed_tools is not None else set(),
         cancellation_check=cancellation_check,
     )
 
-    total_tokens = 0
-    turn = 0
-    tool_call_count = 0
-    started_at = time.monotonic()
-    finalizing = False
-    limit_reason = ""
-    last_signature = ""
-    repeated_batches = 0
-    last_actual_usage: dict[str, int] | None = None
-
     turn_limit = max_turns if max_turns is not None else config.agent.max_turns
-    while turn < turn_limit or finalizing:
+    while turn < turn_limit or finalizing or pending_tool_calls:
         raise_if_cancelled(cancellation_check)
+        if pending_tool_calls:
+            for index in range(next_tool_index, len(pending_tool_calls)):
+                next_tool_index = index
+                call = pending_tool_calls[index]
+                name = call.get("function", {}).get("name", "unknown")
+                yield {"type": "tool_call", "name": name, "input": _tool_input(call)}
+                results = await executor.execute_all([call], context)
+                raise_if_cancelled(cancellation_check)
+                for result in results:
+                    yield {
+                        "type": "tool_result",
+                        "name": _tool_name_by_id([call], result.tool_use_id or ""),
+                        "result": result.content,
+                        "is_error": result.is_error,
+                    }
+                    messages.append(
+                        Message(
+                            role="tool",
+                            content=result.content,
+                            tool_call_id=result.tool_use_id,
+                        )
+                    )
+                next_tool_index = index + 1
+            pending_tool_calls = []
+            next_tool_index = 0
+            continue
         if not finalizing:
             if time.monotonic() - started_at >= config.agent.max_elapsed_seconds:
                 limit_reason = "elapsed time limit reached"
@@ -170,27 +247,8 @@ async def query(
             continue
 
         tool_call_count += len(tool_calls)
-        raise_if_cancelled(cancellation_check)
-        for call in tool_calls:
-            name = call.get("function", {}).get("name", "unknown")
-            yield {"type": "tool_call", "name": name, "input": _tool_input(call)}
-
-        tool_results = await executor.execute_all(tool_calls, context)
-        raise_if_cancelled(cancellation_check)
-        for result in tool_results:
-            yield {
-                "type": "tool_result",
-                "name": _tool_name_by_id(tool_calls, result.tool_use_id or ""),
-                "result": result.content,
-                "is_error": result.is_error,
-            }
-            messages.append(
-                Message(
-                    role="tool",
-                    content=result.content,
-                    tool_call_id=result.tool_use_id,
-                )
-            )
+        pending_tool_calls = tool_calls
+        next_tool_index = 0
 
     yield {
         "type": "done",
@@ -198,6 +256,26 @@ async def query(
         "total_tokens": total_tokens,
         "messages": messages,
     }
+
+
+def _message_to_dict(message: Message) -> dict[str, Any]:
+    return {
+        "role": message.role,
+        "content": message.content,
+        "name": message.name,
+        "tool_call_id": message.tool_call_id,
+        "tool_calls": message.tool_calls,
+    }
+
+
+def _message_from_dict(value: dict[str, Any]) -> Message:
+    return Message(
+        role=str(value["role"]),
+        content=value["content"],
+        name=value.get("name"),
+        tool_call_id=value.get("tool_call_id"),
+        tool_calls=list(value.get("tool_calls") or []),
+    )
 
 
 def _merge_tool_delta(tool_states: dict[int, dict[str, Any]], delta: dict[str, Any]) -> None:

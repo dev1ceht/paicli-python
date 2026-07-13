@@ -1,0 +1,3 @@
+# Atomic background-task claims and terminal status protection
+
+PaiCLI will use a short SQLite write transaction and a conditional status update to exclusively claim the oldest `queued` task, rather than selecting and updating it independently. Task completion, failure, and cancellation will also be conditional transitions, so `completed`, `failed`, and `canceled` are irreversible terminal statuses; recovery of tasks left in `running` by a process exit is outside this decision. This preserves a small local SQLite architecture while preventing competing workers and late results from corrupting task state.

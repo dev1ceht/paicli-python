@@ -36,7 +36,14 @@ class QueryEngine:
             provider=llm_client.provider_name,
         ).build()
 
-    async def ask(self, message: str, history: list[Message] | None = None):
+    async def ask(
+        self,
+        message: str,
+        history: list[Message] | None = None,
+        *,
+        execution_state: dict | None = None,
+        checkpoint_callback=None,
+    ):
         agent = Agent(
             llm_client=self.llm_client,
             tool_registry=self.tool_registry,
@@ -47,18 +54,30 @@ class QueryEngine:
             cancellation_check=self.cancellation_check,
         )
         agent.history = list(history or [])
-        async for event in agent.run(message):
+        async for event in agent.run(
+            message,
+            execution_state=execution_state,
+            checkpoint_callback=checkpoint_callback,
+        ):
             yield event
 
     async def ask_complete_async(
         self,
         message: str,
         history: list[Message] | None = None,
+        *,
+        execution_state: dict | None = None,
+        checkpoint_callback=None,
     ) -> QueryResult:
         text = ""
         tokens = 0
         turns = 0
-        async for event in self.ask(message, history):
+        async for event in self.ask(
+            message,
+            history,
+            execution_state=execution_state,
+            checkpoint_callback=checkpoint_callback,
+        ):
             if event.get("type") == "text_delta":
                 text += str(event.get("text") or "")
             elif event.get("type") == "error":

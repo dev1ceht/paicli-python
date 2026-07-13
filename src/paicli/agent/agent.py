@@ -49,7 +49,13 @@ class Agent:
             cwd=cwd,
         )
 
-    async def run(self, message: str) -> AsyncIterator[dict[str, Any]]:
+    async def run(
+        self,
+        message: str,
+        *,
+        execution_state: dict[str, Any] | None = None,
+        checkpoint_callback=None,
+    ) -> AsyncIterator[dict[str, Any]]:
         raise_if_cancelled(self.cancellation_check)
         snapshot = SnapshotService(self.cwd)
         canceled = False
@@ -70,6 +76,8 @@ class Agent:
                 max_turns=self.max_turns,
                 context_manager=self.context_manager,
                 cancellation_check=self.cancellation_check,
+                execution_state=execution_state,
+                checkpoint_callback=checkpoint_callback,
             ):
                 if event.get("type") == "done":
                     self.history = list(event.get("messages") or [])

@@ -22,6 +22,7 @@ from paicli.cancellation import (
 from paicli.config import PaiCliConfig
 from paicli.llm import create_llm_client
 from paicli.runtime.tasks import DurableTaskManager
+from paicli.tools.base import ApprovalPending
 
 
 class RuntimeApiServer:
@@ -48,6 +49,7 @@ class RuntimeApiServer:
         self._ensure_schema()
 
     def serve_forever(self) -> None:
+        self.task_manager.fail_interrupted_tasks()
         for index in range(self.workers):
             thread = threading.Thread(
                 target=self._worker_loop,
@@ -105,11 +107,50 @@ class RuntimeApiServer:
                 task_id = self.task_manager.add(prompt)
                 _send_json(request, 200, {"id": task_id, "status": "queued"})
             elif method == "GET" and path == "/v1/tasks":
-                _send_json(request, 200, {"tasks": [task.to_dict() for task in self.task_manager.list()]})
+                _send_json(
+                    request,
+                    200,
+                    {"tasks": [task.to_dict() for task in self.task_manager.list()]},
+                )
             elif method == "GET" and path.startswith("/v1/tasks/"):
                 task = self.task_manager.get(path.split("/")[3])
                 payload = task.to_dict() if task else {"error": "not found"}
+                if task:
+                    payload["approvals"] = [
+                        approval.to_dict()
+                        for approval in self.task_manager.list_approvals(task.id)
+                    ]
                 _send_json(request, 200 if task else 404, payload)
+            elif method == "POST" and path.startswith("/v1/tasks/") and path.endswith("/retry"):
+                task_id = path.split("/")[3]
+                if not self.task_manager.get(task_id):
+                    _send_json(request, 404, {"error": "not found"})
+                    return
+                retry_id = self.task_manager.retry(task_id)
+                if not retry_id:
+                    _send_json(request, 409, {"error": "only failed tasks can be retried"})
+                    return
+                _send_json(request, 200, {"id": retry_id, "status": "queued", "retry_of": task_id})
+            elif method == "POST" and path.startswith("/v1/tasks/") and path.endswith("/approve"):
+                task_id = path.split("/")[3]
+                if not self.task_manager.get(task_id):
+                    _send_json(request, 404, {"error": "not found"})
+                    return
+                approved = self.task_manager.approve(task_id, source="api")
+                if not approved:
+                    _send_json(request, 409, {"error": "task is not waiting for approval"})
+                    return
+                _send_json(request, 200, {"approved": True, "status": "queued"})
+            elif method == "POST" and path.startswith("/v1/tasks/") and path.endswith("/deny"):
+                task_id = path.split("/")[3]
+                if not self.task_manager.get(task_id):
+                    _send_json(request, 404, {"error": "not found"})
+                    return
+                denied = self.task_manager.deny(task_id, source="api")
+                if not denied:
+                    _send_json(request, 409, {"error": "task is not waiting for approval"})
+                    return
+                _send_json(request, 200, {"denied": True, "status": "queued"})
             elif method == "POST" and path.startswith("/v1/tasks/") and path.endswith("/cancel"):
                 task_id = path.split("/")[3]
                 _send_json(request, 200, {"canceled": self._cancel_task(task_id)})
@@ -153,8 +194,10 @@ class RuntimeApiServer:
                 self._clear_task_cancellation(task.id, cancellation)
                 continue
             try:
-                result = asyncio.run(self._run_task(task.prompt, cancellation))
+                result = asyncio.run(self._run_task(task.id, task.prompt, cancellation))
                 self.task_manager.complete(task.id, result)
+            except ApprovalPending:
+                pass
             except TaskCanceled:
                 pass
             except Exception as exc:  # noqa: BLE001
@@ -164,6 +207,7 @@ class RuntimeApiServer:
 
     async def _run_task(
         self,
+        task_id: str,
         prompt: str,
         cancellation: CancellationToken | None = None,
     ) -> str:
@@ -171,6 +215,39 @@ class RuntimeApiServer:
         raise_if_cancelled(cancellation_check)
         self._ensure_llm_key()
         registry, _manager = await build_tool_registry(config=self.config, cwd=self.cwd)
+        execution_state = self.task_manager.get_checkpoint(task_id)
+        runtime_identity = self._runtime_identity(registry)
+        if execution_state and execution_state.get("runtime_identity") != runtime_identity:
+            approvals = self.task_manager.list_approvals(task_id)
+            request = execution_state.get("approval_request")
+            if not isinstance(request, dict):
+                request = approvals[-1].request if approvals else {}
+            execution_state.pop("approval_decision", None)
+            execution_state["approval_request"] = request
+            execution_state["runtime_identity"] = runtime_identity
+            execution_state["approval_context_stale"] = True
+            approval = self.task_manager.wait_for_approval(
+                task_id,
+                checkpoint=execution_state,
+                request=request,
+                invalidation_reason="runtime_identity_changed",
+            )
+            if not approval:
+                raise TaskCanceled()
+            raise ApprovalPending()
+
+        def checkpoint_callback(
+            state: dict[str, Any], request: dict[str, Any]
+        ) -> None:
+            state["runtime_identity"] = runtime_identity
+            approval = self.task_manager.wait_for_approval(
+                task_id,
+                checkpoint=state,
+                request=request,
+            )
+            if not approval:
+                raise TaskCanceled()
+
         engine = QueryEngine(
             llm_client=create_llm_client(self.config.llm),
             tool_registry=registry,
@@ -178,10 +255,29 @@ class RuntimeApiServer:
             cwd=self.cwd,
             cancellation_check=cancellation_check,
         )
-        operation = asyncio.create_task(engine.ask_complete_async(prompt))
+        if execution_state:
+            operation = asyncio.create_task(
+                engine.ask_complete_async(
+                    prompt,
+                    execution_state=execution_state,
+                    checkpoint_callback=checkpoint_callback,
+                )
+            )
+        else:
+            operation = asyncio.create_task(
+                engine.ask_complete_async(prompt, checkpoint_callback=checkpoint_callback)
+            )
         if cancellation:
             return (await await_with_cancellation(operation, cancellation)).text
         return (await operation).text
+
+    def _runtime_identity(self, registry: Any) -> dict[str, Any]:
+        return {
+            "cwd": self.cwd,
+            "model": self.config.llm.model,
+            "hitl_mode": self.config.policy.hitl_mode,
+            "tools": registry.list_names(),
+        }
 
     def _cancel_task(self, task_id: str) -> bool:
         canceled = self.task_manager.cancel(task_id)
