@@ -106,8 +106,11 @@ HELP_LINES = [
     "/browser disconnect - 切回 isolated 浏览器模式",
     "/task - 查看后台任务列表",
     "/task add <任务内容> - 提交后台任务",
-    "/task cancel <task_id> - 取消后台任务",
-    "/task log <task_id> - 查看后台任务结果",
+    "/task approve <task_id|N|latest> - 批准等待中的后台任务操作",
+    "/task deny <task_id|N|latest> - 拒绝等待中的后台任务操作",
+    "/task cancel <task_id|N|latest> - 取消后台任务",
+    "/task retry <task_id|N|latest> - 重试失败的后台任务",
+    "/task log <task_id|N|latest> - 查看后台任务结果",
     "/mcp - 查看 MCP server 状态",
     "/mcp restart <name> - 重启 MCP server",
     "/mcp logs <name> - 查看 MCP server 日志",
@@ -614,23 +617,37 @@ def _task_command(arg: str, console: Console) -> None:
     if sub == "add" and rest:
         task_id = manager.add(rest)
         console.print(f"Queued {task_id}")
+    elif sub == "approve" and rest:
+        task = manager.resolve_reference(rest)
+        console.print(f"Approved: {manager.approve(task.id) if task else False}")
+    elif sub == "deny" and rest:
+        task = manager.resolve_reference(rest)
+        console.print(f"Denied: {manager.deny(task.id) if task else False}")
+    elif sub == "retry" and rest:
+        task = manager.resolve_reference(rest)
+        task_id = manager.retry(task.id) if task else None
+        console.print(f"Queued retry {task_id}" if task_id else "Only failed tasks can be retried.")
     elif sub == "cancel" and rest:
-        console.print(f"Canceled: {manager.cancel(rest.strip())}")
+        task = manager.resolve_reference(rest)
+        console.print(f"Canceled: {manager.cancel(task.id) if task else False}")
     elif sub == "log" and rest:
-        task = manager.get(rest.strip())
+        task = manager.resolve_reference(rest)
         if not task:
             console.print("(task not found)")
         else:
-            console.print(_format_task_log(task))
+            console.print(_format_task_log(task, manager))
     else:
         rows = manager.list(limit=20)
         console.print(
-            "\n".join(f"{task.id} {task.status} {task.prompt[:80]}" for task in rows)
+            "\n".join(
+                f"{index}. {task.status} {task.prompt[:80]}"
+                for index, task in enumerate(rows, start=1)
+            )
             or "(no tasks)"
         )
 
 
-def _format_task_log(task) -> str:
+def _format_task_log(task, manager: DurableTaskManager) -> str:
     lines = [f"Task {task.id}: {task.status}", f"Created: {task.created_at}"]
     if task.started_at:
         lines.append(f"Started: {task.started_at}")
@@ -642,6 +659,13 @@ def _format_task_log(task) -> str:
         lines.append(f"Result: {task.result}")
     if task.error:
         lines.append(f"Error: {task.error}")
+    approvals = manager.list_approvals(task.id)
+    for approval in approvals:
+        request = approval.to_dict()["request"]
+        lines.append(
+            f"Approval: {approval.status} {request}"
+            + (f" ({approval.decision_source})" if approval.decision_source else "")
+        )
     return "\n".join(lines)
 
 

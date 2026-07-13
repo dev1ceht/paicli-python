@@ -6,7 +6,7 @@ from typing import Any
 from paicli.cancellation import TaskCanceled
 from paicli.policy import AuditLog
 from paicli.policy.command_guard import CommandGuard
-from paicli.tools.base import Tool, ToolContext, ToolDecision, ToolResult
+from paicli.tools.base import ApprovalPending, Tool, ToolContext, ToolDecision, ToolResult
 from paicli.tools.registry import ToolRegistry
 
 
@@ -115,7 +115,7 @@ class ToolExecutor:
                     decision_source=("unattended" if context.config.policy.hitl_mode == "never" else decision_source),
                 )
             return result
-        except TaskCanceled:
+        except (ApprovalPending, TaskCanceled):
             raise
         except Exception as exc:  # noqa: BLE001 - tool errors must flow back to the model
             if tool and _must_audit(tool):

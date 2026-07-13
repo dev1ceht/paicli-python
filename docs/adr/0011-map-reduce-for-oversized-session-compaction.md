@@ -1,0 +1,3 @@
+# Map-Reduce for oversized session compaction
+
+PaiCLI will keep its existing pressure-triggered session compaction and single-call summary path for inputs within the summary-input limit. When the compactable history exceeds that limit, it will summarize bounded chronological chunks and reduce those chunk summaries together with the prior summary, rather than dropping later chunks. A failed or invalid map or reduce result discards all partial LLM summaries and falls back to the existing deterministic compaction. This trades extra model calls only on oversized histories for preservation of decisions and task state across long sessions without admitting incomplete summaries.

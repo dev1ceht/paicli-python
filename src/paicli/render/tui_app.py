@@ -945,10 +945,23 @@ class PaiCliApp(App):
         if sub == "add" and rest:
             task_id = manager.add(rest)
             chat_log.add_info(f"Queued {task_id}")
+        elif sub == "approve" and rest:
+            task = manager.resolve_reference(rest)
+            chat_log.add_info(f"Approved: {manager.approve(task.id) if task else False}")
+        elif sub == "deny" and rest:
+            task = manager.resolve_reference(rest)
+            chat_log.add_info(f"Denied: {manager.deny(task.id) if task else False}")
+        elif sub == "retry" and rest:
+            task = manager.resolve_reference(rest)
+            task_id = manager.retry(task.id) if task else None
+            chat_log.add_info(
+                f"Queued retry {task_id}" if task_id else "Only failed tasks can be retried."
+            )
         elif sub == "cancel" and rest:
-            chat_log.add_info(f"Canceled: {manager.cancel(rest.strip())}")
+            task = manager.resolve_reference(rest)
+            chat_log.add_info(f"Canceled: {manager.cancel(task.id) if task else False}")
         elif sub == "log" and rest:
-            task = manager.get(rest.strip())
+            task = manager.resolve_reference(rest)
             if not task:
                 chat_log.add_info("(task not found)")
             else:
@@ -963,11 +976,22 @@ class PaiCliApp(App):
                     lines.append(f"Result: {task.result}")
                 if task.error:
                     lines.append(f"Error: {task.error}")
+                for approval in manager.list_approvals(task.id):
+                    request = approval.to_dict()["request"]
+                    lines.append(
+                        f"Approval: {approval.status} {request}"
+                        + (
+                            f" ({approval.decision_source})"
+                            if approval.decision_source
+                            else ""
+                        )
+                    )
                 chat_log.add_info("\n".join(lines))
         else:
             rows = manager.list(limit=20)
             output = "\n".join(
-                f"{task.id} {task.status} {task.prompt[:80]}" for task in rows
+                f"{index}. {task.status} {task.prompt[:80]}"
+                for index, task in enumerate(rows, start=1)
             )
             chat_log.add_info(output or "(no tasks)")
 

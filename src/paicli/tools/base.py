@@ -15,6 +15,10 @@ DangerLevel = Literal["safe", "medium", "high"]
 ToolDecision = Literal["approve", "allow_session", "deny", "skip"]
 
 
+class ApprovalPending(Exception):
+    """A background task persisted an approval request and must pause execution."""
+
+
 @dataclass(slots=True)
 class ToolResult:
     content: str

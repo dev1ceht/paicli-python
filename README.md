@@ -183,8 +183,11 @@ uv run paicli -p "解释这个仓库"
 /mcp
 /task
 /task add <task>
-/task cancel <task_id>
-/task log <task_id>
+/task approve <task_id|N|latest>
+/task deny <task_id|N|latest>
+/task cancel <task_id|N|latest>
+/task retry <task_id|N|latest>
+/task log <task_id|N|latest>
 /snapshot
 /snapshot clean
 /restore <snapshot-id-or-index>
@@ -356,6 +359,17 @@ curl -sS -X POST http://127.0.0.1:8080/v1/tasks \
   -d '{"message":"后台总结这个仓库"}'
 
 curl -sS http://127.0.0.1:8080/v1/tasks \
+  -H 'x-api-key: dev-key'
+
+# 查看等待审批任务的脱敏详情，并作出决定
+curl -sS http://127.0.0.1:8080/v1/tasks/<task_id> \
+  -H 'x-api-key: dev-key'
+
+curl -sS -X POST http://127.0.0.1:8080/v1/tasks/<task_id>/approve \
+  -H 'x-api-key: dev-key'
+
+# 使用 /deny 拒绝当前调用，让 Agent 尝试替代方案
+curl -sS -X POST http://127.0.0.1:8080/v1/tasks/<task_id>/deny \
   -H 'x-api-key: dev-key'
 ```
 
