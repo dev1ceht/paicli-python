@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from threading import Event
 
+import pytest
+
+from paicli.cancellation import TaskCanceled
 from paicli.config import load_config
 from paicli.tools import ToolRegistry, get_builtin_tools
 from paicli.tools.base import Tool, ToolContext
@@ -149,3 +153,30 @@ def test_executor_allows_only_the_exact_tool_for_session(tmp_path, monkeypatch):
     assert second[0].is_error
     assert calls == ["executed"]
     assert context.session_allowed_tools == {"first"}
+
+
+def test_executor_propagates_cancellation_without_executing_tools(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config = load_config(project_root=tmp_path)
+    executed = False
+    signal = Event()
+    signal.set()
+
+    async def handler(_payload, _context):
+        nonlocal executed
+        executed = True
+        raise AssertionError("canceled task must not execute a tool")
+
+    registry = ToolRegistry()
+    registry.register(Tool(name="inspect", description="", parameters={}, handler=handler))
+    context = ToolContext(cwd=str(tmp_path), config=config, cancellation_check=signal.is_set)
+
+    async def run():
+        await ToolExecutor(registry).execute_all(
+            [{"id": "call_1", "name": "inspect", "arguments": {}}],
+            context,
+        )
+
+    with pytest.raises(TaskCanceled):
+        asyncio.run(run())
+    assert not executed

@@ -5,6 +5,7 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+from paicli.cancellation import CancellationCheck, TaskCanceled, raise_if_cancelled
 from paicli.config import PaiCliConfig
 from paicli.context import ContextManager
 from paicli.image import parse_image_references
@@ -28,6 +29,7 @@ async def query(
     session_allowed_tools: set[str] | None = None,
     max_turns: int | None = None,
     context_manager: ContextManager | None = None,
+    cancellation_check: CancellationCheck | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     messages = [
         *(history or []),
@@ -41,6 +43,7 @@ async def query(
         llm_client=llm_client,
         approval_callback=approval_callback,
         session_allowed_tools=session_allowed_tools if session_allowed_tools is not None else set(),
+        cancellation_check=cancellation_check,
     )
 
     total_tokens = 0
@@ -55,6 +58,7 @@ async def query(
 
     turn_limit = max_turns if max_turns is not None else config.agent.max_turns
     while turn < turn_limit or finalizing:
+        raise_if_cancelled(cancellation_check)
         if not finalizing:
             if time.monotonic() - started_at >= config.agent.max_elapsed_seconds:
                 limit_reason = "elapsed time limit reached"
@@ -85,11 +89,13 @@ async def query(
             final_system_prompt = system_prompt
 
         try:
+            raise_if_cancelled(cancellation_check)
             async for event in llm_client.chat(
                 messages,
                 [] if finalizing else tool_definitions,
                 system_prompt=final_system_prompt,
             ):
+                raise_if_cancelled(cancellation_check)
                 event_type = event.get("type")
                 if event_type == "text_delta":
                     delta = str(event.get("text") or "")
@@ -112,6 +118,8 @@ async def query(
                 elif event_type == "error":
                     yield {"type": "error", "error": event["error"]}
                     return
+        except TaskCanceled:
+            raise
         except Exception as exc:  # noqa: BLE001 - keep REPL alive on model/network failures
             exc_type = type(exc).__name__
             exc_detail = str(exc) or "(无详细信息)"
@@ -162,11 +170,13 @@ async def query(
             continue
 
         tool_call_count += len(tool_calls)
+        raise_if_cancelled(cancellation_check)
         for call in tool_calls:
             name = call.get("function", {}).get("name", "unknown")
             yield {"type": "tool_call", "name": name, "input": _tool_input(call)}
 
         tool_results = await executor.execute_all(tool_calls, context)
+        raise_if_cancelled(cancellation_check)
         for result in tool_results:
             yield {
                 "type": "tool_result",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from paicli.cancellation import TaskCanceled
 from paicli.policy import AuditLog
 from paicli.policy.command_guard import CommandGuard
 from paicli.tools.base import Tool, ToolContext, ToolDecision, ToolResult
@@ -18,6 +19,7 @@ class ToolExecutor:
         calls: list[dict[str, Any]],
         context: ToolContext,
     ) -> list[ToolResult]:
+        context.raise_if_cancelled()
         read_calls: list[tuple[dict[str, Any], Tool]] = []
         sequential_calls: list[tuple[dict[str, Any], Tool | None]] = []
 
@@ -35,6 +37,7 @@ class ToolExecutor:
 
             async def run_read(call: dict[str, Any], tool: Tool) -> ToolResult:
                 async with semaphore:
+                    context.raise_if_cancelled()
                     return await self._execute_single(call, tool, context)
 
             results.extend(
@@ -42,6 +45,7 @@ class ToolExecutor:
             )
 
         for call, tool in sequential_calls:
+            context.raise_if_cancelled()
             results.append(await self._execute_single(call, tool, context))
 
         return results
@@ -52,6 +56,7 @@ class ToolExecutor:
         tool: Tool | None,
         context: ToolContext,
     ) -> ToolResult:
+        context.raise_if_cancelled()
         tool_call_id = str(call.get("id") or "")
         name = _tool_call_name(call)
         payload = _tool_call_arguments(call)
@@ -110,6 +115,8 @@ class ToolExecutor:
                     decision_source=("unattended" if context.config.policy.hitl_mode == "never" else decision_source),
                 )
             return result
+        except TaskCanceled:
+            raise
         except Exception as exc:  # noqa: BLE001 - tool errors must flow back to the model
             if tool and _must_audit(tool):
                 try:

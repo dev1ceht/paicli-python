@@ -621,13 +621,28 @@ def _task_command(arg: str, console: Console) -> None:
         if not task:
             console.print("(task not found)")
         else:
-            console.print(task.result or task.error or f"Task {task.id} is {task.status}")
+            console.print(_format_task_log(task))
     else:
         rows = manager.list(limit=20)
         console.print(
             "\n".join(f"{task.id} {task.status} {task.prompt[:80]}" for task in rows)
             or "(no tasks)"
         )
+
+
+def _format_task_log(task) -> str:
+    lines = [f"Task {task.id}: {task.status}", f"Created: {task.created_at}"]
+    if task.started_at:
+        lines.append(f"Started: {task.started_at}")
+    if task.finished_at:
+        lines.append(f"Finished: {task.finished_at}")
+    if task.duration_seconds is not None:
+        lines.append(f"Duration: {task.duration_seconds:.2f}s")
+    if task.result:
+        lines.append(f"Result: {task.result}")
+    if task.error:
+        lines.append(f"Error: {task.error}")
+    return "\n".join(lines)
 
 
 def _browser_command(arg: str, console: Console, cwd: str) -> None:
