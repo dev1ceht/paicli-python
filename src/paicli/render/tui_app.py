@@ -952,7 +952,18 @@ class PaiCliApp(App):
             if not task:
                 chat_log.add_info("(task not found)")
             else:
-                chat_log.add_info(task.result or task.error or f"Task {task.id} is {task.status}")
+                lines = [f"Task {task.id}: {task.status}", f"Created: {task.created_at}"]
+                if task.started_at:
+                    lines.append(f"Started: {task.started_at}")
+                if task.finished_at:
+                    lines.append(f"Finished: {task.finished_at}")
+                if task.duration_seconds is not None:
+                    lines.append(f"Duration: {task.duration_seconds:.2f}s")
+                if task.result:
+                    lines.append(f"Result: {task.result}")
+                if task.error:
+                    lines.append(f"Error: {task.error}")
+                chat_log.add_info("\n".join(lines))
         else:
             rows = manager.list(limit=20)
             output = "\n".join(

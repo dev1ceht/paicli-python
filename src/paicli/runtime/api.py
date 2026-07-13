@@ -6,7 +6,6 @@ import os
 import sqlite3
 import threading
 import time
-from dataclasses import asdict
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -14,6 +13,12 @@ from typing import Any
 
 from paicli.agent import QueryEngine
 from paicli.bootstrap import build_tool_registry
+from paicli.cancellation import (
+    CancellationToken,
+    TaskCanceled,
+    await_with_cancellation,
+    raise_if_cancelled,
+)
 from paicli.config import PaiCliConfig
 from paicli.llm import create_llm_client
 from paicli.runtime.tasks import DurableTaskManager
@@ -38,6 +43,8 @@ class RuntimeApiServer:
         self.task_manager = DurableTaskManager(Path.home() / ".paicli" / "tasks" / "tasks.db")
         self.workers = workers
         self._stop = threading.Event()
+        self._task_cancellations: dict[str, CancellationToken] = {}
+        self._task_cancellations_lock = threading.Lock()
         self._ensure_schema()
 
     def serve_forever(self) -> None:
@@ -98,14 +105,14 @@ class RuntimeApiServer:
                 task_id = self.task_manager.add(prompt)
                 _send_json(request, 200, {"id": task_id, "status": "queued"})
             elif method == "GET" and path == "/v1/tasks":
-                _send_json(request, 200, {"tasks": [asdict(t) for t in self.task_manager.list()]})
+                _send_json(request, 200, {"tasks": [task.to_dict() for task in self.task_manager.list()]})
             elif method == "GET" and path.startswith("/v1/tasks/"):
                 task = self.task_manager.get(path.split("/")[3])
-                payload = asdict(task) if task else {"error": "not found"}
+                payload = task.to_dict() if task else {"error": "not found"}
                 _send_json(request, 200 if task else 404, payload)
             elif method == "POST" and path.startswith("/v1/tasks/") and path.endswith("/cancel"):
                 task_id = path.split("/")[3]
-                _send_json(request, 200, {"canceled": self.task_manager.cancel(task_id)})
+                _send_json(request, 200, {"canceled": self._cancel_task(task_id)})
             else:
                 _send_json(request, 404, {"error": "not found"})
         except Exception as exc:  # noqa: BLE001 - API boundary
@@ -138,13 +145,30 @@ class RuntimeApiServer:
             if not task:
                 time.sleep(0.5)
                 continue
+            cancellation = CancellationToken()
+            with self._task_cancellations_lock:
+                self._task_cancellations[task.id] = cancellation
+            current = self.task_manager.get(task.id)
+            if not current or current.status != "running":
+                self._clear_task_cancellation(task.id, cancellation)
+                continue
             try:
-                result = asyncio.run(self._run_task(task.prompt))
+                result = asyncio.run(self._run_task(task.prompt, cancellation))
                 self.task_manager.complete(task.id, result)
+            except TaskCanceled:
+                pass
             except Exception as exc:  # noqa: BLE001
                 self.task_manager.fail(task.id, str(exc))
+            finally:
+                self._clear_task_cancellation(task.id, cancellation)
 
-    async def _run_task(self, prompt: str) -> str:
+    async def _run_task(
+        self,
+        prompt: str,
+        cancellation: CancellationToken | None = None,
+    ) -> str:
+        cancellation_check = cancellation.is_set if cancellation else None
+        raise_if_cancelled(cancellation_check)
         self._ensure_llm_key()
         registry, _manager = await build_tool_registry(config=self.config, cwd=self.cwd)
         engine = QueryEngine(
@@ -152,8 +176,27 @@ class RuntimeApiServer:
             tool_registry=registry,
             config=self.config,
             cwd=self.cwd,
+            cancellation_check=cancellation_check,
         )
-        return (await engine.ask_complete_async(prompt)).text
+        operation = asyncio.create_task(engine.ask_complete_async(prompt))
+        if cancellation:
+            return (await await_with_cancellation(operation, cancellation)).text
+        return (await operation).text
+
+    def _cancel_task(self, task_id: str) -> bool:
+        canceled = self.task_manager.cancel(task_id)
+        if not canceled:
+            return False
+        with self._task_cancellations_lock:
+            cancellation = self._task_cancellations.get(task_id)
+        if cancellation:
+            cancellation.cancel()
+        return True
+
+    def _clear_task_cancellation(self, task_id: str, cancellation: CancellationToken) -> None:
+        with self._task_cancellations_lock:
+            if self._task_cancellations.get(task_id) is cancellation:
+                self._task_cancellations.pop(task_id, None)
 
     def _ensure_llm_key(self) -> None:
         if not self.config.llm.api_key:

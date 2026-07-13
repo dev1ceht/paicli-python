@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from jsonschema import ValidationError, validate
 
+from paicli.cancellation import CancellationCheck, raise_if_cancelled
 from paicli.config import PaiCliConfig
 from paicli.llm.base import LlmClient
 
@@ -31,6 +32,10 @@ class ToolContext:
     )
     session_allowed_tools: set[str] = field(default_factory=set)
     llm_client: LlmClient | None = None
+    cancellation_check: CancellationCheck | None = None
+
+    def raise_if_cancelled(self) -> None:
+        raise_if_cancelled(self.cancellation_check)
 
 
 @dataclass(slots=True)
@@ -74,6 +79,7 @@ class Tool:
         return payload
 
     async def execute(self, payload: dict[str, Any], context: ToolContext) -> ToolResult:
+        context.raise_if_cancelled()
         data = self.validate(payload)
         return await asyncio.wait_for(self.handler(data, context), timeout=self.timeout)
 

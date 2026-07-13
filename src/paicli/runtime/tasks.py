@@ -13,8 +13,33 @@ class TaskRecord:
     status: str
     created_at: str
     updated_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
     result: str | None = None
     error: str | None = None
+
+    @property
+    def duration_seconds(self) -> float | None:
+        if not self.started_at:
+            return None
+        end_at = self.finished_at or (_now() if self.status == "running" else None)
+        if not end_at:
+            return None
+        return max(0.0, (datetime.fromisoformat(end_at) - datetime.fromisoformat(self.started_at)).total_seconds())
+
+    def to_dict(self) -> dict[str, str | float | None]:
+        return {
+            "id": self.id,
+            "prompt": self.prompt,
+            "status": self.status,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "duration_seconds": self.duration_seconds,
+            "result": self.result,
+            "error": self.error,
+        }
 
 
 class DurableTaskManager:
@@ -43,7 +68,7 @@ class DurableTaskManager:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
-                select id, prompt, status, created_at, updated_at, result, error
+                select id, prompt, status, created_at, updated_at, started_at, finished_at, result, error
                 from tasks
                 where status = 'queued'
                 order by created_at
@@ -56,14 +81,16 @@ class DurableTaskManager:
             cursor = conn.execute(
                 """
                 update tasks
-                set status = 'running', updated_at = ?
+                set status = 'running', updated_at = ?, started_at = ?
                 where id = ? and status = 'queued'
                 """,
-                (updated_at, row[0]),
+                (updated_at, updated_at, row[0]),
             )
             if cursor.rowcount != 1:
                 return None
-        return TaskRecord(*row[:2], "running", row[3], updated_at, row[5], row[6])
+        return TaskRecord(
+            row[0], row[1], "running", row[3], updated_at, updated_at, row[6], row[7], row[8]
+        )
 
     def complete(self, task_id: str, result: str) -> bool:
         return self._update(task_id, "completed", result=result, error=None, from_status="running")
@@ -73,13 +100,14 @@ class DurableTaskManager:
 
     def cancel(self, task_id: str) -> bool:
         with self._connect() as conn:
+            now = _now()
             cursor = conn.execute(
                 """
                 update tasks
-                set status = 'canceled', updated_at = ?
+                set status = 'canceled', updated_at = ?, finished_at = ?
                 where id = ? and status in ('queued', 'running')
                 """,
-                (_now(), task_id),
+                (now, now, task_id),
             )
             return cursor.rowcount > 0
 
@@ -87,7 +115,7 @@ class DurableTaskManager:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                select id, prompt, status, created_at, updated_at, result, error
+                select id, prompt, status, created_at, updated_at, started_at, finished_at, result, error
                 from tasks
                 order by created_at desc
                 limit ?
@@ -100,7 +128,7 @@ class DurableTaskManager:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                select id, prompt, status, created_at, updated_at, result, error
+                select id, prompt, status, created_at, updated_at, started_at, finished_at, result, error
                 from tasks
                 where id = ?
                 """,
@@ -118,13 +146,14 @@ class DurableTaskManager:
         from_status: str,
     ) -> bool:
         with self._connect() as conn:
+            now = _now()
             cursor = conn.execute(
                 """
                 update tasks
-                set status = ?, result = ?, error = ?, updated_at = ?
+                set status = ?, result = ?, error = ?, updated_at = ?, finished_at = ?
                 where id = ? and status = ?
                 """,
-                (status, result, error, _now(), task_id, from_status),
+                (status, result, error, now, now, task_id, from_status),
             )
             return cursor.rowcount == 1
 
@@ -138,6 +167,8 @@ class DurableTaskManager:
                     status text not null,
                     created_at text not null,
                     updated_at text not null,
+                    started_at text,
+                    finished_at text,
                     result text,
                     error text
                 )

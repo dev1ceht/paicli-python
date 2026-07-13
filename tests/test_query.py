@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from threading import Event
 from typing import Any
+
+import pytest
 
 from paicli.agent import QueryEngine
 from paicli.agent.agent import Agent
+from paicli.cancellation import TaskCanceled
 from paicli.config import LlmConfig, load_config
 from paicli.tools import ToolRegistry, get_builtin_tools
 from paicli.tools.base import Tool, ToolResult
@@ -122,6 +126,27 @@ def test_query_engine_executes_tool_and_replays_result(tmp_path, monkeypatch):
     result = asyncio.run(run())
     assert result.text == "done"
     assert result.turns == 2
+
+
+def test_background_query_stops_at_a_cancellation_boundary(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PAICLI_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    config = load_config(project_root=tmp_path)
+    signal = Event()
+    signal.set()
+    client = FakeClient()
+    registry = ToolRegistry()
+    engine = QueryEngine(
+        llm_client=client,
+        tool_registry=registry,
+        config=config,
+        cwd=str(tmp_path),
+        cancellation_check=signal.is_set,
+    )
+
+    with pytest.raises(TaskCanceled):
+        asyncio.run(engine.ask_complete_async("do work"))
+    assert client.calls == 0
 
 
 def test_query_engine_injects_relevant_long_term_memory(tmp_path, monkeypatch):

@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import suppress
 from typing import Any
 
+from paicli.cancellation import CancellationCheck, TaskCanceled, raise_if_cancelled
 from paicli.config import LlmConfig, PaiCliConfig
 from paicli.context import ContextManager
 from paicli.llm import create_llm_client
@@ -28,6 +29,7 @@ class Agent:
         config: PaiCliConfig,
         approval_callback=None,
         max_turns: int | None = None,
+        cancellation_check: CancellationCheck | None = None,
     ):
         self.llm_client = llm_client
         self.tool_registry = tool_registry
@@ -36,6 +38,7 @@ class Agent:
         self.config = config
         self.approval_callback = approval_callback
         self.max_turns = max_turns if max_turns is not None else config.agent.max_turns
+        self.cancellation_check = cancellation_check
         self.history: list[Message] = []
         self.session_allowed_tools: set[str] = set()
         
@@ -47,7 +50,9 @@ class Agent:
         )
 
     async def run(self, message: str) -> AsyncIterator[dict[str, Any]]:
+        raise_if_cancelled(self.cancellation_check)
         snapshot = SnapshotService(self.cwd)
+        canceled = False
         with suppress(Exception):
             snapshot.create("pre-turn")
         try:
@@ -64,13 +69,18 @@ class Agent:
                 session_allowed_tools=self.session_allowed_tools,
                 max_turns=self.max_turns,
                 context_manager=self.context_manager,
+                cancellation_check=self.cancellation_check,
             ):
                 if event.get("type") == "done":
                     self.history = list(event.get("messages") or [])
                 yield event
+        except TaskCanceled:
+            canceled = True
+            raise
         finally:
-            with suppress(Exception):
-                snapshot.create("post-turn")
+            if not canceled:
+                with suppress(Exception):
+                    snapshot.create("post-turn")
 
     async def run_complete(self, message: str) -> QueryResult:
         text = ""

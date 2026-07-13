@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from paicli.agent.agent import Agent
+from paicli.cancellation import CancellationCheck
 from paicli.config import PaiCliConfig
 from paicli.llm.base import LlmClient
 from paicli.prompt import PromptAssembler
@@ -19,12 +20,14 @@ class QueryEngine:
         config: PaiCliConfig,
         cwd: str,
         approval_callback=None,
+        cancellation_check: CancellationCheck | None = None,
     ):
         self.llm_client = llm_client
         self.tool_registry = tool_registry
         self.config = config
         self.cwd = cwd
         self.approval_callback = approval_callback
+        self.cancellation_check = cancellation_check
         self.system_prompt = PromptAssembler(
             config=config,
             cwd=cwd,
@@ -41,6 +44,7 @@ class QueryEngine:
             cwd=self.cwd,
             config=self.config,
             approval_callback=self.approval_callback,
+            cancellation_check=self.cancellation_check,
         )
         agent.history = list(history or [])
         async for event in agent.run(message):

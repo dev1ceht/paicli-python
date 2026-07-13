@@ -4,6 +4,9 @@ import asyncio
 import glob as glob_module
 import os
 import re
+import signal
+import subprocess
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -374,19 +377,28 @@ async def bash(payload: dict[str, Any], context: ToolContext) -> ToolResult:
     command = str(payload["command"])
     CommandGuard(context.config.policy.command_blacklist).validate(command)
     timeout = float(payload.get("timeout") or context.config.tools.timeout)
+    process_options: dict[str, Any] = {}
+    if os.name == "nt":
+        process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        process_options["start_new_session"] = True
     proc = await asyncio.create_subprocess_shell(
         command,
         cwd=context.cwd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=os.environ.copy(),
+        **process_options,
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError:
-        proc.kill()
-        await proc.wait()
+        await _stop_process_tree(proc)
         return ToolResult(f"Command timed out after {timeout:.0f}s", is_error=True)
+    except asyncio.CancelledError:
+        if context.cancellation_check and proc.returncode is None:
+            await _stop_process_tree(proc)
+        raise
     output = (stdout + stderr).decode("utf-8", errors="replace")
     if len(output) > 20_000:
         output = output[:20_000] + "\n... [truncated]"
@@ -394,6 +406,40 @@ async def bash(payload: dict[str, Any], context: ToolContext) -> ToolResult:
         output or f"(exit {proc.returncode}, no output)",
         is_error=proc.returncode != 0,
     )
+
+
+async def _stop_process_tree(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is not None:
+        return
+    if os.name == "nt":
+        try:
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill",
+                "/PID",
+                str(proc.pid),
+                "/T",
+                "/F",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await killer.wait()
+        except OSError:
+            with suppress(ProcessLookupError):
+                proc.kill()
+    else:
+        with suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGTERM)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=3)
+    except TimeoutError:
+        if os.name != "nt":
+            with suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            with suppress(ProcessLookupError):
+                proc.kill()
+        with suppress(TimeoutError):
+            await asyncio.wait_for(proc.wait(), timeout=3)
 
 
 async def web_search(payload: dict[str, Any], _context: ToolContext) -> ToolResult:
