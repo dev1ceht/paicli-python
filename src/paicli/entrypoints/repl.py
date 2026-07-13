@@ -274,6 +274,7 @@ async def _run_plan_agent(
 
         decision = await _review_plan(plan, renderer, review_input)
         if decision.action == "cancel":
+            plan.status = PlanStatus.CANCELLED
             renderer.handle({"type": "plan_cancelled"})
             break
         if decision.action == "supplement":
@@ -322,6 +323,7 @@ async def _run_plan_agent(
                 ):
                     renderer.handle(event)
             else:
+                replan_plan.status = PlanStatus.CANCELLED
                 renderer.handle({"type": "plan_cancelled"})
 
         break

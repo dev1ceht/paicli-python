@@ -13,6 +13,7 @@ from paicli.plan import (
     PlanAndExecuteAgent,
     PlanExecutor,
     PlanReviewDecision,
+    PlanStatus,
     PlanTask,
     TaskStatus,
     TaskType,
@@ -23,7 +24,6 @@ from paicli.plan import (
     parse_plan_review_input,
 )
 from paicli.render import RichRenderer
-
 
 # ---------------------------------------------------------------------------
 # Existing tests (updated for new API)
@@ -188,13 +188,16 @@ def test_run_plan_agent_cancel_does_not_execute_tasks():
     agent = FakeAgent(['{"tasks": [{"id": "inspect", "description": "Inspect files"}]}'])
     stream = StringIO()
     renderer = RichRenderer(console=Console(file=stream, color_system=None, width=120))
+    reviewed_plans: list[ExecutionPlan] = []
 
-    async def review(_plan: ExecutionPlan, _expanded: bool) -> PlanReviewDecision:
+    async def review(plan: ExecutionPlan, _expanded: bool) -> PlanReviewDecision:
+        reviewed_plans.append(plan)
         return PlanReviewDecision.cancel()
 
     asyncio.run(_run_plan_agent(agent, renderer, "ship it", review_input=review))
 
     assert agent.run_prompts == []
+    assert reviewed_plans[0].status == PlanStatus.CANCELLED
     assert "已取消" in stream.getvalue()
 
 
