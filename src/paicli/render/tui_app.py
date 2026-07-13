@@ -732,14 +732,32 @@ class PaiCliApp(App):
             chat_log.add_info(f"{self.config.llm.model} ({self.config.llm.provider})")
             return
         parts = arg.split()
+        if len(parts) > 2:
+            chat_log.add_info("[red]Usage:[/red] /model <model> | /model <provider> <model>")
+            return
         if len(parts) == 1:
-            self.config.llm.model = parts[0]
+            provider, model = self.config.llm.provider, parts[0]
         else:
-            self.config.llm.provider = parts[0]
-            self.config.llm.model = parts[1]
-        chat_log.add_info(
-            "Model updated for newly created clients. Restart REPL to rebuild the active client."
-        )
+            provider, model = parts
+        if self._agent_running or self.agent is None:
+            chat_log.add_info("[yellow]Model switching is available only while the Agent is idle.[/yellow]")
+            return
+
+        from paicli.config import load_llm_config_for_provider
+
+        llm_config = load_llm_config_for_provider(self.cwd, provider, model)
+        if not llm_config.api_key:
+            chat_log.add_info(
+                f"[red]Model switch failed:[/red] no API key configured for {provider}."
+            )
+            return
+        client = self.agent.reconfigure_llm(llm_config)
+        self._model = client.model_name
+        self._provider = client.provider_name
+        self._context_window = client.max_context_window
+        self.query_one(StartupBanner).update_model(self._model, self._provider)
+        self._update_status_bar()
+        chat_log.add_info(f"Model switched to {self._model} ({self._provider}).")
 
     def _hitl_command(self, arg: str, chat_log: ChatLog) -> None:
         if arg in {"always", "auto", "never"}:

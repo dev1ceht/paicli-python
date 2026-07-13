@@ -38,6 +38,9 @@ class DurableTaskManager:
 
     def claim_next(self) -> TaskRecord | None:
         with self._connect() as conn:
+            # Acquire the SQLite write lock before reading so only this worker can
+            # observe and claim the next queued task in this transaction.
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
                 select id, prompt, status, created_at, updated_at, result, error
@@ -49,17 +52,24 @@ class DurableTaskManager:
             ).fetchone()
             if not row:
                 return None
-            conn.execute(
-                "update tasks set status = 'running', updated_at = ? where id = ?",
-                (_now(), row[0]),
+            updated_at = _now()
+            cursor = conn.execute(
+                """
+                update tasks
+                set status = 'running', updated_at = ?
+                where id = ? and status = 'queued'
+                """,
+                (updated_at, row[0]),
             )
-        return TaskRecord(*row[:2], "running", row[3], _now(), row[5], row[6])
+            if cursor.rowcount != 1:
+                return None
+        return TaskRecord(*row[:2], "running", row[3], updated_at, row[5], row[6])
 
-    def complete(self, task_id: str, result: str) -> None:
-        self._update(task_id, "completed", result=result, error=None)
+    def complete(self, task_id: str, result: str) -> bool:
+        return self._update(task_id, "completed", result=result, error=None, from_status="running")
 
-    def fail(self, task_id: str, error: str) -> None:
-        self._update(task_id, "failed", result=None, error=error)
+    def fail(self, task_id: str, error: str) -> bool:
+        return self._update(task_id, "failed", result=None, error=error, from_status="running")
 
     def cancel(self, task_id: str) -> bool:
         with self._connect() as conn:
@@ -105,16 +115,18 @@ class DurableTaskManager:
         *,
         result: str | None,
         error: str | None,
-    ) -> None:
+        from_status: str,
+    ) -> bool:
         with self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 update tasks
                 set status = ?, result = ?, error = ?, updated_at = ?
-                where id = ?
+                where id = ? and status = ?
                 """,
-                (status, result, error, _now(), task_id),
+                (status, result, error, _now(), task_id, from_status),
             )
+            return cursor.rowcount == 1
 
     def _ensure_schema(self) -> None:
         with self._connect() as conn:

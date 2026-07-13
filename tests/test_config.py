@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+from io import StringIO
 
-from paicli.config import load_config
+from rich.console import Console
+
+from paicli.config import PaiCliConfig, load_config, load_llm_config_for_provider
+from paicli.entrypoints.repl import _model_command
 
 
 def test_config_precedence(tmp_path, monkeypatch):
@@ -97,3 +101,61 @@ def test_paicli_prefixed_deepseek_api_key_is_supported(tmp_path, monkeypatch):
     config = load_config(project_root=tmp_path)
 
     assert config.llm.api_key == "paicli-deepseek-key"
+
+
+def test_provider_switch_resolves_target_provider_settings_from_project_env(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for key in ["PAICLI_API_KEY", "PAICLI_BASE_URL"]:
+        monkeypatch.delenv(key, raising=False)
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "PAICLI_PROVIDER=deepseek",
+                "PAICLI_DEEPSEEK_API_KEY=deepseek-key",
+                "PAICLI_QWEN_API_KEY=qwen-key",
+                "PAICLI_QWEN_BASE_URL=https://qwen.example/v1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    llm = load_llm_config_for_provider(tmp_path, "qwen", "qwen-turbo")
+
+    assert llm.provider == "qwen"
+    assert llm.model == "qwen-turbo"
+    assert llm.api_key == "qwen-key"
+    assert llm.base_url == "https://qwen.example/v1"
+
+
+def test_legacy_repl_model_command_switches_the_active_agent(tmp_path, monkeypatch):
+    class SwitchingAgent:
+        def __init__(self, config):
+            self.config = config
+            self.configured = None
+
+        def reconfigure_llm(self, llm_config):
+            self.configured = llm_config
+            self.config.llm = llm_config
+            return type(
+                "Client",
+                (),
+                {"model_name": llm_config.model, "provider_name": llm_config.provider},
+            )()
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / ".env").write_text(
+        "PAICLI_QWEN_API_KEY=qwen-key\n",
+        encoding="utf-8",
+    )
+    config = PaiCliConfig()
+    agent = SwitchingAgent(config)
+
+    _model_command(
+        "qwen qwen-turbo", Console(file=StringIO()), str(tmp_path), config, agent
+    )
+
+    assert agent.configured is not None
+    assert config.llm.provider == "qwen"
+    assert config.llm.model == "qwen-turbo"

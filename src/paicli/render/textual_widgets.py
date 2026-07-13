@@ -220,6 +220,23 @@ class StartupBanner(Vertical):
         )
         self.query_one("#banner-hitl", Static).update(Text(hitl, style="#60d8ff"))
 
+    def update_model(self, model: str, provider: str) -> None:
+        """Refresh the active endpoint pills without replacing the banner."""
+        self._model = model
+        self._provider = provider
+        self._details_text = (
+            "Ready to build\n"
+            f"{model}  {provider}  {self._hitl}  Tools: {self._tools}  "
+            f"Skills: {self._skills}  MCP: {self._mcp_servers} servers\n"
+            f"{self._cwd}\n/help commands  路  Ctrl+Y YOLO mode"
+        )
+        self.query_one("#banner-model", Static).update(
+            Text.assemble(("● ", "#a8ff60"), (model, "#f0f6fc"))
+        )
+        self.query_one("#banner-provider", Static).update(
+            Text.assemble(("● ", "#60d8ff"), (provider, "#f0f6fc"))
+        )
+
     def compose(self) -> ComposeResult:
         with Horizontal(classes="banner-main"):
             with Vertical(classes="banner-identity"):
@@ -231,10 +248,12 @@ class StartupBanner(Vertical):
                 with Horizontal(classes="banner-pills"):
                     yield Static(
                         Text.assemble(("● ", "#a8ff60"), (self._model, "#f0f6fc")),
+                        id="banner-model",
                         classes="banner-pill",
                     )
                     yield Static(
                         Text.assemble(("● ", "#60d8ff"), (self._provider, "#f0f6fc")),
+                        id="banner-provider",
                         classes="banner-pill",
                     )
                     yield Static(

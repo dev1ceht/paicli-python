@@ -5,7 +5,7 @@ from typing import Any
 
 from paicli.agent import QueryEngine
 from paicli.agent.agent import Agent
-from paicli.config import load_config
+from paicli.config import LlmConfig, load_config
 from paicli.tools import ToolRegistry, get_builtin_tools
 from paicli.tools.base import Tool, ToolResult
 from paicli.types import Message
@@ -243,6 +243,35 @@ def test_agent_compacts_actual_messages_and_writes_back_history(tmp_path, monkey
     written_history = "\n".join(str(message.content) for message in agent.history)
     assert "Summarized old query history" in written_history
     assert old_secret not in written_history
+
+
+def test_agent_reconfigure_llm_rebuilds_context_manager_and_preserves_history(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config = load_config(project_root=tmp_path)
+    config.features.skill = False
+    registry = ToolRegistry()
+    agent = Agent(
+        llm_client=FakeClient(),
+        tool_registry=registry,
+        system_prompt="old prompt",
+        cwd=str(tmp_path),
+        config=config,
+    )
+    agent.history = [Message(role="user", content="keep this")]
+    old_context_manager = agent.context_manager
+
+    client = agent.reconfigure_llm(
+        LlmConfig(provider="qwen", model="qwen-turbo", api_key="qwen-key")
+    )
+
+    assert agent.llm_client is client
+    assert agent.context_manager is not old_context_manager
+    assert agent.context_manager.llm_client is client
+    assert agent.history == [Message(role="user", content="keep this")]
+    assert config.llm.model == "qwen-turbo"
+    assert "Model: qwen-turbo (qwen)" in agent.system_prompt
 
 
 def test_query_engine_finalizes_without_tools_after_repeated_tool_batches(tmp_path, monkeypatch):

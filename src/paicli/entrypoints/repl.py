@@ -86,8 +86,8 @@ HELP_LINES = [
     "/config - 查看当前配置",
     "/tools - 查看可用工具",
     "/model - 查看当前模型",
-    "/model <模型名> - 切换当前模型名（重启 REPL 后生效）",
-    "/model <provider> <model> - 切换 provider 和模型（重启 REPL 后生效）",
+    "/model <模型名> - 热切换当前 provider 的模型（空闲时立即生效）",
+    "/model <provider> <model> - 热切换 provider 和模型，并读取该 provider 的 .env 凭据",
     "/plan - 查看计划模式用法",
     "/plan <任务内容> - 直接用计划模式执行这条任务",
     "/team - 查看 Multi-Agent 模式用法",
@@ -477,7 +477,7 @@ async def _handle_slash(
                 "Execute this task and review the result:\n" + arg,
             )
     elif command == "/model":
-        _model_command(arg, console, config)
+        _model_command(arg, console, cwd, config, agent)
     elif command == "/skill":
         _skill_command(arg, console, cwd)
     elif command == "/mcp":
@@ -569,19 +569,29 @@ def _hitl_command(arg: str, console: Console, config: PaiCliConfig) -> None:
     console.print(f"HITL mode: {config.policy.hitl_mode}")
 
 
-def _model_command(arg: str, console: Console, config: PaiCliConfig) -> None:
+def _model_command(
+    arg: str, console: Console, cwd: str, config: PaiCliConfig, agent: Agent
+) -> None:
     if not arg:
         console.print(f"{config.llm.model} ({config.llm.provider})")
         return
     parts = arg.split()
+    if len(parts) > 2:
+        console.print("[red]Usage:[/red] /model <model> | /model <provider> <model>")
+        return
     if len(parts) == 1:
-        config.llm.model = parts[0]
+        provider, model = config.llm.provider, parts[0]
     else:
-        config.llm.provider = parts[0]
-        config.llm.model = parts[1]
-    console.print(
-        "Model updated for newly created clients. Restart REPL to rebuild the active client."
-    )
+        provider, model = parts
+
+    from paicli.config import load_llm_config_for_provider
+
+    llm_config = load_llm_config_for_provider(cwd, provider, model)
+    if not llm_config.api_key:
+        console.print(f"[red]Model switch failed:[/red] no API key configured for {provider}.")
+        return
+    client = agent.reconfigure_llm(llm_config)
+    console.print(f"Model switched to {client.model_name} ({client.provider_name}).")
 
 
 def _skill_command(arg: str, console: Console, cwd: str) -> None:
