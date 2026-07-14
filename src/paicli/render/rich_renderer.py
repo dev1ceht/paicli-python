@@ -171,6 +171,22 @@ class RichRenderer:
             self._update_live_thinking()
         elif event_type == "usage":
             self._record_usage(event.get("usage") or {})
+        elif event_type == "retry":
+            scope = event.get("scope", "call")
+            target = event.get("tool_name") or event.get("model") or ""
+            self.console.print(
+                f"[yellow]Retrying {scope} {target} "
+                f"({event.get('attempt')}/{event.get('max_retries')}) "
+                f"after {float(event.get('delay') or 0):.2f}s "
+                f"[{event.get('error_kind', 'unknown')}][/yellow]"
+            )
+        elif event_type == "retry_exhausted":
+            target = event.get("tool_name") or event.get("model") or ""
+            self.console.print(
+                f"[bold red]Retry exhausted for {event.get('scope', 'call')} {target} "
+                f"after {event.get('attempt')} retries "
+                f"[{event.get('error_kind', 'unknown')}][/bold red]"
+            )
         elif event_type == "context_status":
             self._pressure_tier = event.get("pressure_tier")
         elif event_type == "turn_complete":
@@ -266,9 +282,7 @@ class RichRenderer:
             duration = event.get("duration")
             duration_str = f" ({format_elapsed(duration)})" if duration else ""
             self._flush_task_output(task_id)
-            self.console.print(
-                f"\u2705 [green]\u5b8c\u6210[/green] {task_id}{duration_str}"
-            )
+            self.console.print(f"\u2705 [green]\u5b8c\u6210[/green] {task_id}{duration_str}")
         elif event_type == "task_failed":
             task_id = event.get("task_id")
             self._flush_task_output(task_id)
@@ -279,11 +293,29 @@ class RichRenderer:
             self.console.print(
                 f"\u23ed\ufe0f [yellow]\u4efb\u52a1\u8df3\u8fc7:[/yellow] {event.get('task_id')}"
             )
+        elif event_type == "task_blocked":
+            self.console.print(
+                f"⛔ [yellow]任务阻塞:[/yellow] {event.get('task_id')} "
+                f"依赖={event.get('dependencies') or []}"
+            )
         elif event_type == "plan_failed":
             self._phase = "idle"
             self._record_run_summary({})
             detail = event.get("error") or event.get("failed")
             self.console.print(f"[bold red]\u274c \u8ba1\u5212\u5931\u8d25:[/bold red] {detail}")
+            results = event.get("results") or {}
+            if results:
+                self.console.print(f"[dim]部分完成: {len(results)} 个任务[/dim]")
+        elif event_type == "plan_aggregate_result":
+            completed = event.get("completed") or {}
+            failed = event.get("failed") or {}
+            blocked = event.get("blocked") or {}
+            self.console.print(
+                f"[bold cyan]Execution aggregate:[/bold cyan] "
+                f"status={event.get('status')} attempts={event.get('attempts')} "
+                f"completed={len(completed)} failed={len(failed)} "
+                f"blocked={len(blocked)}"
+            )
         elif event_type == "plan_completed":
             self._phase = "idle"
             self._record_run_summary({})
@@ -485,9 +517,7 @@ class RichRenderer:
         self._last_cached_tokens = cached
         self._last_total_tokens = self._input_tokens + self._output_tokens
         self._last_context_ratio = (
-            self._last_input_tokens / self._context_window
-            if self._context_window > 0
-            else 0
+            self._last_input_tokens / self._context_window if self._context_window > 0 else 0
         )
         self._last_has_usage = self._last_total_tokens > 0
         self._session_cost += estimate_cost(
@@ -540,9 +570,7 @@ class RichRenderer:
         before = event.get("before")
         after = event.get("after")
 
-        self.console.print(
-            Text(f"\U0001f4dd {file_path}", style="bold cyan")
-        )
+        self.console.print(Text(f"\U0001f4dd {file_path}", style="bold cyan"))
 
         if before is None:
             # New file: all additions
@@ -654,9 +682,7 @@ class RichRenderer:
         turns = int(event.get("total_turns") or 0)
         has_usage = total_tokens > 0 or self._input_tokens > 0 or self._output_tokens > 0
         context_ratio = (
-            self._last_input_tokens / self._context_window
-            if self._context_window > 0
-            else 0
+            self._last_input_tokens / self._context_window if self._context_window > 0 else 0
         )
         self._last_turns = turns
         self._last_total_tokens = total_tokens
@@ -759,5 +785,3 @@ def _output_panel(renderable: Any, *, title: Text, border_style: str) -> Panel:
         box=box.ROUNDED,
         expand=True,
     )
-
-

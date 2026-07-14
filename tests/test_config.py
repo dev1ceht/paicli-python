@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from io import StringIO
 
+import pytest
 from rich.console import Console
 
 from paicli.config import PaiCliConfig, load_config, load_llm_config_for_provider
@@ -103,9 +104,7 @@ def test_paicli_prefixed_deepseek_api_key_is_supported(tmp_path, monkeypatch):
     assert config.llm.api_key == "paicli-deepseek-key"
 
 
-def test_provider_switch_resolves_target_provider_settings_from_project_env(
-    tmp_path, monkeypatch
-):
+def test_provider_switch_resolves_target_provider_settings_from_project_env(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     for key in ["PAICLI_API_KEY", "PAICLI_BASE_URL"]:
         monkeypatch.delenv(key, raising=False)
@@ -152,10 +151,40 @@ def test_legacy_repl_model_command_switches_the_active_agent(tmp_path, monkeypat
     config = PaiCliConfig()
     agent = SwitchingAgent(config)
 
-    _model_command(
-        "qwen qwen-turbo", Console(file=StringIO()), str(tmp_path), config, agent
-    )
+    _model_command("qwen qwen-turbo", Console(file=StringIO()), str(tmp_path), config, agent)
 
     assert agent.configured is not None
     assert config.llm.provider == "qwen"
     assert config.llm.model == "qwen-turbo"
+
+
+def test_retry_and_replan_settings_have_defaults_and_per_scope_overrides(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    config = load_config(
+        project_root=tmp_path,
+        overrides={
+            "retry": {
+                "default": {"max_retries": 2, "base_delay": 0.5},
+                "llm": {"max_delay": 4.0},
+                "tools": {"enabled": False},
+            },
+            "plan": {"replan_progress_threshold": 0.4, "max_replans": 1},
+        },
+    )
+
+    llm_retry = config.retry.resolve("llm")
+    tool_retry = config.retry.resolve("tools")
+    assert llm_retry.max_retries == 2
+    assert llm_retry.base_delay == 0.5
+    assert llm_retry.max_delay == 4.0
+    assert tool_retry.enabled is False
+    assert config.plan.replan_progress_threshold == 0.4
+    assert config.plan.max_replans == 1
+
+
+def test_replan_configuration_rejects_more_than_one_automatic_replan(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    with pytest.raises(ValueError, match="max_replans"):
+        load_config(project_root=tmp_path, overrides={"plan": {"max_replans": 2}})

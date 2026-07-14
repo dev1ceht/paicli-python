@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from paicli.retry import RetryPolicy, RetryPolicyOverride
+
 
 def _home() -> Path:
     return Path.home()
@@ -40,6 +42,40 @@ class AgentConfig:
     max_elapsed_seconds: float = 600.0
     max_total_tokens: int = 100_000
     stagnation_threshold: int = 3
+
+
+@dataclass(slots=True)
+class RetryConfig:
+    enabled: bool = True
+    default: RetryPolicy = field(default_factory=RetryPolicy)
+    llm: RetryPolicyOverride = field(default_factory=RetryPolicyOverride)
+    tools: RetryPolicyOverride = field(default_factory=RetryPolicyOverride)
+
+    def resolve(self, scope: str) -> RetryPolicy:
+        if scope not in {"llm", "tools"}:
+            raise ValueError(f"unknown retry scope: {scope}")
+        policy = getattr(self, scope).apply(self.default)
+        if self.enabled:
+            return policy
+        return RetryPolicy(
+            enabled=False,
+            max_retries=policy.max_retries,
+            base_delay=policy.base_delay,
+            max_delay=policy.max_delay,
+            max_retry_after=policy.max_retry_after,
+        )
+
+
+@dataclass(slots=True)
+class PlanConfig:
+    replan_progress_threshold: float = 0.5
+    max_replans: int = 1
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.replan_progress_threshold <= 1.0:
+            raise ValueError("replan_progress_threshold must be between 0 and 1")
+        if self.max_replans not in {0, 1}:
+            raise ValueError("max_replans must be 0 or 1")
 
 
 @dataclass(slots=True)
@@ -101,21 +137,21 @@ class FeatureConfig:
 @dataclass(slots=True)
 class ContextConfig:
     """上下文治理配置"""
-    
+
     # 阶段一：动态预算计算
     utilization_rate: float = 0.50
     output_reserve_tokens: int = 4096
     min_budget_chars: int = 60_000
     max_budget_chars: int = 800_000
-    
+
     # 阶段三：压力感知裁剪
     tier1_threshold: float = 0.60
     tier2_threshold: float = 0.80
     tier3_threshold: float = 0.95
-    
+
     # 阶段四：结构化压缩
     protected_turns: int = 2
-    
+
     # 工具结果裁剪
     tool_result_keep_recent: int = 5
     tool_result_max_total_bytes: int = 204_800  # 200KB
@@ -129,6 +165,8 @@ class PaiCliConfig:
     render_mode: str = "inline"
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    retry: RetryConfig = field(default_factory=RetryConfig)
+    plan: PlanConfig = field(default_factory=PlanConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     policy: PolicyConfig = field(default_factory=PolicyConfig)
@@ -370,11 +408,19 @@ def _config_to_dict(config: PaiCliConfig) -> dict[str, Any]:
 
 
 def _dict_to_config(data: dict[str, Any]) -> PaiCliConfig:
+    retry_data = data.get("retry", {})
     return PaiCliConfig(
         llm=LlmConfig(**data.get("llm", {})),
         render_mode=data.get("render_mode", "inline"),
         tools=ToolsConfig(**data.get("tools", {})),
         agent=AgentConfig(**data.get("agent", {})),
+        retry=RetryConfig(
+            enabled=bool(retry_data.get("enabled", True)),
+            default=RetryPolicy(**retry_data.get("default", {})),
+            llm=RetryPolicyOverride(**retry_data.get("llm", {})),
+            tools=RetryPolicyOverride(**retry_data.get("tools", {})),
+        ),
+        plan=PlanConfig(**data.get("plan", {})),
         mcp=McpConfig(**data.get("mcp", {})),
         memory=MemoryConfig(**data.get("memory", {})),
         policy=PolicyConfig(**data.get("policy", {})),

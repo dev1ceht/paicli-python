@@ -110,7 +110,12 @@ class Agent:
 
     def reconfigure_llm(self, llm_config: LlmConfig) -> LlmClient:
         """Replace the idle session's client while retaining its conversation history."""
-        client = create_llm_client(llm_config)
+        client = create_llm_client(
+            llm_config,
+            retry_policy=self.config.retry.resolve("llm"),
+            retry_audit_path=self.config.policy.audit_log_path,
+            retry_cwd=self.cwd,
+        )
         self.config.llm = llm_config
         self.llm_client = client
         self.system_prompt = self._build_system_prompt()

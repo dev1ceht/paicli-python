@@ -6,6 +6,8 @@ from io import StringIO
 import pytest
 from rich.console import Console
 
+from paicli.cancellation import TaskCanceled
+from paicli.config import PaiCliConfig
 from paicli.entrypoints.repl import _run_plan_agent
 from paicli.plan import (
     ExecutionPlan,
@@ -68,7 +70,7 @@ def test_plan_executor_runs_tasks_after_dependencies():
     }
 
 
-def test_plan_executor_skips_tasks_with_failed_dependencies():
+def test_plan_executor_blocks_tasks_with_failed_dependencies():
     plan = ExecutionPlan(
         tasks=[
             PlanTask(id="inspect", description="Inspect files"),
@@ -89,8 +91,72 @@ def test_plan_executor_skips_tasks_with_failed_dependencies():
     events = asyncio.run(run())
 
     assert any(event["type"] == "task_failed" and event["task_id"] == "change" for event in events)
-    assert any(event["type"] == "task_skipped" and event["task_id"] == "verify" for event in events)
+    assert any(event["type"] == "task_blocked" and event["task_id"] == "verify" for event in events)
+    assert plan.get_task("verify").status == TaskStatus.BLOCKED
     assert events[-1]["type"] == "plan_failed"
+
+
+def test_plan_executor_halts_after_failure_and_reports_success_progress():
+    plan = ExecutionPlan(
+        tasks=[
+            PlanTask(id="root", description="Root"),
+            PlanTask(id="fails", description="Fails", depends_on=["root"]),
+            PlanTask(id="same_batch", description="Finishes", depends_on=["root"]),
+            PlanTask(id="blocked", description="Blocked", depends_on=["fails"]),
+            PlanTask(id="not_started", description="Not started", depends_on=["same_batch"]),
+        ]
+    )
+    started: list[str] = []
+
+    async def run_task(task: PlanTask) -> str:
+        started.append(task.id)
+        if task.id == "fails":
+            raise RuntimeError("boom")
+        return f"{task.id}:ok"
+
+    async def run():
+        executor = PlanExecutor()
+        return [event async for event in executor.execute(plan, run_task)]
+
+    events = asyncio.run(run())
+
+    assert started == ["root", "fails", "same_batch"]
+    assert plan.get_task("blocked").status == TaskStatus.BLOCKED
+    assert plan.get_task("not_started").status == TaskStatus.PENDING
+    assert plan.get_task("not_started").halt_reason == "plan_halted"
+    assert plan.progress_ratio == pytest.approx(0.4)
+    assert events[-1]["type"] == "plan_failed"
+    assert events[-1]["progress"] == pytest.approx(0.4)
+
+
+def test_plan_executor_does_not_start_queued_tasks_after_parallel_failure():
+    plan = ExecutionPlan(
+        tasks=[
+            PlanTask(id="fails", description="Fails"),
+            PlanTask(id="finishes", description="Finishes"),
+            PlanTask(id="queued_1", description="Must stay queued"),
+            PlanTask(id="queued_2", description="Must stay queued"),
+        ]
+    )
+    started: list[str] = []
+
+    async def run_task(task: PlanTask) -> str:
+        started.append(task.id)
+        if task.id == "fails":
+            raise RuntimeError("boom")
+        await asyncio.sleep(0)
+        return "ok"
+
+    async def run():
+        executor = PlanExecutor(max_parallel=2)
+        return [event async for event in executor.execute(plan, run_task)]
+
+    events = asyncio.run(run())
+
+    assert started == ["fails", "finishes"]
+    assert plan.get_task("queued_1").status == TaskStatus.PENDING
+    assert plan.get_task("queued_2").status == TaskStatus.PENDING
+    assert events[-1]["pending"] == ["queued_1", "queued_2"]
 
 
 def test_json_planner_parses_fenced_plan():
@@ -230,6 +296,202 @@ def test_run_plan_agent_supplement_replans_before_execute():
     assert goals == ["ship it", "ship it\n补充要求：add tests"]
     assert len(agent.run_prompts) == 2
     assert "verify" in agent.run_prompts[1]
+
+
+def test_run_plan_agent_replans_once_after_early_failure_and_merges_history():
+    class ReplanningAgent(FakeAgent):
+        def __init__(self):
+            super().__init__(
+                [
+                    (
+                        '{"tasks": ['
+                        '{"id": "fails", "description": "Fail early"},'
+                        '{"id": "blocked", "description": "Blocked work", '
+                        '"depends_on": ["fails"]}'
+                        "]}"
+                    ),
+                    '{"tasks": [{"id": "recovery", "description": "Recover safely"}]}',
+                ]
+            )
+            self.config = PaiCliConfig()
+
+        async def run(self, prompt: str, *, commit_history: bool = True):
+            self.run_prompts.append(prompt)
+            self.run_commit_history.append(commit_history)
+            if "`fails`" in prompt:
+                yield {"type": "error", "error": RuntimeError("boom")}
+                return
+            yield {"type": "text_delta", "text": "recovered"}
+            yield {"type": "done", "total_tokens": 0, "total_turns": 1, "messages": []}
+
+    agent = ReplanningAgent()
+    renderer = RichRenderer(console=Console(file=StringIO(), color_system=None, width=120))
+    reviewed: list[ExecutionPlan] = []
+
+    async def review(plan: ExecutionPlan, _expanded: bool) -> PlanReviewDecision:
+        reviewed.append(plan)
+        return PlanReviewDecision.execute()
+
+    asyncio.run(_run_plan_agent(agent, renderer, "ship it", review_input=review))
+
+    assert len(reviewed) == 2
+    assert len(agent.run_prompts) == 2
+    assert "`blocked`" not in "\n".join(agent.run_prompts)
+    assert "`recovery`" in agent.run_prompts[-1]
+    summary = str(agent.history[-1].content)
+    assert "Plan attempt 1" in summary
+    assert "fails [FAILED]" in summary
+    assert "blocked [BLOCKED]" in summary
+    assert "Plan attempt 2" in summary
+    assert "recovery [COMPLETED]" in summary
+    assert "BLOCKED" in agent.llm_client.goals[1]
+
+
+def test_replacement_plan_supplement_regenerates_and_is_reviewed_again():
+    class ReplanningAgent(FakeAgent):
+        def __init__(self):
+            super().__init__(
+                [
+                    '{"tasks": [{"id": "fails", "description": "Fail early"}]}',
+                    '{"tasks": [{"id": "draft", "description": "Draft recovery"}]}',
+                    '{"tasks": [{"id": "revised", "description": "Revised recovery"}]}',
+                ]
+            )
+            self.config = PaiCliConfig()
+
+        async def run(self, prompt: str, *, commit_history: bool = True):
+            self.run_prompts.append(prompt)
+            self.run_commit_history.append(commit_history)
+            if "`fails`" in prompt:
+                yield {"type": "error", "error": RuntimeError("boom")}
+                return
+            yield {"type": "text_delta", "text": "recovered"}
+
+    agent = ReplanningAgent()
+    renderer = RichRenderer(console=Console(file=StringIO(), color_system=None, width=120))
+    decisions = [
+        PlanReviewDecision.execute(),
+        PlanReviewDecision.supplement("use the safer approach"),
+        PlanReviewDecision.execute(),
+    ]
+    reviewed: list[str] = []
+
+    async def review(plan: ExecutionPlan, _expanded: bool) -> PlanReviewDecision:
+        reviewed.append(plan.tasks[0].id)
+        return decisions.pop(0)
+
+    asyncio.run(_run_plan_agent(agent, renderer, "ship it safely", review_input=review))
+
+    assert reviewed == ["fails", "draft", "revised"]
+    assert all("`draft`" not in prompt for prompt in agent.run_prompts)
+    assert "`revised`" in agent.run_prompts[-1]
+    assert "use the safer approach" in agent.llm_client.goals[-1]
+
+
+def test_run_plan_agent_emits_aggregate_result_after_replan():
+    class ReplanningAgent(FakeAgent):
+        def __init__(self):
+            super().__init__(
+                [
+                    '{"tasks": [{"id": "fails", "description": "Fail early"}]}',
+                    '{"tasks": [{"id": "recovery", "description": "Recover"}]}',
+                ]
+            )
+            self.config = PaiCliConfig()
+
+        async def run(self, prompt: str, *, commit_history: bool = True):
+            self.run_prompts.append(prompt)
+            self.run_commit_history.append(commit_history)
+            if "`fails`" in prompt:
+                yield {"type": "error", "error": RuntimeError("boom")}
+                return
+            yield {"type": "text_delta", "text": "done"}
+
+    class RecordingRenderer:
+        def __init__(self):
+            self.events: list[dict] = []
+
+        def handle(self, event: dict) -> None:
+            self.events.append(event)
+
+        def set_context_window(self, _window: int) -> None:
+            pass
+
+        def start_run(self) -> None:
+            pass
+
+        def newline(self) -> None:
+            pass
+
+    async def review(_plan: ExecutionPlan, _expanded: bool) -> PlanReviewDecision:
+        return PlanReviewDecision.execute()
+
+    renderer = RecordingRenderer()
+    asyncio.run(_run_plan_agent(ReplanningAgent(), renderer, "ship it safely", review_input=review))
+
+    aggregate = next(event for event in renderer.events if event["type"] == "plan_aggregate_result")
+    assert aggregate["attempts"] == 2
+    assert aggregate["status"] == "COMPLETED"
+    assert aggregate["completed"] == {"recovery": "done"}
+    assert aggregate["failed"] == {"fails": "boom"}
+
+
+def test_run_plan_agent_returns_partial_result_at_exactly_half_progress():
+    class PartialAgent(FakeAgent):
+        def __init__(self):
+            super().__init__(
+                [
+                    (
+                        '{"tasks": ['
+                        '{"id": "fails", "description": "Fails"},'
+                        '{"id": "succeeds", "description": "Succeeds"}'
+                        "]}"
+                    )
+                ]
+            )
+            self.config = PaiCliConfig()
+
+        async def run(self, prompt: str, *, commit_history: bool = True):
+            self.run_prompts.append(prompt)
+            self.run_commit_history.append(commit_history)
+            if "`fails`" in prompt:
+                yield {"type": "error", "error": RuntimeError("boom")}
+                return
+            yield {"type": "text_delta", "text": "done"}
+            yield {"type": "done", "total_tokens": 0, "total_turns": 1, "messages": []}
+
+    agent = PartialAgent()
+    renderer = RichRenderer(console=Console(file=StringIO(), color_system=None, width=120))
+    reviewed: list[ExecutionPlan] = []
+
+    async def review(plan: ExecutionPlan, _expanded: bool) -> PlanReviewDecision:
+        reviewed.append(plan)
+        return PlanReviewDecision.execute()
+
+    asyncio.run(_run_plan_agent(agent, renderer, "ship it", review_input=review))
+
+    assert len(reviewed) == 1
+    assert reviewed[0].progress_ratio == pytest.approx(0.5)
+    assert len(agent.llm_client.goals) == 1
+    summary = str(agent.history[-1].content)
+    assert "fails [FAILED]" in summary
+    assert "succeeds [COMPLETED]" in summary
+
+
+def test_plan_executor_propagates_user_cancellation_without_replanning():
+    plan = ExecutionPlan(tasks=[PlanTask(id="cancel", description="Cancel")])
+
+    async def run_task(_task: PlanTask) -> str:
+        raise TaskCanceled()
+
+    async def run():
+        return [event async for event in PlanExecutor().execute(plan, run_task)]
+
+    with pytest.raises(TaskCanceled):
+        asyncio.run(run())
+    assert plan.get_task("cancel").status == TaskStatus.SKIPPED
+    assert plan.get_task("cancel").halt_reason == "user_canceled"
+    assert plan.status == PlanStatus.CANCELLED
 
 
 def test_run_plan_agent_expand_then_execute():
@@ -463,9 +725,7 @@ def test_parallel_batch_execution():
     events = asyncio.run(run())
 
     # t1 and t2 should both start before t3
-    started = [
-        e["task_id"] for e in events if e["type"] == "task_started"
-    ]
+    started = [e["task_id"] for e in events if e["type"] == "task_started"]
     assert started[:2] in (["t1", "t2"], ["t2", "t1"])
     assert started[2] == "t3"
     assert events[-1]["type"] == "plan_completed"
@@ -551,7 +811,7 @@ def test_execution_plan_progress_ratio():
             PlanTask(id="t4", description="skipped", status=TaskStatus.SKIPPED),
         ],
     )
-    assert plan.progress_ratio == pytest.approx(0.75)
+    assert plan.progress_ratio == pytest.approx(0.25)
 
 
 def test_execution_plan_leaf_tasks():
@@ -573,8 +833,10 @@ def test_build_task_context():
         goal="test goal",
         tasks=[
             PlanTask(
-                id="t1", description="first task",
-                status=TaskStatus.COMPLETED, result="file contents here",
+                id="t1",
+                description="first task",
+                status=TaskStatus.COMPLETED,
+                result="file contents here",
             ),
             PlanTask(id="t2", description="second task", depends_on=["t1"]),
         ],
@@ -612,7 +874,7 @@ def test_json_planner_normalizes_ids():
         '{"tasks": ['
         '{"id": "inspect", "description": "look"},'
         '{"id": "change", "description": "edit", "depends_on": ["inspect"]}'
-        ']}'
+        "]}"
     )
     plan = JsonPlanner.parse(raw, goal="test")
     assert plan.tasks[0].id == "inspect"
@@ -665,6 +927,61 @@ def test_plan_replan():
     assert "timeout" in CaptureLlm.last_goal
 
 
+def test_replan_preserves_full_state_and_filters_completed_work():
+    long_result = "prefix-" + ("x" * 800) + "-tail"
+
+    class CaptureLlm:
+        provider_name = "fake"
+        model_name = "fake"
+        max_context_window = 1000
+        last_goal = ""
+
+        async def chat(self, messages, _tools, *, system_prompt=""):
+            CaptureLlm.last_goal = str(messages[0].content)
+            yield {
+                "type": "text_delta",
+                "text": (
+                    '{"tasks": ['
+                    '{"id": "inspect", "description": "Inspect files"},'
+                    '{"id": "recover", "description": "Recover safely", '
+                    '"depends_on": ["inspect"]}'
+                    "]}"
+                ),
+            }
+
+    failed_plan = ExecutionPlan(
+        goal="original goal",
+        tasks=[
+            PlanTask(
+                id="inspect",
+                description="Inspect files",
+                status=TaskStatus.COMPLETED,
+                result=long_result,
+            ),
+            PlanTask(
+                id="failed",
+                description="Failed task",
+                status=TaskStatus.FAILED,
+                error="boom",
+            ),
+        ],
+    )
+
+    async def run():
+        return await JsonPlanner(CaptureLlm()).replan(
+            "original goal",
+            "boom",
+            {"inspect": long_result},
+            failed_plan=failed_plan,
+        )
+
+    plan = asyncio.run(run())
+
+    assert "-tail" in CaptureLlm.last_goal
+    assert [task.id for task in plan.tasks] == ["recover"]
+    assert plan.tasks[0].depends_on == []
+
+
 def test_event_sink_receives_events():
     """PlanExecutor should forward events through event_sink."""
     plan = ExecutionPlan(
@@ -677,6 +994,14 @@ def test_event_sink_receives_events():
 
     async def run_task(task: PlanTask, completed: dict, *, event_sink=None) -> str:
         if event_sink:
+            event_sink(
+                {
+                    "type": "retry",
+                    "scope": "llm",
+                    "attempt": 1,
+                    "error_kind": "overloaded",
+                }
+            )
             event_sink({"type": "task_text_delta", "task_id": "t1", "text": "hello"})
         return "done"
 
@@ -686,9 +1011,9 @@ def test_event_sink_receives_events():
 
     asyncio.run(run())
 
-    assert len(sink_events) == 1
-    assert sink_events[0]["type"] == "task_text_delta"
-    assert sink_events[0]["text"] == "hello"
+    assert [event["type"] for event in sink_events] == ["retry", "task_text_delta"]
+    assert sink_events[1]["text"] == "hello"
+    assert plan.tasks[0].retry_history[0]["error_kind"] == "overloaded"
 
 
 def test_task_duration_tracking():
@@ -749,8 +1074,10 @@ class FakeLlm:
 
     def __init__(self, plan_json: list[str]):
         self.plan_json = list(plan_json)
+        self.goals: list[str] = []
 
     async def chat(self, _messages, _tools, *, system_prompt: str = ""):
         _ = system_prompt
+        self.goals.append(str(_messages[0].content))
         yield {"type": "thinking_delta", "thinking": "think first"}
         yield {"type": "text_delta", "text": self.plan_json.pop(0)}

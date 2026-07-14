@@ -10,6 +10,7 @@ from paicli.agent import QueryEngine
 from paicli.agent.agent import Agent
 from paicli.cancellation import TaskCanceled
 from paicli.config import LlmConfig, load_config
+from paicli.retry import RetryPolicy
 from paicli.tools import ToolRegistry, get_builtin_tools
 from paicli.tools.base import Tool, ToolResult
 from paicli.types import Message
@@ -131,6 +132,31 @@ class ReasoningToolClient:
             yield {"type": "message_end", "stop_reason": "tool_use"}
             return
         self.follow_up_messages = list(messages)
+        yield {"type": "text_delta", "text": "done"}
+        yield {"type": "message_end", "stop_reason": "end_turn"}
+
+
+class RetryingToolClient:
+    model_name = "fake-model"
+    provider_name = "fake-provider"
+    max_context_window = 1000
+
+    def __init__(self):
+        self.calls = 0
+
+    async def chat(self, messages, tools, *, system_prompt):  # noqa: ARG002
+        self.calls += 1
+        if self.calls == 1:
+            yield {
+                "type": "tool_call_delta",
+                "tool_call": {
+                    "index": 0,
+                    "id": "call_retry",
+                    "function": {"name": "remote_read", "arguments": "{}"},
+                },
+            }
+            yield {"type": "message_end", "stop_reason": "tool_use"}
+            return
         yield {"type": "text_delta", "text": "done"}
         yield {"type": "message_end", "stop_reason": "end_turn"}
 
@@ -410,3 +436,51 @@ def test_query_preserves_reasoning_between_tool_calling_turns(tmp_path, monkeypa
         message for message in client.follow_up_messages if message.role == "assistant"
     ]
     assert assistant_messages[-1].reasoning_content == "先读取目标文件"
+
+
+def test_query_streams_tool_retry_events_and_structured_result(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PAICLI_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    config = load_config(project_root=tmp_path)
+    config.policy.audit_log_path = str(tmp_path / "audit")
+    config.retry.default = RetryPolicy(base_delay=0.0, max_delay=0.0)
+    attempts = 0
+
+    async def remote_read(_payload, _context):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return ToolResult(
+                "temporary timeout",
+                is_error=True,
+                error_kind="timeout",
+                retryable=True,
+            )
+        return ToolResult("ok")
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="remote_read",
+            description="read remote data",
+            parameters={"type": "object"},
+            handler=remote_read,
+        )
+    )
+    engine = QueryEngine(
+        llm_client=RetryingToolClient(),
+        tool_registry=registry,
+        config=config,
+        cwd=str(tmp_path),
+    )
+
+    async def run() -> list[dict[str, Any]]:
+        return [event async for event in engine.ask("read it")]
+
+    events = asyncio.run(run())
+
+    retry_event = next(event for event in events if event["type"] == "retry")
+    result_event = next(event for event in events if event["type"] == "tool_result")
+    assert retry_event["error_kind"] == "timeout"
+    assert result_event["is_error"] is False
+    assert result_event["error_kind"] is None

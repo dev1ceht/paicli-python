@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx
 
+from paicli.policy import AuditLog
+from paicli.retry import RetryPolicy, classify_transient_error, compute_retry_delay
 from paicli.types import Message
+
+_VISIBLE_STREAM_EVENTS = {"text_delta", "thinking_delta", "tool_call_delta", "usage"}
+_MODEL_COOLDOWNS: dict[tuple[str, str, str], float] = {}
 
 
 @dataclass(slots=True)
@@ -22,6 +31,10 @@ class OpenAICompatibleClient:
     max_context_window: int = 128_000
     prompt_cache: bool = False
     supports_reasoning_content: bool = False
+    retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
+    transport: httpx.AsyncBaseTransport | None = field(default=None, repr=False)
+    retry_audit_path: str | Path = field(default="~/.paicli/audit", repr=False)
+    retry_cwd: str = field(default="", repr=False)
 
     @property
     def model_name(self) -> str:
@@ -71,21 +84,129 @@ class OpenAICompatibleClient:
         }
         url = self.base_url.rstrip("/") + "/chat/completions"
 
-        yield {"type": "message_start", "model": self.model}
-        async with (
-            httpx.AsyncClient(timeout=self.timeout, http2=False) as client,
-            client.stream("POST", url, headers=headers, json=payload) as response,
-        ):
-            response.raise_for_status()
-            async for event in _iter_sse(response):
-                if event == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(event)
-                except json.JSONDecodeError:
-                    continue
-                async for parsed in self._parse_chunk(chunk):
-                    yield parsed
+        cooldown_key = (self.provider_name, self.model, self.base_url)
+        logical_call_id = f"llm_{uuid4().hex}"
+        visible_stream_started = False
+        message_started = False
+        attempt = 0
+        skip_shared_cooldown_once = False
+
+        while True:
+            if skip_shared_cooldown_once:
+                skip_shared_cooldown_once = False
+            elif self.retry_policy.enabled:
+                cooldown_delay = _model_cooldown_remaining(cooldown_key)
+                if cooldown_delay > 0:
+                    AuditLog(self.retry_audit_path).record_retry(
+                        scope="llm",
+                        operation=f"{self.provider_name}/{self.model}",
+                        logical_call_id=logical_call_id,
+                        attempt=0,
+                        error_kind="shared_cooldown",
+                        retry_delay=cooldown_delay,
+                        cwd=self.retry_cwd,
+                    )
+                    yield {
+                        "type": "retry",
+                        "scope": "llm",
+                        "provider": self.provider_name,
+                        "model": self.model,
+                        "attempt": 0,
+                        "max_retries": self.retry_policy.max_retries,
+                        "error_kind": "shared_cooldown",
+                        "delay": cooldown_delay,
+                    }
+                    await asyncio.sleep(cooldown_delay)
+            try:
+                async with (
+                    httpx.AsyncClient(
+                        timeout=self.timeout,
+                        http2=False,
+                        transport=self.transport,
+                    ) as client,
+                    client.stream("POST", url, headers=headers, json=payload) as response,
+                ):
+                    if response.is_error:
+                        await response.aread()
+                    response.raise_for_status()
+                    if not message_started:
+                        message_started = True
+                        yield {"type": "message_start", "model": self.model}
+                    async for event in _iter_sse(response):
+                        if event == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(event)
+                        except json.JSONDecodeError:
+                            continue
+                        async for parsed in self._parse_chunk(chunk):
+                            if parsed.get("type") in _VISIBLE_STREAM_EVENTS:
+                                visible_stream_started = True
+                            yield parsed
+                return
+            except Exception as exc:
+                decision = classify_transient_error(exc)
+                retry_enabled = self.retry_policy.enabled and decision.retryable
+                if retry_enabled and (
+                    visible_stream_started or attempt >= self.retry_policy.max_retries
+                ):
+                    reason = "stream_started" if visible_stream_started else "max_retries"
+                    AuditLog(self.retry_audit_path).record_retry(
+                        scope="llm",
+                        operation=f"{self.provider_name}/{self.model}",
+                        logical_call_id=logical_call_id,
+                        attempt=attempt,
+                        error_kind=decision.error_kind,
+                        retry_delay=0.0,
+                        outcome="exhausted",
+                        cwd=self.retry_cwd,
+                    )
+                    yield {
+                        "type": "retry_exhausted",
+                        "scope": "llm",
+                        "provider": self.provider_name,
+                        "model": self.model,
+                        "attempt": attempt,
+                        "max_retries": self.retry_policy.max_retries,
+                        "error_kind": decision.error_kind,
+                        "reason": reason,
+                    }
+                    raise
+                if not retry_enabled:
+                    raise
+
+                retry_number = attempt + 1
+                delay = compute_retry_delay(
+                    self.retry_policy,
+                    attempt=attempt,
+                    retry_after=decision.retry_after,
+                )
+                _MODEL_COOLDOWNS[cooldown_key] = max(
+                    _MODEL_COOLDOWNS.get(cooldown_key, 0.0),
+                    time.monotonic() + delay,
+                )
+                AuditLog(self.retry_audit_path).record_retry(
+                    scope="llm",
+                    operation=f"{self.provider_name}/{self.model}",
+                    logical_call_id=logical_call_id,
+                    attempt=retry_number,
+                    error_kind=decision.error_kind,
+                    retry_delay=delay,
+                    cwd=self.retry_cwd,
+                )
+                yield {
+                    "type": "retry",
+                    "scope": "llm",
+                    "provider": self.provider_name,
+                    "model": self.model,
+                    "attempt": retry_number,
+                    "max_retries": self.retry_policy.max_retries,
+                    "error_kind": decision.error_kind,
+                    "delay": delay,
+                }
+                attempt = retry_number
+                await asyncio.sleep(delay)
+                skip_shared_cooldown_once = True
 
     def _format_messages(self, messages: list[Message], system_prompt: str) -> list[dict[str, Any]]:
         formatted: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
@@ -194,6 +315,15 @@ async def _iter_sse(response: httpx.Response) -> AsyncIterator[str]:
                 data_lines.append(line[5:].strip())
         if data_lines:
             yield "\n".join(data_lines)
+
+
+def _model_cooldown_remaining(key: tuple[str, str, str]) -> float:
+    deadline = _MODEL_COOLDOWNS.get(key, 0.0)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 and deadline:
+        _MODEL_COOLDOWNS.pop(key, None)
+        return 0.0
+    return max(remaining, 0.0)
 
 
 def _map_finish_reason(reason: str) -> str:

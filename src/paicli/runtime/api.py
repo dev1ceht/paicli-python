@@ -117,8 +117,7 @@ class RuntimeApiServer:
                 payload = task.to_dict() if task else {"error": "not found"}
                 if task:
                     payload["approvals"] = [
-                        approval.to_dict()
-                        for approval in self.task_manager.list_approvals(task.id)
+                        approval.to_dict() for approval in self.task_manager.list_approvals(task.id)
                     ]
                 _send_json(request, 200 if task else 404, payload)
             elif method == "POST" and path.startswith("/v1/tasks/") and path.endswith("/retry"):
@@ -164,7 +163,12 @@ class RuntimeApiServer:
         self._append_event(thread_id, "turn.started", {"message": message})
         registry, _manager = await build_tool_registry(config=self.config, cwd=self.cwd)
         engine = QueryEngine(
-            llm_client=create_llm_client(self.config.llm),
+            llm_client=create_llm_client(
+                self.config.llm,
+                retry_policy=self.config.retry.resolve("llm"),
+                retry_audit_path=self.config.policy.audit_log_path,
+                retry_cwd=self.cwd,
+            ),
             tool_registry=registry,
             config=self.config,
             cwd=self.cwd,
@@ -236,9 +240,7 @@ class RuntimeApiServer:
                 raise TaskCanceled()
             raise ApprovalPending()
 
-        def checkpoint_callback(
-            state: dict[str, Any], request: dict[str, Any]
-        ) -> None:
+        def checkpoint_callback(state: dict[str, Any], request: dict[str, Any]) -> None:
             state["runtime_identity"] = runtime_identity
             approval = self.task_manager.wait_for_approval(
                 task_id,
@@ -249,7 +251,12 @@ class RuntimeApiServer:
                 raise TaskCanceled()
 
         engine = QueryEngine(
-            llm_client=create_llm_client(self.config.llm),
+            llm_client=create_llm_client(
+                self.config.llm,
+                retry_policy=self.config.retry.resolve("llm"),
+                retry_audit_path=self.config.policy.audit_log_path,
+                retry_cwd=self.cwd,
+            ),
             tool_registry=registry,
             config=self.config,
             cwd=self.cwd,

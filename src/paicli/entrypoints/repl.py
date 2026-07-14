@@ -133,7 +133,12 @@ HELP_LINES = [
 async def start_repl(cwd: str, config: PaiCliConfig) -> None:
     console = Console()
     registry, mcp_manager = await build_tool_registry(config=config, cwd=cwd)
-    client = create_llm_client(config.llm)
+    client = create_llm_client(
+        config.llm,
+        retry_policy=config.retry.resolve("llm"),
+        retry_audit_path=config.policy.audit_log_path,
+        retry_cwd=cwd,
+    )
     system_prompt = PromptAssembler(
         config=config,
         cwd=cwd,
@@ -257,6 +262,11 @@ async def _run_plan_agent(
                             "usage": dict(event.get("usage") or {}),
                         }
                     )
+            elif event_type in {"retry", "retry_exhausted"}:
+                if event_sink:
+                    retry_event = dict(event)
+                    retry_event["task_id"] = task.id
+                    event_sink(retry_event)
             elif event_type == "error":
                 raise event["error"]
         return text
@@ -274,6 +284,10 @@ async def _run_plan_agent(
 
     original_goal = message
     planning_goal = message
+    executed_plans: list[ExecutionPlan] = []
+    plan_config = getattr(getattr(agent, "config", None), "plan", None)
+    replan_threshold = float(getattr(plan_config, "replan_progress_threshold", 0.5))
+    max_replans = int(getattr(plan_config, "max_replans", 1))
     while True:
         renderer.handle({"type": "plan_generation_started", "goal": planning_goal})
         plan = await planner.create_plan(planning_goal, event_sink=renderer.handle)
@@ -297,9 +311,10 @@ async def _run_plan_agent(
             renderer.handle(event)
             if event.get("type") == "plan_failed" and event.get("failed"):
                 failed_tasks = event["failed"]
+        executed_plans.append(plan)
 
-        # Replan logic: if failures and progress < 50%, offer to replan
-        if failed_tasks and plan and plan.progress_ratio < 0.5:
+        # Replan once after an early execution failure, subject to user review.
+        if failed_tasks and plan and plan.progress_ratio < replan_threshold and max_replans > 0:
             completed = {
                 t.id: t.result for t in plan.tasks if t.status == TaskStatus.COMPLETED and t.result
             }
@@ -311,21 +326,36 @@ async def _run_plan_agent(
                     "progress": f"{plan.progress_ratio:.0%}",
                 }
             )
-            replan_plan = await planner.replan(
-                original_goal,
-                failure_reason,
-                completed,
-                event_sink=renderer.handle,
-            )
-            renderer.handle(
-                {
-                    "type": "plan_review_summary",
-                    "summary": replan_plan.summary(),
-                }
-            )
-            renderer.handle({"type": "plan_review_instructions"})
-            replan_decision = await _review_plan(replan_plan, renderer, review_input)
-            if replan_decision.action != "cancel":
+            replan_feedback = ""
+            while True:
+                revised_failure_reason = failure_reason
+                if replan_feedback:
+                    revised_failure_reason += (
+                        "\nReplacement-plan review feedback: " + replan_feedback
+                    )
+                replan_plan = await planner.replan(
+                    original_goal,
+                    revised_failure_reason,
+                    completed,
+                    failed_plan=plan,
+                    event_sink=renderer.handle,
+                )
+                renderer.handle(
+                    {
+                        "type": "plan_review_summary",
+                        "summary": replan_plan.summary(),
+                    }
+                )
+                renderer.handle({"type": "plan_review_instructions"})
+                replan_decision = await _review_plan(replan_plan, renderer, review_input)
+                if replan_decision.action == "supplement":
+                    replan_feedback = replan_decision.feedback
+                    continue
+                if replan_decision.action == "cancel":
+                    replan_plan.status = PlanStatus.CANCELLED
+                    renderer.handle({"type": "plan_cancelled"})
+                    break
+
                 plan = replan_plan
                 async for event in executor.execute(
                     plan,
@@ -333,36 +363,81 @@ async def _run_plan_agent(
                     event_sink=event_sink,
                 ):
                     renderer.handle(event)
-            else:
-                replan_plan.status = PlanStatus.CANCELLED
-                renderer.handle({"type": "plan_cancelled"})
+                executed_plans.append(plan)
+                break
 
-        if plan and plan.status in {PlanStatus.COMPLETED, PlanStatus.FAILED}:
-            _record_plan_history(agent, original_goal, plan)
+        if executed_plans:
+            renderer.handle(_aggregate_plan_attempts(executed_plans))
+            _record_plan_history(agent, original_goal, executed_plans)
         break
 
     renderer.newline()
 
 
-def _record_plan_history(agent: Agent, goal: str, plan: ExecutionPlan) -> None:
+def _aggregate_plan_attempts(plans: list[ExecutionPlan]) -> dict[str, Any]:
+    completed: dict[str, str] = {}
+    failed: dict[str, str] = {}
+    blocked: dict[str, list[str]] = {}
+    pending: list[str] = []
+    retries: list[dict[str, Any]] = []
+    for attempt, plan in enumerate(plans, start=1):
+        for task in plan.tasks:
+            if task.status == TaskStatus.COMPLETED and task.result is not None:
+                completed[task.id] = task.result
+            elif task.status == TaskStatus.FAILED:
+                failed[task.id] = task.error or "unknown error"
+            elif task.status == TaskStatus.BLOCKED:
+                blocked[task.id] = list(task.blocked_by)
+            elif task.status == TaskStatus.PENDING:
+                pending.append(task.id)
+            for retry in task.retry_history:
+                retries.append({"attempt_plan": attempt, "task_id": task.id, **retry})
+    return {
+        "type": "plan_aggregate_result",
+        "attempts": len(plans),
+        "status": plans[-1].status.value,
+        "completed": completed,
+        "failed": failed,
+        "blocked": blocked,
+        "pending": pending,
+        "retries": retries,
+    }
+
+
+def _record_plan_history(
+    agent: Agent,
+    goal: str,
+    plans: ExecutionPlan | list[ExecutionPlan],
+) -> None:
     """Append one deterministic plan summary without retaining task ReAct traces."""
     history = getattr(agent, "history", None)
     if not isinstance(history, list):
         return
 
+    attempts = [plans] if isinstance(plans, ExecutionPlan) else list(plans)
+    if not attempts:
+        return
     lines = [
         "Plan execution summary:",
         f"Goal: {goal}",
-        f"Status: {plan.status.value}",
+        f"Status: {attempts[-1].status.value}",
     ]
-    for task in plan.tasks:
-        lines.append(f"- {task.id} [{task.status.value}]: {task.description}")
-        detail = task.result if task.status == TaskStatus.COMPLETED else task.error
-        if detail:
-            preview = detail.strip()
-            if len(preview) > 1_000:
-                preview = f"{preview[:1_000]}... [truncated]"
-            lines.append(f"  Result: {preview}")
+    for attempt, current_plan in enumerate(attempts, start=1):
+        lines.append(f"Plan attempt {attempt}: {current_plan.status.value}")
+        for task in current_plan.tasks:
+            lines.append(f"- {task.id} [{task.status.value}]: {task.description}")
+            detail = task.result if task.status == TaskStatus.COMPLETED else task.error
+            if detail:
+                preview = detail.strip()
+                if len(preview) > 1_000:
+                    preview = f"{preview[:1_000]}... [truncated]"
+                lines.append(f"  Result: {preview}")
+            if task.retry_history:
+                retry_summary = ", ".join(
+                    f"{item.get('scope')}#{item.get('attempt')}:{item.get('error_kind')}"
+                    for item in task.retry_history
+                )
+                lines.append(f"  Retries: {retry_summary}")
 
     history.extend(
         [
@@ -474,9 +549,7 @@ async def _handle_slash(
         else:
             result = await MemoryManager(
                 config.memory.long_term_path, project_path=cwd
-            ).save_with_classification(
-                save_fact, scope=save_scope, llm_client=agent.llm_client
-            )
+            ).save_with_classification(save_fact, scope=save_scope, llm_client=agent.llm_client)
             if result.status == "pending":
                 console.print(f"Created pending memory change: {result.change_id}")
             elif result.status == "duplicate":
@@ -551,7 +624,9 @@ async def _memory_command(arg: str, console: Console, cwd: str, config: PaiCliCo
     if sub in {"", "status"}:
         console.print(manager.status())
         console.print(f"Current project: {manager.project_path}")
-        console.print("/memory list | /memory search <query> | /memory delete <id> | /memory clear | /memory pending | /memory apply <id> | /memory reject <id>")
+        console.print(
+            "/memory list | /memory search <query> | /memory delete <id> | /memory clear | /memory pending | /memory apply <id> | /memory reject <id>"
+        )
     elif sub == "list":
         rows = manager.list(limit=50)
         console.print(_format_memory_entries(rows) or "(no memories)")

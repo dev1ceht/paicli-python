@@ -48,6 +48,7 @@ async def query(
         next_tool_index = 0
     tool_definitions = tool_registry.definitions()
     executor = ToolExecutor(tool_registry)
+    tool_retry_events: list[dict[str, Any]] = []
 
     total_tokens = int(restored_state.get("total_tokens") or 0)
     turn = int(restored_state.get("turn") or 0)
@@ -105,6 +106,7 @@ async def query(
         approval_callback=background_approval_callback,
         session_allowed_tools=session_allowed_tools if session_allowed_tools is not None else set(),
         cancellation_check=cancellation_check,
+        event_sink=tool_retry_events.append,
     )
 
     turn_limit = max_turns if max_turns is not None else config.agent.max_turns
@@ -118,12 +120,18 @@ async def query(
                 yield {"type": "tool_call", "name": name, "input": _tool_input(call)}
                 results = await executor.execute_all([call], context)
                 raise_if_cancelled(cancellation_check)
+                for retry_event in tool_retry_events:
+                    yield retry_event
+                tool_retry_events.clear()
                 for result in results:
                     yield {
                         "type": "tool_result",
                         "name": _tool_name_by_id([call], result.tool_use_id or ""),
                         "result": result.content,
                         "is_error": result.is_error,
+                        "error_kind": result.error_kind,
+                        "retryable": result.retryable,
+                        "retry_after": result.retry_after,
                     }
                     messages.append(
                         Message(
@@ -196,6 +204,8 @@ async def query(
                     usage_output += int(usage.get("output_tokens") or 0)
                     last_actual_usage = usage
                     yield {"type": "usage", "usage": usage}
+                elif event_type in {"retry", "retry_exhausted"}:
+                    yield dict(event)
                 elif event_type == "error":
                     yield {"type": "error", "error": event["error"]}
                     return

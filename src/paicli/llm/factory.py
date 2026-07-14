@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from paicli.config import LlmConfig
 from paicli.llm.openai_compatible import OpenAICompatibleClient
+from paicli.retry import RetryPolicy
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -26,8 +27,16 @@ MODEL_CONTEXT_WINDOWS = {
 }
 
 
-def create_llm_client(config: LlmConfig) -> OpenAICompatibleClient:
+def create_llm_client(
+    config: LlmConfig,
+    *,
+    retry_policy: RetryPolicy | None = None,
+    retry_audit_path: str | None = None,
+    retry_cwd: str = "",
+) -> OpenAICompatibleClient:
     provider = config.provider.lower()
+    retry = retry_policy or RetryPolicy()
+    audit_path = retry_audit_path or "~/.paicli/audit"
     if provider == "deepseek":
         base_url = config.base_url or DEEPSEEK_BASE_URL
         context = MODEL_CONTEXT_WINDOWS.get(config.model, 64_000)
@@ -42,6 +51,9 @@ def create_llm_client(config: LlmConfig) -> OpenAICompatibleClient:
             max_context_window=context,
             prompt_cache=True,
             supports_reasoning_content=True,
+            retry_policy=retry,
+            retry_audit_path=audit_path,
+            retry_cwd=retry_cwd,
         )
     if provider in {"openai", "openai-compatible", "compatible"}:
         return OpenAICompatibleClient(
@@ -54,6 +66,9 @@ def create_llm_client(config: LlmConfig) -> OpenAICompatibleClient:
             timeout=config.timeout,
             max_context_window=128_000,
             prompt_cache=False,
+            retry_policy=retry,
+            retry_audit_path=audit_path,
+            retry_cwd=retry_cwd,
         )
     if provider in PROVIDER_BASE_URLS:
         return OpenAICompatibleClient(
@@ -66,6 +81,9 @@ def create_llm_client(config: LlmConfig) -> OpenAICompatibleClient:
             timeout=config.timeout,
             max_context_window=128_000,
             prompt_cache=False,
+            retry_policy=retry,
+            retry_audit_path=audit_path,
+            retry_cwd=retry_cwd,
         )
     return OpenAICompatibleClient(
         provider_name=provider,
@@ -77,4 +95,7 @@ def create_llm_client(config: LlmConfig) -> OpenAICompatibleClient:
         timeout=config.timeout,
         max_context_window=64_000,
         prompt_cache=False,
+        retry_policy=retry,
+        retry_audit_path=audit_path,
+        retry_cwd=retry_cwd,
     )

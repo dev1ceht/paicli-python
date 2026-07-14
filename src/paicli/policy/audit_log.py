@@ -50,6 +50,39 @@ class AuditLog:
         with target.open("a", encoding="utf-8"):
             pass
 
+    def record_retry(
+        self,
+        *,
+        scope: str,
+        operation: str,
+        logical_call_id: str,
+        attempt: int,
+        error_kind: str,
+        retry_delay: float,
+        outcome: str = "scheduled",
+        cwd: str = "",
+        input_data: dict[str, Any] | None = None,
+    ) -> None:
+        timestamp = datetime.now(UTC)
+        target = self._path_for_timestamp(timestamp)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        event = {
+            "timestamp": timestamp.isoformat(),
+            "event_type": "retry",
+            "scope": scope,
+            "operation": operation,
+            "logical_call_id": logical_call_id,
+            "attempt": attempt,
+            "error_kind": error_kind,
+            "retry_delay": retry_delay,
+            "outcome": outcome,
+            "cwd": cwd,
+        }
+        if input_data is not None:
+            event["input"] = self._redact(input_data)
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+
     def tail(self, limit: int = 20) -> list[dict[str, Any]]:
         paths = self._log_files()
         if not paths:

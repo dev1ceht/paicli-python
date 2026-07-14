@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from uuid import uuid4
 
 from paicli.cancellation import TaskCanceled
 from paicli.policy import AuditLog
 from paicli.policy.command_guard import CommandGuard
+from paicli.retry import classify_transient_error, compute_retry_delay
 from paicli.tools.base import ApprovalPending, Tool, ToolContext, ToolDecision, ToolResult
 from paicli.tools.registry import ToolRegistry
 
@@ -102,7 +104,13 @@ class ToolExecutor:
             if tool.requires_approval or context.config.policy.hitl_mode == "always":
                 approver = "hitl"
 
-            result = await tool.execute(data, context)
+            result = await self._execute_with_retry(
+                tool,
+                data,
+                context,
+                logical_call_id=tool_call_id or f"tool_{uuid4().hex}",
+                audit=audit,
+            )
             result.tool_use_id = tool_call_id
             if _must_audit(tool):
                 audit.record(
@@ -112,7 +120,11 @@ class ToolExecutor:
                     approver=approver,
                     cwd=context.cwd,
                     result_summary=result.display_summary or result.content[:2000],
-                    decision_source=("unattended" if context.config.policy.hitl_mode == "never" else decision_source),
+                    decision_source=(
+                        "unattended"
+                        if context.config.policy.hitl_mode == "never"
+                        else decision_source
+                    ),
                 )
             return result
         except (ApprovalPending, TaskCanceled):
@@ -120,14 +132,115 @@ class ToolExecutor:
         except Exception as exc:  # noqa: BLE001 - tool errors must flow back to the model
             if tool and _must_audit(tool):
                 try:
-                    audit.record(tool_name=tool.name, input_data=payload, outcome="error", approver=approver, cwd=context.cwd, reason=str(exc))
+                    audit.record(
+                        tool_name=tool.name,
+                        input_data=payload,
+                        outcome="error",
+                        approver=approver,
+                        cwd=context.cwd,
+                        reason=str(exc),
+                    )
                 except OSError:
                     pass
             return ToolResult(
                 tool_use_id=tool_call_id,
                 content=f'Tool "{name}" execution error: {exc}',
                 is_error=True,
+                error_kind="unknown",
             )
+
+    async def _execute_with_retry(
+        self,
+        tool: Tool,
+        payload: dict[str, Any],
+        context: ToolContext,
+        *,
+        logical_call_id: str,
+        audit: AuditLog,
+    ) -> ToolResult:
+        policy = context.config.retry.resolve("tools")
+        attempt = 0
+        while True:
+            context.raise_if_cancelled()
+            try:
+                result = await tool.execute(payload, context)
+            except (ApprovalPending, TaskCanceled):
+                raise
+            except Exception as exc:  # noqa: BLE001 - classify at the tool boundary
+                decision = classify_transient_error(exc)
+                result = ToolResult(
+                    content=f'Tool "{tool.name}" execution error: {exc}',
+                    is_error=True,
+                    error_kind=decision.error_kind,
+                    retryable=decision.retryable,
+                    retry_after=decision.retry_after,
+                )
+
+            retry_eligible = (
+                policy.enabled
+                and tool.is_read_only
+                and tool.is_idempotent
+                and result.is_error
+                and result.retryable
+            )
+            if retry_eligible and attempt >= policy.max_retries:
+                exhausted_event = {
+                    "type": "retry_exhausted",
+                    "scope": "tool",
+                    "tool_name": tool.name,
+                    "attempt": attempt,
+                    "max_retries": policy.max_retries,
+                    "error_kind": result.error_kind or "unknown",
+                    "reason": "max_retries",
+                }
+                audit.record_retry(
+                    scope="tool",
+                    operation=tool.name,
+                    logical_call_id=logical_call_id,
+                    attempt=attempt,
+                    error_kind=result.error_kind or "unknown",
+                    retry_delay=0.0,
+                    outcome="exhausted",
+                    cwd=context.cwd,
+                    input_data=payload,
+                )
+                if context.event_sink:
+                    context.event_sink(exhausted_event)
+                return result
+            if not retry_eligible:
+                return result
+
+            retry_number = attempt + 1
+            delay = compute_retry_delay(
+                policy,
+                attempt=attempt,
+                retry_after=result.retry_after,
+            )
+            audit.record_retry(
+                scope="tool",
+                operation=tool.name,
+                logical_call_id=logical_call_id,
+                attempt=retry_number,
+                error_kind=result.error_kind or "unknown",
+                retry_delay=delay,
+                cwd=context.cwd,
+                input_data=payload,
+            )
+            if context.event_sink:
+                context.event_sink(
+                    {
+                        "type": "retry",
+                        "scope": "tool",
+                        "tool_name": tool.name,
+                        "attempt": retry_number,
+                        "max_retries": policy.max_retries,
+                        "error_kind": result.error_kind or "unknown",
+                        "delay": delay,
+                    }
+                )
+            attempt = retry_number
+            await asyncio.sleep(delay)
+            context.raise_if_cancelled()
 
     async def _approval_decision(
         self,

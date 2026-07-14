@@ -136,11 +136,14 @@ def test_denied_approval_is_recorded_in_the_execution_checkpoint(tmp_path):
     manager = DurableTaskManager(tmp_path / "tasks.db")
     task_id = manager.add("change a file")
     assert manager.claim_next() is not None
-    assert manager.wait_for_approval(
-        task_id,
-        checkpoint={"next_tool_index": 1},
-        request={"tool_name": "bash", "input": {"command": "echo $TOKEN"}},
-    ) is not None
+    assert (
+        manager.wait_for_approval(
+            task_id,
+            checkpoint={"next_tool_index": 1},
+            request={"tool_name": "bash", "input": {"command": "echo $TOKEN"}},
+        )
+        is not None
+    )
 
     assert manager.deny(task_id, source="api")
     assert manager.get(task_id).status == "queued"  # type: ignore[union-attr]
@@ -206,11 +209,14 @@ def test_runtime_api_task_detail_redacts_approval_input(tmp_path, monkeypatch):
     server.task_manager = DurableTaskManager(tmp_path / "tasks.db")
     task_id = server.task_manager.add("change a file")
     assert server.task_manager.claim_next() is not None
-    assert server.task_manager.wait_for_approval(
-        task_id,
-        checkpoint={},
-        request={"tool_name": "bash", "input": {"token": "secret-value"}},
-    ) is not None
+    assert (
+        server.task_manager.wait_for_approval(
+            task_id,
+            checkpoint={},
+            request={"tool_name": "bash", "input": {"token": "secret-value"}},
+        )
+        is not None
+    )
 
     request = _ApiRequest("GET", f"/v1/tasks/{task_id}", "test-key")
     server._handle(request)
@@ -225,11 +231,14 @@ def test_task_cli_approves_and_shows_a_waiting_approval(tmp_path, monkeypatch):
     manager = DurableTaskManager(Path.home() / ".paicli" / "tasks" / "tasks.db")
     task_id = manager.add("change a file")
     assert manager.claim_next() is not None
-    assert manager.wait_for_approval(
-        task_id,
-        checkpoint={},
-        request={"tool_name": "write_file", "input": {"path": "notes.txt"}},
-    ) is not None
+    assert (
+        manager.wait_for_approval(
+            task_id,
+            checkpoint={},
+            request={"tool_name": "write_file", "input": {"path": "notes.txt"}},
+        )
+        is not None
+    )
     console = Console(record=True)
 
     _task_command("", console)
@@ -242,6 +251,8 @@ def test_task_cli_approves_and_shows_a_waiting_approval(tmp_path, monkeypatch):
 
 
 def test_background_task_resumes_the_approved_tool_from_its_checkpoint(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
     class ApprovalClient:
         model_name = "fake-model"
         provider_name = "fake-provider"
@@ -285,7 +296,10 @@ def test_background_task_resumes_the_approved_tool_from_its_checkpoint(tmp_path,
             requires_approval=True,
         )
     )
-    monkeypatch.setattr("paicli.runtime.api.create_llm_client", lambda _config: client)
+    monkeypatch.setattr(
+        "paicli.runtime.api.create_llm_client",
+        lambda _config, **_kwargs: client,
+    )
 
     async def build_registry(**kwargs):  # noqa: ARG001
         return registry, None
@@ -297,6 +311,8 @@ def test_background_task_resumes_the_approved_tool_from_its_checkpoint(tmp_path,
         api_key="test-key",
     )
     server.config.llm.api_key = "test-key"
+    server.config.policy.hitl_mode = "auto"
+    server.config.policy.audit_log_path = str(tmp_path / "audit")
     server.task_manager = DurableTaskManager(tmp_path / "tasks.db")
     task_id = server.task_manager.add("write a note")
     assert server.task_manager.claim_next() is not None
@@ -331,15 +347,18 @@ def test_changed_runtime_identity_requires_a_fresh_approval(tmp_path, monkeypatc
     server.task_manager = DurableTaskManager(tmp_path / "tasks.db")
     task_id = server.task_manager.add("write a note")
     assert server.task_manager.claim_next() is not None
-    assert server.task_manager.wait_for_approval(
-        task_id,
-        checkpoint={
-            "messages": [],
-            "pending_tool_calls": [],
-            "runtime_identity": {"cwd": "different"},
-        },
-        request={"tool_name": "write", "input": {"path": "note.txt"}},
-    ) is not None
+    assert (
+        server.task_manager.wait_for_approval(
+            task_id,
+            checkpoint={
+                "messages": [],
+                "pending_tool_calls": [],
+                "runtime_identity": {"cwd": "different"},
+            },
+            request={"tool_name": "write", "input": {"path": "note.txt"}},
+        )
+        is not None
+    )
     assert server.task_manager.approve(task_id)
     assert server.task_manager.claim_next() is not None
 
