@@ -582,24 +582,43 @@ def _split_current_request(messages: list[Message]) -> tuple[list[Message], Mess
 
 def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     by_variant: dict[str, dict[str, int]] = defaultdict(
-        lambda: {"runs": 0, "passed": 0, "input_tokens": 0}
+        lambda: {
+            "runs": 0,
+            "passed": 0,
+            "input_tokens": 0,
+            "model_call_count": 0,
+            "summary_called_runs": 0,
+            "compact_call_total_tokens": 0,
+        }
     )
     for row in rows:
         bucket = by_variant[str(row["variant"])]
         bucket["runs"] += 1
         bucket["passed"] += int(row["status"] == "passed")
         bucket["input_tokens"] += int(row["input_tokens"])
-    for variant, bucket in by_variant.items():
-        compact = sum(
-            int(row["compact_call_total_tokens"]) for row in rows if row["variant"] == variant
-        )
-        bucket["compact_call_total_tokens"] = compact
+        bucket["model_call_count"] += int(row["model_call_count"])
+        bucket["summary_called_runs"] += int(bool(row["summary_called"]))
+        bucket["compact_call_total_tokens"] += int(row["compact_call_total_tokens"])
     return {
         "by_variant": dict(by_variant),
+        "quality": {
+            "expected_runs": len(rows),
+            "passed_runs": sum(row["status"] == "passed" for row in rows),
+            "verifier_passed_runs": sum(
+                int(row["verifier_returncode"]) == 0 for row in rows
+            ),
+            "task_count": len({str(row["task_id"]) for row in rows}),
+            "repetitions": len({int(row["repeat"]) for row in rows}),
+        },
         "comparisons": {
             "full_history_vs_deterministic": _paired_comparison(
                 rows,
                 treatment="full_orchestrator",
+                control="no_context_reduction",
+            ),
+            "full_history_vs_llm_handoff": _paired_comparison(
+                rows,
+                treatment="full_orchestrator_with_llm_handoff",
                 control="no_context_reduction",
             ),
             "deterministic_vs_llm_handoff": _paired_comparison(
@@ -621,67 +640,208 @@ def _paired_comparison(
     for row in rows:
         pairs[(str(row["task_id"]), int(row["repeat"]))][str(row["variant"])] = row
     net_values: list[int] = []
+    input_reduction_values: list[int] = []
+    summary_cost_values: list[int] = []
     passed_pairs = 0
-    for pair in pairs.values():
+    pair_details: list[dict[str, Any]] = []
+    for (task_id, repeat), pair in sorted(pairs.items()):
         if treatment not in pair or control not in pair:
             continue
         treated = pair[treatment]
         baseline = pair[control]
-        net_values.append(
-            int(baseline["input_tokens"])
-            - int(treated["input_tokens"])
-            - int(treated["compact_call_total_tokens"])
+        input_reduction = int(baseline["input_tokens"]) - int(treated["input_tokens"])
+        summary_cost = int(treated["compact_call_total_tokens"])
+        net_benefit = input_reduction - summary_cost
+        pair_passed = treated["status"] == "passed" and baseline["status"] == "passed"
+        input_reduction_values.append(input_reduction)
+        summary_cost_values.append(summary_cost)
+        net_values.append(net_benefit)
+        passed_pairs += int(pair_passed)
+        pair_details.append(
+            {
+                "task_id": task_id,
+                "repeat": repeat,
+                "control_input_tokens": int(baseline["input_tokens"]),
+                "treatment_input_tokens": int(treated["input_tokens"]),
+                "summary_call_tokens": summary_cost,
+                "input_reduction_tokens": input_reduction,
+                "net_benefit_tokens": net_benefit,
+                "passed": pair_passed,
+            }
         )
-        passed_pairs += int(treated["status"] == "passed" and baseline["status"] == "passed")
     return {
         "treatment": treatment,
         "control": control,
         "paired_run_count": len(net_values),
         "passed_pair_count": passed_pairs,
+        "median_input_reduction_tokens": statistics.median(input_reduction_values)
+        if input_reduction_values
+        else 0,
+        "median_summary_call_tokens": statistics.median(summary_cost_values)
+        if summary_cost_values
+        else 0,
         "median_net_benefit_tokens": statistics.median(net_values) if net_values else 0,
         "net_benefit_tokens": net_values,
+        "pairs": pair_details,
     }
 
 
 def _render_report(payload: dict[str, Any]) -> str:
     summary = payload["summary"]["by_variant"]
+    quality = payload["summary"]["quality"]
     comparisons = payload["summary"]["comparisons"]
+    baseline_comparisons = {
+        "no_context_reduction": None,
+        "full_orchestrator": comparisons["full_history_vs_deterministic"],
+        "full_orchestrator_with_llm_handoff": comparisons["full_history_vs_llm_handoff"],
+    }
     lines = [
-        "# 脚本上下文成本评测",
+        "# 脚本化上下文成本评测报告",
         "",
-        "所有 token 均为 `estimated_proxy`，不是 provider 账单数据。",
+        "## 结论与边界",
         "",
-        "| 变体 | 通过/总数 | 输入 token | 摘要 token | 相对全历史净收益 |",
-        "|---|---:|---:|---:|---:|",
+        (
+            f"本次运行覆盖 **{quality['task_count']}** 个隔离夹具任务、"
+            f"**{len(VARIANTS)}** 个策略、每个策略 **{quality['repetitions']}** 次重复，"
+            f"共 **{quality['expected_runs']}** 次脚本运行。"
+        ),
+        (
+            f"质量门槛通过 **{quality['passed_runs']}/{quality['expected_runs']}** 次；"
+            f"verifier 通过 **{quality['verifier_passed_runs']}/{quality['expected_runs']}** 次；"
+            f"确定性校验：{'通过' if payload['determinism']['passed'] else '失败'}。"
+        ),
+        "",
+        "所有 token 均为 `estimated_proxy`，并非 provider 返回的 `actual` usage 或账单数据。",
+        "因此本报告只能说明固定脚本轨迹下的可复现方向性证据，不能据此宣称真实 provider 成本优化。",
+        "",
+        "## 实验口径",
+        "",
+        "- 每次运行复制任务 fixture，在副本中执行真实原生工具，最后执行该任务的 verifier。",
+        "- 质量通过条件：脚本工具调用无错误、Agent 正常输出最终文本、verifier 返回码为 0。",
+        (
+            "- `输入 token`：每轮实际发送给脚本模型的 role-preserving 请求，"
+            "以固定 `TokenEstimator` 估算后累加。"
+        ),
+        (
+            "- `摘要生成调用成本`：仅指为生成摘要额外调用 LLM 的 input + output token。"
+            "确定性摘要的该值为 `0`，因为它只执行本地规则；"
+            "摘要文本随后随请求发送时，仍包含在 `输入 token` 中。"
+        ),
+        (
+            "- `净收益`：`对照组输入 token - 处理组输入 token - "
+            "处理组摘要生成调用成本`；允许为负，不会截断为 0。"
+        ),
+        "",
+        "## 策略汇总",
+        "",
+        (
+            "| 变体 | 通过/运行 | 输入 token（总计） | 每次平均输入 token | 模型调用次数 | "
+            "摘要调用运行数 | 摘要生成调用成本 token | 相对全历史中位净收益 |"
+        ),
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for variant in VARIANTS:
         item = summary.get(variant, {})
+        runs = int(item.get("runs", 0))
+        comparison = baseline_comparisons[variant]
+        net_benefit = "基线" if comparison is None else _format_number(
+            comparison["median_net_benefit_tokens"]
+        )
         lines.append(
-            f"| `{variant}` | {item.get('passed', 0)}/{item.get('runs', 0)} | "
-            f"{item.get('input_tokens', 0)} | {item.get('compact_call_total_tokens', 0)} | "
-            "见配对比较 |"
+            f"| `{variant}` | {item.get('passed', 0)}/{runs} | "
+            f"{_format_number(item.get('input_tokens', 0))} | "
+            f"{_format_number(int(item.get('input_tokens', 0)) / runs if runs else 0)} | "
+            f"{_format_number(item.get('model_call_count', 0))} | "
+            f"{item.get('summary_called_runs', 0)} | "
+            f"{_format_number(item.get('compact_call_total_tokens', 0))} | {net_benefit} |"
         )
     lines.extend(
         [
             "",
-            "## 配对比较",
+            "## 配对比较与净收益",
             "",
+            (
+                "| 比较（对照 → 处理） | 有效配对 | 同时通过 | 中位输入减少 token | "
+                "中位摘要生成调用成本 token | 中位净收益 token |"
+            ),
+            "|---|---:|---:|---:|---:|---:|",
         ]
     )
     for name, comparison in comparisons.items():
-        lines.extend(
-            [
-                f"- `{name}`：{comparison['treatment']} 相对 {comparison['control']}，"
-                f"有效配对 {comparison['paired_run_count']}，"
-                f"中位净收益 {comparison['median_net_benefit_tokens']} tokens。",
-            ]
+        lines.append(
+            f"| `{name}` (`{comparison['control']}` → `{comparison['treatment']}`) | "
+            f"{comparison['paired_run_count']} | {comparison['passed_pair_count']} | "
+            f"{_format_number(comparison['median_input_reduction_tokens'])} | "
+            f"{_format_number(comparison['median_summary_call_tokens'])} | "
+            f"{_format_number(comparison['median_net_benefit_tokens'])} |"
         )
     lines.extend(
         [
             "",
-            f"确定性校验：{'通过' if payload['determinism']['passed'] else '失败'}。",
-            "脚本 verifier 只覆盖固定轨迹；真实成本优化仍需 live 模式的 provider `actual` usage。",
+            "## 逐任务配对结果",
+            "",
+            "下表为每个任务跨重复次数的中位值；净收益均相对 `no_context_reduction` 计算。",
+            "",
+            (
+                "| 任务 | 质量通过 | 全历史输入 token | 确定性摘要输入 token | "
+                "LLM handoff 输入 token | 确定性净收益 | "
+                "LLM handoff 摘要调用成本 | LLM handoff 净收益 |"
+            ),
+            "|---|---|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for task_id in sorted({str(row["task_id"]) for row in payload["rows"]}):
+        task_rows = [row for row in payload["rows"] if row["task_id"] == task_id]
+        values = {
+            variant: [row for row in task_rows if row["variant"] == variant]
+            for variant in VARIANTS
+        }
+        baseline_input = _median_field(values["no_context_reduction"], "input_tokens")
+        deterministic_input = _median_field(values["full_orchestrator"], "input_tokens")
+        handoff_input = _median_field(values["full_orchestrator_with_llm_handoff"], "input_tokens")
+        handoff_summary_cost = _median_field(
+            values["full_orchestrator_with_llm_handoff"], "compact_call_total_tokens"
+        )
+        deterministic_net = baseline_input - deterministic_input
+        handoff_net = baseline_input - handoff_input - handoff_summary_cost
+        task_passed = all(row["status"] == "passed" for row in task_rows)
+        lines.append(
+            f"| `{task_id}` | {'通过' if task_passed else '失败'} | "
+            f"{_format_number(baseline_input)} | {_format_number(deterministic_input)} | "
+            f"{_format_number(handoff_input)} | {_format_number(deterministic_net)} | "
+            f"{_format_number(handoff_summary_cost)} | {_format_number(handoff_net)} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 可复现性与审计入口",
+            "",
+            (
+                "- 确定性校验会逐任务、逐变体比较两次运行的状态、输入 token、"
+                "模型调用数、摘要调用成本、摘要调用标记和 verifier 返回码。"
+            ),
+            f"- 本次确定性失败项：{len(payload['determinism']['failures'])}。",
+            (
+                "- 原始数据见 `results.json`；每次模型请求、上下文压力决策、摘要 usage 与 "
+                "verifier 状态见 `traces/<task>/<variant>/<repeat>.jsonl`。"
+            ),
+            "",
+            (
+                "要验证真实成本优化，应在 live 模式下记录 provider `actual` usage，"
+                "并在相同任务、策略和重复次数下复测质量与净收益。"
+            ),
             "",
         ]
     )
     return "\n".join(lines)
+
+
+def _median_field(rows: list[dict[str, Any]], field: str) -> float:
+    return statistics.median(int(row[field]) for row in rows) if rows else 0
+
+
+def _format_number(value: float | int) -> str:
+    number = float(value)
+    if number.is_integer():
+        return f"{int(number):,}"
+    return f"{number:,.1f}"

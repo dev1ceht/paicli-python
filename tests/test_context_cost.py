@@ -77,6 +77,11 @@ def test_scripted_context_cost_runner_executes_isolated_fixture_and_writes_artif
     assert (
         payload["summary"]["comparisons"]["full_history_vs_deterministic"]["paired_run_count"] == 2
     )
+    assert (
+        payload["summary"]["comparisons"]["full_history_vs_llm_handoff"]["paired_run_count"]
+        == 2
+    )
+    assert payload["summary"]["quality"]["passed_runs"] == 6
     baseline_trace = Path(by_variant["no_context_reduction"]["trace_path"]).read_text(
         encoding="utf-8"
     )
@@ -85,6 +90,10 @@ def test_scripted_context_cost_runner_executes_isolated_fixture_and_writes_artif
     )
     assert '"pressure_tier": "disabled"' in baseline_trace
     assert '"summary_mode": "llm"' in handoff_trace
+    report = (output_dir / "report.md").read_text(encoding="utf-8")
+    assert "## 逐任务配对结果" in report
+    assert "full_history_vs_llm_handoff" in report
+    assert "确定性摘要的该值为 `0`" in report
 
 
 def test_scripted_context_cost_runner_marks_a_failed_verifier_as_failed(tmp_path):
