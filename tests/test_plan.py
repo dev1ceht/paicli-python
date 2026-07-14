@@ -250,6 +250,48 @@ def test_run_plan_agent_expand_then_execute():
     assert agent.run_prompts
 
 
+def test_run_plan_agent_updates_renderer_usage_for_planning_and_tasks():
+    class UsageLlm:
+        provider_name = "fake"
+        model_name = "fake"
+        max_context_window = 1_000
+
+        async def chat(self, _messages, _tools, *, system_prompt=""):
+            yield {
+                "type": "text_delta",
+                "text": '{"tasks": [{"id": "inspect", "description": "Inspect files"}]}',
+            }
+            yield {"type": "usage", "usage": {"input_tokens": 11, "output_tokens": 7}}
+
+    class UsageAgent:
+        llm_client = UsageLlm()
+        cwd = "/tmp/fake"
+
+        async def run(self, _prompt):
+            yield {"type": "usage", "usage": {"input_tokens": 13, "output_tokens": 17}}
+            yield {"type": "text_delta", "text": "done"}
+            yield {"type": "done", "total_tokens": 30, "total_turns": 1}
+
+    async def review(_plan, _expanded):
+        return PlanReviewDecision.execute()
+
+    renderer = RichRenderer(console=Console(file=StringIO(), color_system=None, width=120))
+    asyncio.run(
+        _run_plan_agent(
+            UsageAgent(),
+            renderer,
+            "先检查代码并实现功能然后运行测试",
+            review_input=review,
+        )
+    )
+
+    status = renderer.toolbar_status()
+    assert status["input_tokens"] == 13
+    assert status["output_tokens"] == 24
+    assert status["context_ratio"] == pytest.approx(0.013)
+    assert status["has_usage"] is True
+
+
 # ---------------------------------------------------------------------------
 # New tests for enhanced features
 # ---------------------------------------------------------------------------

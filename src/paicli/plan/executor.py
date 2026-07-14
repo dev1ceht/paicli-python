@@ -475,7 +475,12 @@ class JsonPlanner:
         self.last_raw_plan = ""
         self.last_thinking = ""
 
-    async def create_plan(self, goal: str) -> ExecutionPlan:
+    async def create_plan(
+        self,
+        goal: str,
+        *,
+        event_sink: EventSink | None = None,
+    ) -> ExecutionPlan:
         if is_simple_goal(goal):
             return create_minimal_plan(goal)
 
@@ -503,6 +508,8 @@ class JsonPlanner:
                 text += str(event.get("text") or "")
             elif event.get("type") == "thinking_delta":
                 thinking += str(event.get("thinking") or event.get("text") or "")
+            elif event.get("type") == "usage" and event_sink:
+                event_sink({"type": "usage", "usage": dict(event.get("usage") or {})})
             elif event.get("type") == "error":
                 raise event["error"]
 
@@ -515,6 +522,8 @@ class JsonPlanner:
         original_goal: str,
         failure_reason: str,
         completed_tasks: dict[str, str],
+        *,
+        event_sink: EventSink | None = None,
     ) -> ExecutionPlan:
         completed_summary = "\n".join(
             f"- {tid}: {result[:200]}" for tid, result in completed_tasks.items()
@@ -525,7 +534,7 @@ class JsonPlanner:
             f"已完成任务:\n{completed_summary}\n"
             f"请基于以上信息重新规划剩余任务。"
         )
-        return await self.create_plan(replan_goal)
+        return await self.create_plan(replan_goal, event_sink=event_sink)
 
     @staticmethod
     def parse(raw: str, *, goal: str = "") -> ExecutionPlan:

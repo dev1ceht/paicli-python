@@ -98,6 +98,34 @@ def test_tui_focuses_text_area_and_streams_text_before_done():
     asyncio.run(run())
 
 
+def test_tui_updates_status_bar_from_plan_usage_events():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        app._context_window = 1_000
+
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+
+            app.handle_event({"type": "plan_generation_started", "goal": "inspect"})
+            app.handle_event(
+                {"type": "usage", "usage": {"input_tokens": 11, "output_tokens": 7}}
+            )
+            app.handle_event(
+                {"type": "usage", "usage": {"input_tokens": 13, "output_tokens": 17}}
+            )
+
+            status_bar = app.query_one(StatusBar)
+            assert status_bar.phase == "plan"
+            assert status_bar.context_text == "ctx 1%"
+            assert status_bar.token_detail == "in:13 out:24 (13/1.0k)"
+
+            app.handle_event({"type": "plan_completed", "results": {}})
+            assert app._last_total_tokens == 48
+            assert app._phase == "idle"
+
+    asyncio.run(run())
+
+
 def test_tui_enter_submits_message_and_sets_running_state():
     class WaitingAgent:
         async def run(self, message: str):

@@ -100,7 +100,7 @@ class RichRenderer:
 
     def toolbar_status(self) -> dict[str, Any]:
         elapsed = self._last_elapsed
-        if self._run_start_time and self._phase == "running":
+        if self._run_start_time and self._phase in {"running", "plan"}:
             elapsed = time.monotonic() - self._run_start_time
         return {
             "turns": self._last_turns,
@@ -230,6 +230,7 @@ class RichRenderer:
             self._flush_thinking()
             self._flush_markdown(title="Assistant Output")
             self._phase = "idle"
+            self._record_run_summary({})
             self.console.print(
                 "[yellow]\u23f9\ufe0f \u5df2\u53d6\u6d88\u672c\u6b21\u8ba1\u5212\u6267\u884c\u3002[/yellow]"
             )
@@ -274,10 +275,12 @@ class RichRenderer:
             )
         elif event_type == "plan_failed":
             self._phase = "idle"
+            self._record_run_summary({})
             detail = event.get("error") or event.get("failed")
             self.console.print(f"[bold red]\u274c \u8ba1\u5212\u5931\u8d25:[/bold red] {detail}")
         elif event_type == "plan_completed":
             self._phase = "idle"
+            self._record_run_summary({})
             results = event.get("results") or {}
             self.console.print(
                 Text("\n\u2705 \u8ba1\u5212\u6267\u884c\u5b8c\u6210\uff01", style="bold green")
@@ -473,6 +476,18 @@ class RichRenderer:
         self._cached_tokens += cached
         if input_tokens:
             self._last_input_tokens = input_tokens
+        self._last_total_tokens = self._input_tokens + self._output_tokens
+        self._last_context_ratio = (
+            self._last_input_tokens / self._context_window
+            if self._context_window > 0
+            else 0
+        )
+        self._last_has_usage = self._last_total_tokens > 0
+        self._last_cost = estimate_cost(
+            self._provider,
+            self._input_tokens,
+            self._output_tokens,
+        )
 
     # -- Tool call rendering (Java-style labels) -------------------------
 
