@@ -108,6 +108,9 @@ def test_tui_updates_status_bar_from_plan_usage_events():
 
             app.handle_event({"type": "plan_generation_started", "goal": "inspect"})
             app.handle_event(
+                {"type": "context_status", "pressure_tier": "tier1_snip"}
+            )
+            app.handle_event(
                 {
                     "type": "usage",
                     "usage": {"input_tokens": 11, "output_tokens": 7, "cached_tokens": 5},
@@ -123,6 +126,7 @@ def test_tui_updates_status_bar_from_plan_usage_events():
             status_bar = app.query_one(StatusBar)
             assert status_bar.phase == "plan"
             assert status_bar.context_text == "ctx 13/1.0k (1%)"
+            assert status_bar.pressure_text == "pressure:T1"
             assert status_bar.token_detail == "in:13 out:17 cached:3"
 
             app.handle_event({"type": "plan_completed", "results": {}})

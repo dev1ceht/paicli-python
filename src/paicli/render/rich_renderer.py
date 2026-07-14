@@ -63,6 +63,7 @@ class RichRenderer:
         self._last_total_tokens = 0
         self._last_context_ratio = 0.0
         self._last_has_usage = False
+        self._pressure_tier: str | None = None
         # Elapsed time tracking
         self._run_start_time: float | None = None
         self._last_elapsed: float = 0.0
@@ -113,6 +114,7 @@ class RichRenderer:
             "context_ratio": self._last_context_ratio,
             "context_window": self._context_window,
             "has_usage": self._last_has_usage,
+            "pressure_tier": self._pressure_tier,
             "elapsed": elapsed,
             "cost": self._last_cost,
             "phase": self._phase,
@@ -169,6 +171,8 @@ class RichRenderer:
             self._update_live_thinking()
         elif event_type == "usage":
             self._record_usage(event.get("usage") or {})
+        elif event_type == "context_status":
+            self._pressure_tier = event.get("pressure_tier")
         elif event_type == "turn_complete":
             stop_reason = str(event.get("stop_reason") or "end_turn")
             title = "Assistant Output" if stop_reason == "tool_use" else "Final Output"

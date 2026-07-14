@@ -926,6 +926,7 @@ def _bottom_toolbar(
     context_text = _format_toolbar_percent(context_ratio) if has_usage else "0%"
     context_window = int(stats.get("context_window") or 0)
     used_tokens = int(stats.get("input_tokens") or 0) if has_usage else 0
+    pressure_text = _format_pressure_tier(stats.get("pressure_tier"))
 
     segments: list[tuple[str, str]] = [
         # Phase indicator
@@ -949,6 +950,9 @@ def _bottom_toolbar(
         segments.append(("class:toolbar.ctx.value", f"({context_text})"))
     else:
         segments.append(("class:toolbar.ctx.value", context_text))
+
+    segments.append(("class:toolbar.gap", " · "))
+    segments.append(("class:toolbar.pressure", f"pressure:{pressure_text}"))
 
     # Token details (only when we have usage data)
     if has_usage:
@@ -1018,6 +1022,15 @@ def _format_toolbar_percent(value: float) -> str:
     if value <= 0:
         return "0%"
     return f"{value:.0%}"
+
+
+def _format_pressure_tier(tier: object) -> str:
+    return {
+        "tier0_observe": "T0",
+        "tier1_snip": "T1",
+        "tier2_prune": "T2",
+        "tier3_summary": "T3",
+    }.get(str(tier), "—")
 
 
 def help_text() -> str:
