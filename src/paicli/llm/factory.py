@@ -25,6 +25,7 @@ MODEL_CONTEXT_WINDOWS = {
     "deepseek-reasoner": 1_000_000,
     "deepseek-coder": 128_000,
 }
+DEFAULT_SUPPORTED_CONTEXT_WINDOW = 1_000_000
 
 
 def create_llm_client(
@@ -39,7 +40,7 @@ def create_llm_client(
     audit_path = retry_audit_path or "~/.paicli/audit"
     if provider == "deepseek":
         base_url = config.base_url or DEEPSEEK_BASE_URL
-        context = MODEL_CONTEXT_WINDOWS.get(config.model, 64_000)
+        context = MODEL_CONTEXT_WINDOWS.get(config.model, DEFAULT_SUPPORTED_CONTEXT_WINDOW)
         return OpenAICompatibleClient(
             provider_name="deepseek",
             model=config.model,
@@ -64,7 +65,7 @@ def create_llm_client(
             max_tokens=config.max_tokens,
             temperature=config.temperature,
             timeout=config.timeout,
-            max_context_window=128_000,
+            max_context_window=DEFAULT_SUPPORTED_CONTEXT_WINDOW,
             prompt_cache=False,
             retry_policy=retry,
             retry_audit_path=audit_path,
@@ -79,7 +80,7 @@ def create_llm_client(
             max_tokens=config.max_tokens,
             temperature=config.temperature,
             timeout=config.timeout,
-            max_context_window=128_000,
+            max_context_window=DEFAULT_SUPPORTED_CONTEXT_WINDOW,
             prompt_cache=False,
             retry_policy=retry,
             retry_audit_path=audit_path,
@@ -93,7 +94,7 @@ def create_llm_client(
         max_tokens=config.max_tokens,
         temperature=config.temperature,
         timeout=config.timeout,
-        max_context_window=64_000,
+        max_context_window=128_000,
         prompt_cache=False,
         retry_policy=retry,
         retry_audit_path=audit_path,
