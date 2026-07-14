@@ -248,6 +248,14 @@ async def _run_plan_agent(
                             "is_error": event.get("is_error"),
                         }
                     )
+            elif event_type == "usage":
+                if event_sink:
+                    event_sink(
+                        {
+                            "type": "usage",
+                            "usage": dict(event.get("usage") or {}),
+                        }
+                    )
             elif event_type == "error":
                 raise event["error"]
         return text
@@ -267,7 +275,7 @@ async def _run_plan_agent(
     planning_goal = message
     while True:
         renderer.handle({"type": "plan_generation_started", "goal": planning_goal})
-        plan = await planner.create_plan(planning_goal)
+        plan = await planner.create_plan(planning_goal, event_sink=renderer.handle)
         if planner.last_thinking.strip():
             renderer.handle({"type": "plan_thinking", "thinking": planner.last_thinking})
         renderer.handle({"type": "plan_review_summary", "summary": plan.summary()})
@@ -306,6 +314,7 @@ async def _run_plan_agent(
                 original_goal,
                 failure_reason,
                 completed,
+                event_sink=renderer.handle,
             )
             renderer.handle(
                 {

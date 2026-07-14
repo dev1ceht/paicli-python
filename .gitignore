@@ -12,3 +12,4 @@ build/
 .worktrees/
 .superpowers/
 .zcode/
+.gitignore
