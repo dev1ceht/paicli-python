@@ -313,7 +313,7 @@ def test_run_plan_agent_updates_renderer_usage_for_planning_and_tasks():
     assert status["input_tokens"] == 13
     assert status["output_tokens"] == 17
     assert status["cached_tokens"] == 3
-    assert status["context_ratio"] == pytest.approx(0.024)
+    assert status["context_ratio"] == pytest.approx(0.013)
     assert status["has_usage"] is True
 
 

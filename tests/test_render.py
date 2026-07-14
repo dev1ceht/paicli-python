@@ -53,7 +53,7 @@ def test_prompt_message_keeps_status_and_input_together():
     assert "YOLO" not in plain
     assert "Shift+Tab" not in plain
     assert "deepseek-v4-flash" in plain
-    assert "█░░░░░░░░░░░ 1%" in plain
+    assert "ctx 1%" in plain
     assert "/tmp/project" in plain
     assert "\n\n* " in plain
     assert plain.endswith("\n* ")
@@ -67,7 +67,6 @@ def test_bottom_toolbar_uses_runtime_summary_segments():
     )
 
     assert ("class:toolbar.model", "deepseek-v4-flash") in toolbar
-    assert ("class:toolbar.ctx.bar", "█░░░░░░░░░░░") in toolbar
     assert ("class:toolbar.ctx.value", "1%") in toolbar
     assert ("class:toolbar.cwd.value", "/Users/me/project") in toolbar
     assert not any(text == " TURN " for _style, text in toolbar)
@@ -202,9 +201,17 @@ def test_start_run_resets_token_usage():
     stream = StringIO()
     console = Console(file=stream, color_system=None, width=120)
     renderer = RichRenderer(console=console, context_window=1000)
+    renderer.set_provider("deepseek")
 
     renderer.handle({"type": "usage", "usage": {"input_tokens": 900, "output_tokens": 10}})
+    first_cost = renderer.toolbar_status()["cost"]
     renderer.start_run()
+
+    pending_stats = renderer.toolbar_status()
+    assert pending_stats["input_tokens"] == 900
+    assert pending_stats["output_tokens"] == 10
+    assert pending_stats["context_ratio"] == 0.9
+
     renderer.handle({"type": "usage", "usage": {"input_tokens": 100, "output_tokens": 20}})
     renderer.handle({"type": "done", "total_turns": 1, "total_tokens": 120})
 
@@ -214,6 +221,7 @@ def test_start_run_resets_token_usage():
     assert stats["output_tokens"] == 20
     assert stats["total_tokens"] == 120
     assert stats["context_ratio"] == 0.1
+    assert stats["cost"] > first_cost
 
 
 def test_missing_usage_keeps_toolbar_tokens_unavailable():
@@ -226,8 +234,7 @@ def test_missing_usage_keeps_toolbar_tokens_unavailable():
     assert "Run Summary" not in stream.getvalue()
     toolbar = _bottom_toolbar("/tmp/project", "deepseek-v4-flash", renderer.toolbar_status())
     assert ("class:toolbar.model", "deepseek-v4-flash") in toolbar
-    assert ("class:toolbar.ctx.bar", "░░░░░░░░░░░░") in toolbar
-    assert ("class:toolbar.ctx.value", "0%") in toolbar
+    assert ("class:toolbar.ctx.value", "(0%)") in toolbar
 
 
 # -- New tests for Java-style rendering enhancements --
@@ -431,7 +438,7 @@ def test_toolbar_shows_context_window_size():
     )
     plain = "".join(text for _style, text in toolbar)
     # used = input_tokens (last API call's prompt_tokens), not total_tokens
-    assert "(8.7k/1.0M)" in plain
+    assert "ctx 8.7k/1.0M (1%)" in plain
 
 
 def test_diff_rendering_new_file():

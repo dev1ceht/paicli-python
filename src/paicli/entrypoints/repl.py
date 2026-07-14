@@ -925,6 +925,7 @@ def _bottom_toolbar(
     context_ratio = float(stats.get("context_ratio") or 0)
     context_text = _format_toolbar_percent(context_ratio) if has_usage else "0%"
     context_window = int(stats.get("context_window") or 0)
+    used_tokens = int(stats.get("input_tokens") or 0) if has_usage else 0
 
     segments: list[tuple[str, str]] = [
         # Phase indicator
@@ -933,24 +934,21 @@ def _bottom_toolbar(
         # Model name
         ("class:toolbar.model", model),
         ("class:toolbar.gap", "  "),
-        # Context bar
+        # Last request context usage
         ("class:toolbar.ctx.label", "ctx "),
-        ("class:toolbar.ctx.bar", _format_toolbar_bar(context_ratio if has_usage else 0)),
-        ("class:toolbar.gap", " "),
-        ("class:toolbar.ctx.value", context_text),
     ]
 
-    # Add (used/window) format like (8.7k/1.0M)
-    # input_tokens = last API call's prompt_tokens = actual context window usage
     if context_window > 0:
-        used_tokens = int(stats.get("input_tokens") or 0)
-        segments.append(("class:toolbar.gap", " "))
         segments.append(
             (
                 "class:toolbar.ctx.detail",
-                f"({format_tokens(used_tokens)}/{format_tokens(context_window)})",
+                f"{format_tokens(used_tokens)}/{format_tokens(context_window)}",
             )
         )
+        segments.append(("class:toolbar.gap", " "))
+        segments.append(("class:toolbar.ctx.value", f"({context_text})"))
+    else:
+        segments.append(("class:toolbar.ctx.value", context_text))
 
     # Token details (only when we have usage data)
     if has_usage:
@@ -1019,8 +1017,6 @@ def _format_toolbar_bar(value: float, *, width: int = 12) -> str:
 def _format_toolbar_percent(value: float) -> str:
     if value <= 0:
         return "0%"
-    if value < 0.01:
-        return "<1%"
     return f"{value:.0%}"
 
 

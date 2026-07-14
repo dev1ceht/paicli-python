@@ -83,6 +83,7 @@ class PaiCliApp(App):
         self._run_start_time: float | None = None
         self._last_elapsed: float = 0.0
         self._last_cost: float = 0.0
+        self._session_cost: float = 0.0
         self._provider = ""
         self._phase = "idle"
         self._context_window = 0
@@ -277,13 +278,6 @@ class PaiCliApp(App):
         self._input_tokens = 0
         self._output_tokens = 0
         self._cached_tokens = 0
-        self._last_input_tokens = 0
-        self._last_output_tokens = 0
-        self._last_cached_tokens = 0
-        self._last_total_tokens = 0
-        self._last_context_ratio = 0.0
-        self._last_has_usage = False
-        self._last_cost = 0.0
         self._task_buffers.clear()
         self._task_thinking_buffers.clear()
         self._update_status_bar()
@@ -588,7 +582,7 @@ class PaiCliApp(App):
         self._last_cached_tokens = cached
         self._last_total_tokens = self._input_tokens + self._output_tokens
         self._last_context_ratio = (
-            self._input_tokens / self._context_window
+            self._last_input_tokens / self._context_window
             if self._context_window > 0
             else 0
         )
@@ -596,11 +590,12 @@ class PaiCliApp(App):
         if self._provider:
             from paicli.render._common import estimate_cost
 
-            self._last_cost = estimate_cost(
+            self._session_cost += estimate_cost(
                 self._provider,
-                self._input_tokens,
-                self._output_tokens,
+                input_tokens,
+                output_tokens,
             )
+            self._last_cost = self._session_cost
 
     def _record_run_summary(self, event: dict[str, Any]) -> None:
         # The "done" event from query.py has top-level keys:
@@ -611,7 +606,7 @@ class PaiCliApp(App):
         )
         has_usage = total_tokens > 0 or self._input_tokens > 0 or self._output_tokens > 0
         context_ratio = (
-            self._input_tokens / self._context_window
+            self._last_input_tokens / self._context_window
             if self._context_window > 0
             else 0
         )
@@ -622,12 +617,7 @@ class PaiCliApp(App):
             self._last_elapsed = time.monotonic() - self._run_start_time
             self._run_start_time = None
         if self._provider:
-            from paicli.render._common import estimate_cost
-            self._last_cost = estimate_cost(
-                self._provider,
-                self._input_tokens,
-                self._output_tokens,
-            )
+            self._last_cost = self._session_cost
 
     def _update_status_bar(self) -> None:
         status_bar = self.query_one("#status-bar", StatusBar)
@@ -636,7 +626,15 @@ class PaiCliApp(App):
 
         has_usage = self._last_has_usage
         context_ratio = self._last_context_ratio
-        context_text = f"ctx {context_ratio:.0%}" if has_usage else "ctx 0%"
+        used_tokens = self._last_input_tokens if has_usage else 0
+        context_percent = f"{context_ratio:.0%}" if has_usage else "0%"
+        if self._context_window > 0:
+            context_text = (
+                f"ctx {format_tokens(used_tokens)}/"
+                f"{format_tokens(self._context_window)} ({context_percent})"
+            )
+        else:
+            context_text = f"ctx {context_percent}"
         status_bar.context_text = context_text
 
         token_detail = ""
@@ -648,11 +646,6 @@ class PaiCliApp(App):
             if cached:
                 parts.append(f"cached:{format_tokens(cached)}")
             token_detail = " ".join(parts)
-            if self._context_window > 0:
-                token_detail += (
-                    f" ({format_tokens(self._input_tokens)}/"
-                    f"{format_tokens(self._context_window)})"
-                )
         status_bar.token_detail = token_detail
 
         cost_text = format_cost(self._last_cost)
@@ -1087,13 +1080,6 @@ class PaiCliApp(App):
         self._input_tokens = 0
         self._output_tokens = 0
         self._cached_tokens = 0
-        self._last_input_tokens = 0
-        self._last_output_tokens = 0
-        self._last_cached_tokens = 0
-        self._last_total_tokens = 0
-        self._last_context_ratio = 0.0
-        self._last_has_usage = False
-        self._last_cost = 0.0
         self._task_buffers.clear()
         self._task_thinking_buffers.clear()
         self._update_status_bar()
