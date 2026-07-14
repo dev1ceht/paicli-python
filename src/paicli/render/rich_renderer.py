@@ -57,6 +57,8 @@ class RichRenderer:
         self._output_tokens = 0
         self._cached_tokens = 0
         self._last_input_tokens = 0
+        self._last_output_tokens = 0
+        self._last_cached_tokens = 0
         self._last_turns = 0
         self._last_total_tokens = 0
         self._last_context_ratio = 0.0
@@ -87,12 +89,18 @@ class RichRenderer:
         self._thinking_buffer.clear()
         self._stop_live_markdown()
         self._stop_live_thinking()
-        # Clear per-run accumulators only.
-        # Preserve _last_* fields so the toolbar keeps showing previous
-        # turn's data until new usage/done events arrive.
+        # Start a new accounting scope for the next LLM request.
         self._input_tokens = 0
         self._output_tokens = 0
         self._cached_tokens = 0
+        self._last_input_tokens = 0
+        self._last_output_tokens = 0
+        self._last_cached_tokens = 0
+        self._last_turns = 0
+        self._last_total_tokens = 0
+        self._last_context_ratio = 0.0
+        self._last_has_usage = False
+        self._last_cost = 0.0
         self._task_buffers.clear()
         self._task_thinking_buffers.clear()
         self._run_start_time = time.monotonic()
@@ -105,8 +113,8 @@ class RichRenderer:
         return {
             "turns": self._last_turns,
             "input_tokens": self._last_input_tokens,
-            "output_tokens": self._output_tokens,
-            "cached_tokens": self._cached_tokens,
+            "output_tokens": self._last_output_tokens,
+            "cached_tokens": self._last_cached_tokens,
             "total_tokens": self._last_total_tokens,
             "context_ratio": self._last_context_ratio,
             "context_window": self._context_window,
@@ -474,11 +482,12 @@ class RichRenderer:
         self._input_tokens += input_tokens
         self._output_tokens += output_tokens
         self._cached_tokens += cached
-        if input_tokens:
-            self._last_input_tokens = input_tokens
+        self._last_input_tokens = input_tokens
+        self._last_output_tokens = output_tokens
+        self._last_cached_tokens = cached
         self._last_total_tokens = self._input_tokens + self._output_tokens
         self._last_context_ratio = (
-            self._last_input_tokens / self._context_window
+            self._input_tokens / self._context_window
             if self._context_window > 0
             else 0
         )
@@ -646,7 +655,7 @@ class RichRenderer:
         turns = int(event.get("total_turns") or 0)
         has_usage = total_tokens > 0 or self._input_tokens > 0 or self._output_tokens > 0
         context_ratio = (
-            self._last_input_tokens / self._context_window if self._context_window > 0 else 0
+            self._input_tokens / self._context_window if self._context_window > 0 else 0
         )
         self._last_turns = turns
         self._last_total_tokens = total_tokens
