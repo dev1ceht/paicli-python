@@ -75,6 +75,8 @@ class PaiCliApp(App):
         self._output_tokens = 0
         self._cached_tokens = 0
         self._last_input_tokens = 0
+        self._last_output_tokens = 0
+        self._last_cached_tokens = 0
         self._last_total_tokens = 0
         self._last_context_ratio = 0.0
         self._last_has_usage = False
@@ -275,6 +277,13 @@ class PaiCliApp(App):
         self._input_tokens = 0
         self._output_tokens = 0
         self._cached_tokens = 0
+        self._last_input_tokens = 0
+        self._last_output_tokens = 0
+        self._last_cached_tokens = 0
+        self._last_total_tokens = 0
+        self._last_context_ratio = 0.0
+        self._last_has_usage = False
+        self._last_cost = 0.0
         self._task_buffers.clear()
         self._task_thinking_buffers.clear()
         self._update_status_bar()
@@ -574,11 +583,12 @@ class PaiCliApp(App):
         self._input_tokens += input_tokens
         self._output_tokens += output_tokens
         self._cached_tokens += cached
-        if input_tokens:
-            self._last_input_tokens = input_tokens
+        self._last_input_tokens = input_tokens
+        self._last_output_tokens = output_tokens
+        self._last_cached_tokens = cached
         self._last_total_tokens = self._input_tokens + self._output_tokens
         self._last_context_ratio = (
-            self._last_input_tokens / self._context_window
+            self._input_tokens / self._context_window
             if self._context_window > 0
             else 0
         )
@@ -601,7 +611,7 @@ class PaiCliApp(App):
         )
         has_usage = total_tokens > 0 or self._input_tokens > 0 or self._output_tokens > 0
         context_ratio = (
-            self._last_input_tokens / self._context_window
+            self._input_tokens / self._context_window
             if self._context_window > 0
             else 0
         )
@@ -632,14 +642,17 @@ class PaiCliApp(App):
         token_detail = ""
         if has_usage:
             in_tok = self._last_input_tokens
-            out_tok = self._output_tokens
-            cached = self._cached_tokens
+            out_tok = self._last_output_tokens
+            cached = self._last_cached_tokens
             parts = [f"in:{format_tokens(in_tok)}", f"out:{format_tokens(out_tok)}"]
             if cached:
                 parts.append(f"cached:{format_tokens(cached)}")
             token_detail = " ".join(parts)
             if self._context_window > 0:
-                token_detail += f" ({format_tokens(in_tok)}/{format_tokens(self._context_window)})"
+                token_detail += (
+                    f" ({format_tokens(self._input_tokens)}/"
+                    f"{format_tokens(self._context_window)})"
+                )
         status_bar.token_detail = token_detail
 
         cost_text = format_cost(self._last_cost)
@@ -1074,6 +1087,13 @@ class PaiCliApp(App):
         self._input_tokens = 0
         self._output_tokens = 0
         self._cached_tokens = 0
+        self._last_input_tokens = 0
+        self._last_output_tokens = 0
+        self._last_cached_tokens = 0
+        self._last_total_tokens = 0
+        self._last_context_ratio = 0.0
+        self._last_has_usage = False
+        self._last_cost = 0.0
         self._task_buffers.clear()
         self._task_thinking_buffers.clear()
         self._update_status_bar()

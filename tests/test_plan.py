@@ -261,14 +261,20 @@ def test_run_plan_agent_updates_renderer_usage_for_planning_and_tasks():
                 "type": "text_delta",
                 "text": '{"tasks": [{"id": "inspect", "description": "Inspect files"}]}',
             }
-            yield {"type": "usage", "usage": {"input_tokens": 11, "output_tokens": 7}}
+            yield {
+                "type": "usage",
+                "usage": {"input_tokens": 11, "output_tokens": 7, "cached_tokens": 5},
+            }
 
     class UsageAgent:
         llm_client = UsageLlm()
         cwd = "/tmp/fake"
 
         async def run(self, _prompt):
-            yield {"type": "usage", "usage": {"input_tokens": 13, "output_tokens": 17}}
+            yield {
+                "type": "usage",
+                "usage": {"input_tokens": 13, "output_tokens": 17, "cached_tokens": 3},
+            }
             yield {"type": "text_delta", "text": "done"}
             yield {"type": "done", "total_tokens": 30, "total_turns": 1}
 
@@ -287,8 +293,9 @@ def test_run_plan_agent_updates_renderer_usage_for_planning_and_tasks():
 
     status = renderer.toolbar_status()
     assert status["input_tokens"] == 13
-    assert status["output_tokens"] == 24
-    assert status["context_ratio"] == pytest.approx(0.013)
+    assert status["output_tokens"] == 17
+    assert status["cached_tokens"] == 3
+    assert status["context_ratio"] == pytest.approx(0.024)
     assert status["has_usage"] is True
 
 
