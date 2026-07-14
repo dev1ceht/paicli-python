@@ -122,8 +122,8 @@ def test_tui_updates_status_bar_from_plan_usage_events():
 
             status_bar = app.query_one(StatusBar)
             assert status_bar.phase == "plan"
-            assert status_bar.context_text == "ctx 2%"
-            assert status_bar.token_detail == "in:13 out:17 cached:3 (24/1.0k)"
+            assert status_bar.context_text == "ctx 13/1.0k (1%)"
+            assert status_bar.token_detail == "in:13 out:17 cached:3"
 
             app.handle_event({"type": "plan_completed", "results": {}})
             assert app._last_total_tokens == 48

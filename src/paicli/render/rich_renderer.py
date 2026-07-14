@@ -68,6 +68,7 @@ class RichRenderer:
         self._last_elapsed: float = 0.0
         # Cost tracking
         self._provider = ""
+        self._session_cost: float = 0.0
         self._last_cost: float = 0.0
         # Phase tracking
         self._phase = "idle"  # idle, running, plan
@@ -89,18 +90,11 @@ class RichRenderer:
         self._thinking_buffer.clear()
         self._stop_live_markdown()
         self._stop_live_thinking()
-        # Start a new accounting scope for the next LLM request.
+        # Start a new accounting scope while preserving the last displayed
+        # request metrics until the next usage event arrives.
         self._input_tokens = 0
         self._output_tokens = 0
         self._cached_tokens = 0
-        self._last_input_tokens = 0
-        self._last_output_tokens = 0
-        self._last_cached_tokens = 0
-        self._last_turns = 0
-        self._last_total_tokens = 0
-        self._last_context_ratio = 0.0
-        self._last_has_usage = False
-        self._last_cost = 0.0
         self._task_buffers.clear()
         self._task_thinking_buffers.clear()
         self._run_start_time = time.monotonic()
@@ -487,16 +481,17 @@ class RichRenderer:
         self._last_cached_tokens = cached
         self._last_total_tokens = self._input_tokens + self._output_tokens
         self._last_context_ratio = (
-            self._input_tokens / self._context_window
+            self._last_input_tokens / self._context_window
             if self._context_window > 0
             else 0
         )
         self._last_has_usage = self._last_total_tokens > 0
-        self._last_cost = estimate_cost(
+        self._session_cost += estimate_cost(
             self._provider,
-            self._input_tokens,
-            self._output_tokens,
+            input_tokens,
+            output_tokens,
         )
+        self._last_cost = self._session_cost
 
     # -- Tool call rendering (Java-style labels) -------------------------
 
@@ -655,7 +650,9 @@ class RichRenderer:
         turns = int(event.get("total_turns") or 0)
         has_usage = total_tokens > 0 or self._input_tokens > 0 or self._output_tokens > 0
         context_ratio = (
-            self._input_tokens / self._context_window if self._context_window > 0 else 0
+            self._last_input_tokens / self._context_window
+            if self._context_window > 0
+            else 0
         )
         self._last_turns = turns
         self._last_total_tokens = total_tokens
@@ -666,9 +663,7 @@ class RichRenderer:
             self._last_elapsed = time.monotonic() - self._run_start_time
             self._run_start_time = None
         # Compute cost
-        self._last_cost = estimate_cost(
-            self._provider, self._input_tokens, self._output_tokens
-        )
+        self._last_cost = self._session_cost
         self._phase = "idle"
 
     # -- Banner panels -----------------------------------------------------
