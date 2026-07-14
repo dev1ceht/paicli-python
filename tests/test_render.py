@@ -63,11 +63,18 @@ def test_bottom_toolbar_uses_runtime_summary_segments():
     toolbar = _bottom_toolbar(
         "/Users/me/project",
         "deepseek-v4-flash",
-        {"turns": 1, "total_tokens": 13187, "context_ratio": 0.013, "has_usage": True},
+        {
+            "turns": 1,
+            "total_tokens": 13187,
+            "context_ratio": 0.013,
+            "has_usage": True,
+            "pressure_tier": "tier2_prune",
+        },
     )
 
     assert ("class:toolbar.model", "deepseek-v4-flash") in toolbar
     assert ("class:toolbar.ctx.value", "1%") in toolbar
+    assert ("class:toolbar.pressure", "pressure:T2") in toolbar
     assert ("class:toolbar.cwd.value", "/Users/me/project") in toolbar
     assert not any(text == " TURN " for _style, text in toolbar)
     assert not any("Token" in text for _style, text in toolbar)
@@ -359,6 +366,14 @@ def test_toolbar_status_includes_new_fields():
     assert "cached_tokens" in stats
     assert stats["phase"] == "idle"
     assert stats["cached_tokens"] == 0
+
+
+def test_toolbar_status_tracks_context_pressure_tier():
+    renderer = RichRenderer(context_window=1_000)
+
+    renderer.handle({"type": "context_status", "pressure_tier": "tier3_summary"})
+
+    assert renderer.toolbar_status()["pressure_tier"] == "tier3_summary"
 
 
 def test_toolbar_includes_token_details_and_cost():

@@ -162,6 +162,10 @@ async def query(
             )
             final_system_prompt = context_result.system_prompt
             messages = context_result.messages
+            yield {
+                "type": "context_status",
+                "pressure_tier": context_result.pressure_tier,
+            }
         else:
             final_system_prompt = system_prompt
 

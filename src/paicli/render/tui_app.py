@@ -29,6 +29,15 @@ from paicli.render.textual_widgets import (
 )
 
 
+def _format_pressure_tier(tier: object) -> str:
+    return {
+        "tier0_observe": "T0",
+        "tier1_snip": "T1",
+        "tier2_prune": "T2",
+        "tier3_summary": "T3",
+    }.get(str(tier), "—")
+
+
 class PaiCliApp(App):
     """Main PaiCLI Textual application."""
 
@@ -80,6 +89,7 @@ class PaiCliApp(App):
         self._last_total_tokens = 0
         self._last_context_ratio = 0.0
         self._last_has_usage = False
+        self._pressure_tier: str | None = None
         self._run_start_time: float | None = None
         self._last_elapsed: float = 0.0
         self._last_cost: float = 0.0
@@ -324,6 +334,8 @@ class PaiCliApp(App):
                 chat_log.begin_stream("thinking").append(thinking)
         elif event_type == "usage":
             self._record_usage(payload.get("usage") or {})
+        elif event_type == "context_status":
+            self._pressure_tier = payload.get("pressure_tier")
         elif event_type == "turn_complete":
             self._flush_thinking()
             stop_reason = str(payload.get("stop_reason") or "end_turn")
@@ -636,6 +648,7 @@ class PaiCliApp(App):
         else:
             context_text = f"ctx {context_percent}"
         status_bar.context_text = context_text
+        status_bar.pressure_text = f"pressure:{_format_pressure_tier(self._pressure_tier)}"
 
         token_detail = ""
         if has_usage:
@@ -655,7 +668,6 @@ class PaiCliApp(App):
         if self._run_start_time and self._phase in {"running", "plan"}:
             elapsed = time.monotonic() - self._run_start_time
         status_bar.elapsed_text = format_elapsed(elapsed) if elapsed else ""
-
     def action_clear_screen(self) -> None:
         chat_log = self.query_one("#chat-log", ChatLog)
         chat_log.clear_conversation()

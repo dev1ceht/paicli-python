@@ -167,9 +167,10 @@ class ContextManager:
             session_id=self.session_id,
         )
         pressure = calculate_pressure(assembled, budget)
-        self._last_pressure = pressure
         assembled = apply_pressure_tier(assembled, pressure)
-        return assembled, budget, pressure
+        actual_pressure = calculate_pressure(assembled, budget)
+        self._last_pressure = actual_pressure
+        return assembled, budget, actual_pressure
 
     def _compress_tool_results(self, messages: list[Message]) -> list[Message]:
         return apply_tool_result_compression(

@@ -285,6 +285,7 @@ def test_agent_compacts_actual_messages_and_writes_back_history(tmp_path, monkey
     async def run() -> None:
         events = [event async for event in agent.run("current request " * 80)]
         assert events[-1]["type"] == "done"
+        assert any(event["type"] == "context_status" for event in events)
 
     asyncio.run(run())
 
