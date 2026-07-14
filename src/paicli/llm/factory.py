@@ -41,6 +41,7 @@ def create_llm_client(config: LlmConfig) -> OpenAICompatibleClient:
             timeout=config.timeout,
             max_context_window=context,
             prompt_cache=True,
+            supports_reasoning_content=True,
         )
     if provider in {"openai", "openai-compatible", "compatible"}:
         return OpenAICompatibleClient(

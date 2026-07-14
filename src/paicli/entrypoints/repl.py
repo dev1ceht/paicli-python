@@ -137,6 +137,7 @@ async def start_repl(cwd: str, config: PaiCliConfig) -> None:
         config=config,
         cwd=cwd,
         tool_names=registry.list_names(),
+        tool_summaries=registry.summaries(),
         model=client.model_name,
         provider=client.provider_name,
     ).build()
