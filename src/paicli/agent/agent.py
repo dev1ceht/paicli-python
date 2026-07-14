@@ -41,7 +41,7 @@ class Agent:
         self.cancellation_check = cancellation_check
         self.history: list[Message] = []
         self.session_allowed_tools: set[str] = set()
-        
+
         # 初始化上下文管理器
         self.context_manager = ContextManager(
             config=config,
@@ -110,17 +110,9 @@ class Agent:
     def reconfigure_llm(self, llm_config: LlmConfig) -> LlmClient:
         """Replace the idle session's client while retaining its conversation history."""
         client = create_llm_client(llm_config)
-        system_prompt = PromptAssembler(
-            config=self.config,
-            cwd=self.cwd,
-            tool_names=self.tool_registry.list_names(),
-            model=client.model_name,
-            provider=client.provider_name,
-        ).build()
-
         self.config.llm = llm_config
         self.llm_client = client
-        self.system_prompt = system_prompt
+        self.system_prompt = self._build_system_prompt()
         self.context_manager = ContextManager(
             config=self.config,
             llm_client=client,
@@ -130,9 +122,18 @@ class Agent:
 
     def _system_prompt_for_message(self, message: str) -> str:
         memory_context = self._memory_context_for_message(message)
-        if not memory_context:
-            return self.system_prompt
-        return f"{self.system_prompt}\n\n{memory_context.strip()}"
+        self.system_prompt = self._build_system_prompt(relevant_memory=memory_context)
+        return self.system_prompt
+
+    def _build_system_prompt(self, *, relevant_memory: str = "") -> str:
+        return PromptAssembler(
+            config=self.config,
+            cwd=self.cwd,
+            tool_names=self.tool_registry.list_names(),
+            tool_summaries=self.tool_registry.summaries(),
+            model=self.llm_client.model_name,
+            provider=self.llm_client.provider_name,
+        ).build(relevant_memory=relevant_memory)
 
     def _memory_context_for_message(self, message: str) -> str:
         if not self.config.features.memory or not self.config.memory.long_term_enabled:

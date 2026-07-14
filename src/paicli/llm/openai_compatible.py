@@ -21,6 +21,7 @@ class OpenAICompatibleClient:
     timeout: float = 120.0
     max_context_window: int = 128_000
     prompt_cache: bool = False
+    supports_reasoning_content: bool = False
 
     @property
     def model_name(self) -> str:
@@ -99,6 +100,8 @@ class OpenAICompatibleClient:
                 )
             elif message.role == "assistant":
                 item: dict[str, Any] = {"role": "assistant", "content": message.content or ""}
+                if self.supports_reasoning_content and message.reasoning_content:
+                    item["reasoning_content"] = message.reasoning_content
                 if message.tool_calls:
                     item["tool_calls"] = message.tool_calls
                 formatted.append(item)

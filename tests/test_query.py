@@ -107,6 +107,34 @@ class RepeatingToolClient:
         yield {"type": "message_end", "stop_reason": "tool_use"}
 
 
+class ReasoningToolClient:
+    model_name = "deepseek-v4-flash"
+    provider_name = "deepseek"
+    max_context_window = 1_000_000
+
+    def __init__(self):
+        self.calls = 0
+        self.follow_up_messages: list[Message] = []
+
+    async def chat(self, messages, tools, *, system_prompt):  # noqa: ARG002
+        self.calls += 1
+        if self.calls == 1:
+            yield {"type": "thinking_delta", "thinking": "先读取目标文件"}
+            yield {
+                "type": "tool_call_delta",
+                "tool_call": {
+                    "index": 0,
+                    "id": "call_reasoning",
+                    "function": {"name": "inspect", "arguments": "{}"},
+                },
+            }
+            yield {"type": "message_end", "stop_reason": "tool_use"}
+            return
+        self.follow_up_messages = list(messages)
+        yield {"type": "text_delta", "text": "done"}
+        yield {"type": "message_end", "stop_reason": "end_turn"}
+
+
 def test_query_engine_executes_tool_and_replays_result(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     (tmp_path / "note.txt").write_text("hello\n", encoding="utf-8")
@@ -260,9 +288,7 @@ def test_agent_compacts_actual_messages_and_writes_back_history(tmp_path, monkey
 
     asyncio.run(run())
 
-    actual_messages = "\n".join(
-        str(message.content) for message in client.messages_by_call[-1]
-    )
+    actual_messages = "\n".join(str(message.content) for message in client.messages_by_call[-1])
     assert "Summarized old query history" in actual_messages
     assert old_secret not in actual_messages
     written_history = "\n".join(str(message.content) for message in agent.history)
@@ -296,7 +322,21 @@ def test_agent_reconfigure_llm_rebuilds_context_manager_and_preserves_history(
     assert agent.context_manager.llm_client is client
     assert agent.history == [Message(role="user", content="keep this")]
     assert config.llm.model == "qwen-turbo"
-    assert "Model: qwen-turbo (qwen)" in agent.system_prompt
+    assert "当前模型：qwen-turbo（qwen）" in agent.system_prompt
+
+    async def live_tool(_payload, _context):
+        return ToolResult("ok")
+
+    registry.register(
+        Tool(
+            name="live_tool",
+            description="MCP 动态工具",
+            parameters={"type": "object"},
+            handler=live_tool,
+        )
+    )
+    next_turn_prompt = agent._system_prompt_for_message("next turn")
+    assert "`live_tool`：MCP 动态工具" in next_turn_prompt
 
 
 def test_query_engine_finalizes_without_tools_after_repeated_tool_batches(tmp_path, monkeypatch):
@@ -309,10 +349,39 @@ def test_query_engine_finalizes_without_tools_after_repeated_tool_batches(tmp_pa
     async def inspect(_payload, _context):
         return ToolResult("unchanged")
 
-    registry.register(Tool(name="inspect", description="", parameters={"type": "object"}, handler=inspect))
-    engine = QueryEngine(llm_client=client, tool_registry=registry, config=config, cwd=str(tmp_path))
+    registry.register(
+        Tool(name="inspect", description="", parameters={"type": "object"}, handler=inspect)
+    )
+    engine = QueryEngine(
+        llm_client=client, tool_registry=registry, config=config, cwd=str(tmp_path)
+    )
 
     result = asyncio.run(engine.ask_complete_async("inspect repeatedly"))
 
     assert result.text == "final summary"
     assert client.tool_counts == [1, 1, 1, 0]
+
+
+def test_query_preserves_reasoning_between_tool_calling_turns(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config = load_config(project_root=tmp_path)
+    client = ReasoningToolClient()
+    registry = ToolRegistry()
+
+    async def inspect(_payload, _context):
+        return ToolResult("inspected")
+
+    registry.register(
+        Tool(name="inspect", description="inspect", parameters={"type": "object"}, handler=inspect)
+    )
+    engine = QueryEngine(
+        llm_client=client, tool_registry=registry, config=config, cwd=str(tmp_path)
+    )
+
+    result = asyncio.run(engine.ask_complete_async("inspect this"))
+
+    assert result.text == "done"
+    assistant_messages = [
+        message for message in client.follow_up_messages if message.role == "assistant"
+    ]
+    assert assistant_messages[-1].reasoning_content == "先读取目标文件"

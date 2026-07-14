@@ -14,6 +14,7 @@ class Message:
     name: str | None = None
     tool_call_id: str | None = None
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    reasoning_content: str | None = None
 
 
 @dataclass(slots=True)

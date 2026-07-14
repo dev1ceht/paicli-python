@@ -32,6 +32,7 @@ class QueryEngine:
             config=config,
             cwd=cwd,
             tool_names=tool_registry.list_names(),
+            tool_summaries=tool_registry.summaries(),
             model=llm_client.model_name,
             provider=llm_client.provider_name,
         ).build()

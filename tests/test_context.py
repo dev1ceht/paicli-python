@@ -271,6 +271,30 @@ class TestAssembler:
 
 
 class TestContextManagerBuildTurnContext:
+    def test_build_turn_context_keeps_history_out_of_system_prompt(self, tmp_path):
+        config = PaiCliConfig()
+        manager = ContextManager(config=config, llm_client=SummaryLlm(), cwd=str(tmp_path))
+        result = asyncio.run(
+            manager.build_turn_context(
+                prefix="SYSTEM-ONLY",
+                messages=[
+                    Message(role="user", content="HISTORY-ONLY"),
+                    Message(role="assistant", content="ASSISTANT-ONLY"),
+                    Message(role="user", content="CURRENT-ONLY"),
+                ],
+            )
+        )
+
+        assert result.system_prompt == "SYSTEM-ONLY"
+        assert "HISTORY-ONLY" not in result.system_prompt
+        assert "ASSISTANT-ONLY" not in result.system_prompt
+        assert "CURRENT-ONLY" not in result.system_prompt
+        assert [message.content for message in result.messages] == [
+            "HISTORY-ONLY",
+            "ASSISTANT-ONLY",
+            "CURRENT-ONLY",
+        ]
+
     def test_build_turn_context_compacts_old_history_into_actual_messages(self, tmp_path):
         config = _small_context_config()
         manager = ContextManager(

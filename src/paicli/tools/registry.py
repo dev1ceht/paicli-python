@@ -28,3 +28,7 @@ class ToolRegistry:
 
     def definitions(self) -> list[dict]:
         return [self._tools[name].definition() for name in self.list_names()]
+
+    def summaries(self) -> list[tuple[str, str]]:
+        """Return the currently available tool names and short descriptions."""
+        return [(name, self._tools[name].description) for name in self.list_names()]

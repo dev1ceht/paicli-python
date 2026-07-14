@@ -211,19 +211,18 @@ async def query(
                     pass
             yield {
                 "type": "error",
-                "error": RuntimeError(
-                    f"调用 LLM 失败 [{exc_type}]: {exc_detail}{exc_body}"
-                ),
+                "error": RuntimeError(f"调用 LLM 失败 [{exc_type}]: {exc_detail}{exc_body}"),
             }
             return
 
         total_tokens += usage_input + usage_output
         tool_calls = _finalize_tool_calls(tool_states)
-        assistant_message = Message(role="assistant", content=text, tool_calls=tool_calls)
-        if thinking and text:
-            assistant_message.content = text
-        elif thinking:
-            assistant_message.content = ""
+        assistant_message = Message(
+            role="assistant",
+            content=text,
+            tool_calls=tool_calls,
+            reasoning_content=thinking or None,
+        )
         messages.append(assistant_message)
         yield {"type": "turn_complete", "turn": turn, "stop_reason": stop_reason}
 
@@ -265,6 +264,7 @@ def _message_to_dict(message: Message) -> dict[str, Any]:
         "name": message.name,
         "tool_call_id": message.tool_call_id,
         "tool_calls": message.tool_calls,
+        "reasoning_content": message.reasoning_content,
     }
 
 
@@ -275,6 +275,7 @@ def _message_from_dict(value: dict[str, Any]) -> Message:
         name=value.get("name"),
         tool_call_id=value.get("tool_call_id"),
         tool_calls=list(value.get("tool_calls") or []),
+        reasoning_content=value.get("reasoning_content"),
     )
 
 
@@ -325,10 +326,12 @@ def _tool_name_by_id(calls: list[dict[str, Any]], tool_call_id: str) -> str:
 def _tool_batch_signature(calls: list[dict[str, Any]]) -> str:
     normalized = []
     for call in calls:
-        normalized.append((
-            _tool_name_by_id([call], str(call.get("id") or "")),
-            _tool_input(call),
-        ))
+        normalized.append(
+            (
+                _tool_name_by_id([call], str(call.get("id") or "")),
+                _tool_input(call),
+            )
+        )
     return json.dumps(normalized, sort_keys=True, ensure_ascii=False, default=str)
 
 

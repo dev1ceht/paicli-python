@@ -21,7 +21,6 @@ from paicli.context.compaction import (
 from paicli.context.pressure import (
     PressureResult,
     PressureTier,
-    apply_overflow_fallback,
     apply_pressure_tier,
     calculate_pressure,
     should_trigger_compaction,
@@ -74,19 +73,13 @@ class ContextManager:
         current_request: str = "",
         actual_usage: dict[str, int] | None = None,
     ) -> str:
-        """Build a system prompt without performing async history compaction."""
-        assembled, budget, _pressure = self._assemble_prompt(
-            prefix=prefix,
-            memory=memory,
-            skills=skills,
-            relevant_memory=relevant_memory,
-            history=history or [],
-            current_request=current_request,
-            actual_usage=actual_usage,
+        """Build role-stable system instructions without serializing conversation messages."""
+        del history, current_request, actual_usage
+        return "\n\n".join(
+            section.strip()
+            for section in [prefix, memory, skills, relevant_memory]
+            if section.strip()
         )
-        if assembled.total_tokens > budget.prompt_tokens:
-            assembled = apply_overflow_fallback(assembled, budget)
-        return assembled.to_string()
 
     async def build_turn_context(
         self,
@@ -115,9 +108,8 @@ class ContextManager:
 
         compacted = False
         output_messages = [*history, *([current] if current else [])]
-        if (
-            self.config.features.context_compression
-            and should_trigger_compaction(pressure, len(history))
+        if self.config.features.context_compression and should_trigger_compaction(
+            pressure, len(history)
         ):
             compacted_messages = await self._compact_messages(history)
             if compacted_messages is not None:
@@ -133,11 +125,8 @@ class ContextManager:
                     actual_usage=None,
                 )
 
-        if assembled.total_tokens > budget.prompt_tokens:
-            assembled = apply_overflow_fallback(assembled, budget)
-
         return ContextBuildResult(
-            system_prompt=assembled.to_string(),
+            system_prompt=prefix,
             messages=output_messages,
             compacted=compacted,
             pressure_tier=pressure.tier.value if pressure else None,

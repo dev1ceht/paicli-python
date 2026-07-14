@@ -143,3 +143,11 @@ _Avoid_: similarity score, conflict type
 **Structured conversation summary**:
 A compact, fixed-format account of compressed session history. It records the user goal, constraints, files read and modified, completed operations and results, key decisions, current workspace state, blockers, and next steps.
 _Avoid_: transcript, free-form chat summary
+
+**Outbound model request**:
+The single, role-preserving set of instructions and conversation messages sent to a model for one Agent turn. Each user request, assistant response, and tool result appears at most once in it.
+_Avoid_: assembled prompt, flattened history
+
+**Reasoning continuity**:
+The preservation of a model-produced reasoning payload between tool-calling turns when that provider requires it to continue the same inference.
+_Avoid_: displayed thinking, chain-of-thought transcript
