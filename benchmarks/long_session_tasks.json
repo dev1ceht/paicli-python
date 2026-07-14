@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "description": "PaiCLI scripted long-session tasks for context-cost evaluation.",
+  "tasks": [
+    {
+      "id": "multi-file-refactor",
+      "prompt": "Rename getUserName to get_user_name across the package and tests, then verify it.",
+      "fixture_repo": "fixtures/long_session_multi_file_refactor",
+      "allowed_tools": ["read_file", "write_file"],
+      "step_budget": 12,
+      "scripted_outputs": [
+        {"type": "tool", "name": "read_file", "arguments": {"path": "src/profile.py"}},
+        {"type": "tool", "name": "write_file", "arguments": {"path": "src/profile.py", "content": "def get_user_name(user):\n    return user['name'].strip().title()\n"}},
+        {"type": "tool", "name": "read_file", "arguments": {"path": "src/main.py"}},
+        {"type": "tool", "name": "write_file", "arguments": {"path": "src/main.py", "content": "from src.profile import get_user_name\n\n\ndef greeting(user):\n    return f\"Hello, {get_user_name(user)}\"\n"}},
+        {"type": "tool", "name": "write_file", "arguments": {"path": "src/report.py", "content": "from src.profile import get_user_name\n\n\ndef render_user(user):\n    return f\"User: {get_user_name(user)}\"\n"}},
+        {"type": "tool", "name": "write_file", "arguments": {"path": "tests/test_profile.py", "content": "from src.main import greeting\nfrom src.profile import get_user_name\nfrom src.report import render_user\n\n\ndef test_names():\n    assert greeting({'name': ' ada '}) == 'Hello, Ada'\n    assert get_user_name({'name': 'grace'}) == 'Grace'\n    assert render_user({'name': 'alan'}) == 'User: Alan'\n"}},
+        {"type": "final", "text": "Renamed the function and updated all references."}
+      ],
+      "llm_handoff": {"summary": "## Goal\nRename the user-name helper.\n\n## Next Steps\nRun the verifier.", "usage": {"input_tokens": 90, "output_tokens": 28}},
+      "verifier": ["python", "-c", "from pathlib import Path; import ast; assert 'getUserName' not in ''.join(p.read_text() for p in Path('src').glob('*.py')); [ast.parse(p.read_text()) for p in Path('src').glob('*.py')]" ]
+    },
+    {
+      "id": "debug-and-fix",
+      "prompt": "Use error.log to fix process so it sums all input values, then verify it.",
+      "fixture_repo": "fixtures/long_session_debug_fix",
+      "allowed_tools": ["read_file", "write_file"],
+      "step_budget": 6,
+      "scripted_outputs": [
+        {"type": "tool", "name": "read_file", "arguments": {"path": "error.log"}},
+        {"type": "tool", "name": "read_file", "arguments": {"path": "src/handler.py"}},
+        {"type": "tool", "name": "write_file", "arguments": {"path": "src/handler.py", "content": "def process(values):\n    total = 0\n    for index in range(len(values)):\n        total += values[index]\n    return total\n"}},
+        {"type": "final", "text": "Fixed the off-by-one loop."}
+      ],
+      "llm_handoff": {"summary": "## Goal\nFix the process loop.\n\n## Next Steps\nRun the verifier.", "usage": {"input_tokens": 80, "output_tokens": 24}},
+      "verifier": ["python", "-c", "from src.handler import process; assert process([1, 2, 3]) == 6"]
+    },
+    {
+      "id": "add-endpoint-with-test",
+      "prompt": "Add a health endpoint to the lightweight web app and add its focused test.",
+      "fixture_repo": "fixtures/long_session_health_endpoint",
+      "allowed_tools": ["read_file", "write_file"],
+      "step_budget": 8,
+      "scripted_outputs": [
+        {"type": "tool", "name": "read_file", "arguments": {"path": "app.py"}},
+        {"type": "tool", "name": "write_file", "arguments": {"path": "app.py", "content": "ROUTES = {'/': {'status': 'running'}, '/health': {'status': 'ok'}}\n\n\ndef get(path):\n    return ROUTES[path], 200\n"}},
+        {"type": "tool", "name": "read_file", "arguments": {"path": "tests/test_app.py"}},
+        {"type": "tool", "name": "write_file", "arguments": {"path": "tests/test_app.py", "content": "from app import get\n\n\ndef test_index():\n    assert get('/')[0] == {'status': 'running'}\n\n\ndef test_health():\n    response, status = get('/health')\n    assert status == 200\n    assert response == {'status': 'ok'}\n"}},
+        {"type": "final", "text": "Added and tested the health endpoint."}
+      ],
+      "llm_handoff": {"summary": "## Goal\nAdd the health endpoint.\n\n## Next Steps\nRun the verifier.", "usage": {"input_tokens": 88, "output_tokens": 26}},
+      "verifier": ["python", "-c", "from app import get; assert get('/health') == ({'status': 'ok'}, 200)"]
+    },
+    {
+      "id": "config-migration",
+      "prompt": "Migrate every service configuration from schema version 1 to version 2.",
+      "fixture_repo": "fixtures/long_session_config_migration",
+      "allowed_tools": ["read_file", "write_file"],
+      "step_budget": 10,
+      "scripted_outputs": [
+        {"type": "tool", "name": "read_file", "arguments": {"path": "services/auth/config.yaml"}},
+        {"type": "tool", "name": "write_file", "arguments": {"path": "services/auth/config.yaml", "content": "schema_version: 2\nservice: auth\n"}},
+        {"type": "tool", "name": "write_file", "arguments": {"path": "services/api/config.yaml", "content": "schema_version: 2\nservice: api\n"}},
+        {"type": "tool", "name": "write_file", "arguments": {"path": "services/worker/config.yaml", "content": "schema_version: 2\nservice: worker\n"}},
+        {"type": "tool", "name": "write_file", "arguments": {"path": "services/gateway/config.yaml", "content": "schema_version: 2\nservice: gateway\n"}},
+        {"type": "final", "text": "Migrated all service configurations."}
+      ],
+      "llm_handoff": {"summary": "## Goal\nMigrate service schemas.\n\n## Next Steps\nRun the verifier.", "usage": {"input_tokens": 86, "output_tokens": 25}},
+      "verifier": ["python", "-c", "from pathlib import Path; assert all('schema_version: 2' in p.read_text() for p in Path('services').glob('*/config.yaml'))"]
+    },
+    {
+      "id": "dependency-upgrade",
+      "prompt": "Upgrade requests to 2.31 and remove the unsafe request defaults from all call sites.",
+      "fixture_repo": "fixtures/long_session_dependency_upgrade",
+      "allowed_tools": ["read_file", "write_file"],
+      "step_budget": 10,
+      "scripted_outputs": [
+        {"type": "tool", "name": "read_file", "arguments": {"path": "requirements.txt"}},
+        {"type": "tool", "name": "write_file", "arguments": {"path": "requirements.txt", "content": "requests==2.31\n"}},
+        {"type": "tool", "name": "write_file", "arguments": {"path": "src/client.py", "content": "def build_session(session):\n    session.trust_env = False\n    return session\n"}},
+        {"type": "tool", "name": "write_file", "arguments": {"path": "src/api.py", "content": "import requests\n\n\ndef fetch(url):\n    return requests.get(url, verify=True, timeout=30)\n"}},
+        {"type": "tool", "name": "write_file", "arguments": {"path": "src/fetcher.py", "content": "import requests\n\n\ndef fetch(url):\n    return requests.get(url, timeout=30)\n"}},
+        {"type": "final", "text": "Upgraded the dependency and hardened the call sites."}
+      ],
+      "llm_handoff": {"summary": "## Goal\nUpgrade requests and fix defaults.\n\n## Next Steps\nRun the verifier.", "usage": {"input_tokens": 92, "output_tokens": 27}},
+      "verifier": ["python", "-c", "from pathlib import Path; import ast; assert Path('requirements.txt').read_text().strip() == 'requests==2.31'; [ast.parse(p.read_text()) for p in Path('src').glob('*.py')]" ]
+    }
+  ]
+}

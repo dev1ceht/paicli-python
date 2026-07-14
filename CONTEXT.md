@@ -76,6 +76,18 @@ _Avoid_: transcript, chat log
 A paired experiment that compares PaiCLI context-reduction variants for task quality and context consumption.
 _Avoid_: context test, compression test
 
+**Scripted context-cost evaluation**:
+A context-management evaluation in which a scripted model replays fixed tool calls while PaiCLI executes them in an isolated fixture copy. Its token measurements are estimated proxies, not provider billing telemetry.
+_Avoid_: pure event replay, real-cost evaluation
+
+**Context-reduction variant**:
+One controlled context-handling policy used for every run of the same benchmark task: full history, deterministic compaction, or LLM-handoff compaction.
+_Avoid_: experiment mode, model variant
+
+**Synthetic pressure history**:
+Benchmark-only conversation history added before a scripted task to cross the context-pressure threshold. It is controlled test input, not evidence that a production task has the same history.
+_Avoid_: real conversation history, task transcript
+
 **Quality gate**:
 The required threshold that a context-reduction variant must meet on task verification before its cost result is considered acceptable.
 _Avoid_: performance score, token target
