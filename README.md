@@ -137,6 +137,32 @@ PAICLI_API_KEY=your_key_here
 - `QWEN_API_KEY`
 - `DASHSCOPE_API_KEY`
 
+模型调用和只读幂等工具默认对临时错误最多重试 3 次。可以在用户级或项目级
+`config.json` 中覆盖默认策略，并分别调整模型与工具：
+
+```json
+{
+  "retry": {
+    "enabled": true,
+    "default": {
+      "max_retries": 3,
+      "base_delay": 1.0,
+      "max_delay": 8.0,
+      "max_retry_after": 30.0
+    },
+    "llm": {},
+    "tools": {}
+  },
+  "plan": {
+    "replan_progress_threshold": 0.5,
+    "max_replans": 1
+  }
+}
+```
+
+计划进度只计算成功完成的节点。节点失败后不再调度新节点；成功进度低于阈值时，
+系统最多生成一份剩余工作计划，并再次进入用户审阅。
+
 通过命令行临时覆盖 provider 和 model：
 
 ```bash

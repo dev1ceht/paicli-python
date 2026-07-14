@@ -10,9 +10,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal
 
+from paicli.cancellation import TaskCanceled
 from paicli.llm.base import LlmClient
 from paicli.types import Message
-
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -32,6 +32,7 @@ class TaskStatus(str, Enum):
     RUNNING = "RUNNING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    BLOCKED = "BLOCKED"
     SKIPPED = "SKIPPED"
 
 
@@ -52,6 +53,7 @@ _STATUS_ICONS = {
     TaskStatus.RUNNING: "▶️",
     TaskStatus.COMPLETED: "✅",
     TaskStatus.FAILED: "❌",
+    TaskStatus.BLOCKED: "⛔",
     TaskStatus.SKIPPED: "⏭️",
 }
 
@@ -70,6 +72,9 @@ class PlanTask:
     status: TaskStatus = TaskStatus.PENDING
     result: str | None = None
     error: str | None = None
+    blocked_by: list[str] = field(default_factory=list)
+    halt_reason: str | None = None
+    retry_history: list[dict[str, Any]] = field(default_factory=list)
     start_time: float | None = None
     end_time: float | None = None
 
@@ -91,6 +96,11 @@ class PlanTask:
 
     def mark_skipped(self) -> None:
         self.status = TaskStatus.SKIPPED
+
+    def mark_blocked(self, dependencies: list[str]) -> None:
+        self.status = TaskStatus.BLOCKED
+        self.blocked_by = list(dependencies)
+        self.error = f"blocked by failed dependencies: {', '.join(dependencies)}"
 
     @property
     def duration(self) -> float | None:
@@ -146,8 +156,7 @@ class ExecutionPlan:
             icon = _STATUS_ICONS.get(task.status, "")
             depends_on = ", ".join(task.depends_on) if task.depends_on else "-"
             lines.append(
-                f"{icon} {task.id} [{task.type.value}] deps={depends_on}: "
-                f"{task.description}"
+                f"{icon} {task.id} [{task.type.value}] deps={depends_on}: {task.description}"
             )
         return "\n".join(lines)
 
@@ -193,10 +202,7 @@ class ExecutionPlan:
     def progress_ratio(self) -> float:
         if not self.tasks:
             return 0.0
-        done = sum(
-            1 for task in self.tasks
-            if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.SKIPPED)
-        )
+        done = sum(1 for task in self.tasks if task.status == TaskStatus.COMPLETED)
         return done / len(self.tasks)
 
     @property
@@ -288,10 +294,8 @@ class PlanExecutor:
             yield {"type": "plan_failed", "error": "plan contains a dependency cycle"}
             return
 
-        task_map = {task.id: task for task in tasks}
         completed: dict[str, str] = {}
         failed: dict[str, str] = {}
-        skipped: set[str] = set()
 
         plan.status = PlanStatus.RUNNING
         yield {
@@ -307,12 +311,7 @@ class PlanExecutor:
             ready = [
                 task
                 for task in remaining
-                if all(
-                    dependency in completed
-                    or dependency in failed
-                    or dependency in skipped
-                    for dependency in task.depends_on
-                )
+                if all(dependency in completed for dependency in task.depends_on)
             ]
             if not ready:
                 unresolved = ", ".join(task.id for task in remaining)
@@ -323,22 +322,14 @@ class PlanExecutor:
                 }
                 return
 
+            # A batch is the work that actually starts together. Do not queue every
+            # ready node behind a semaphore because queued coroutines could start
+            # after an earlier node in the same logical batch has already failed.
+            ready = ready[: self._max_parallel]
+
             if len(ready) == 1:
                 task = ready[0]
                 remaining.remove(task)
-                failed_deps = [
-                    d for d in task.depends_on if d in failed or d in skipped
-                ]
-                if failed_deps:
-                    task.mark_skipped()
-                    skipped.add(task.id)
-                    yield {
-                        "type": "task_skipped",
-                        "task_id": task.id,
-                        "dependencies": failed_deps,
-                    }
-                    continue
-
                 yield {
                     "type": "task_started",
                     "task_id": task.id,
@@ -347,8 +338,16 @@ class PlanExecutor:
                 task.mark_started()
                 try:
                     result = await _call_task_runner(
-                        run_task, task, completed, event_sink=event_sink,
+                        run_task,
+                        task,
+                        completed,
+                        event_sink=_record_task_events(task, event_sink),
                     )
+                except TaskCanceled:
+                    task.mark_skipped()
+                    task.halt_reason = "user_canceled"
+                    plan.status = PlanStatus.CANCELLED
+                    raise
                 except Exception as exc:
                     task.mark_failed(str(exc))
                     failed[task.id] = str(exc)
@@ -357,7 +356,19 @@ class PlanExecutor:
                         "task_id": task.id,
                         "error": str(exc),
                     }
-                    continue
+                    blocked, pending, blocked_events = _halt_remaining_tasks(remaining, set(failed))
+                    for blocked_event in blocked_events:
+                        yield blocked_event
+                    plan.status = PlanStatus.FAILED
+                    yield {
+                        "type": "plan_failed",
+                        "results": completed,
+                        "failed": failed,
+                        "blocked": blocked,
+                        "pending": pending,
+                        "progress": plan.progress_ratio,
+                    }
+                    return
 
                 task.mark_completed(result)
                 completed[task.id] = result
@@ -371,19 +382,17 @@ class PlanExecutor:
                 # -- parallel batch ------------------------------------------
                 async def _run_one(t: PlanTask) -> tuple[PlanTask, str | None, str | None]:
                     async with semaphore:
-                        failed_deps = [
-                            d for d in t.depends_on if d in failed or d in skipped
-                        ]
-                        if failed_deps:
-                            t.mark_skipped()
-                            return (t, None, None)
-
                         t.mark_started()
                         try:
                             r = await _call_task_runner(
-                                run_task, t, completed, event_sink=event_sink,
+                                run_task,
+                                t,
+                                completed,
+                                event_sink=_record_task_events(t, event_sink),
                             )
                             return (t, r, None)
+                        except TaskCanceled:
+                            raise
                         except Exception as exc:
                             return (t, None, str(exc))
 
@@ -395,10 +404,20 @@ class PlanExecutor:
                         "task": _task_payload(task),
                     }
 
-                results = await asyncio.gather(*[_run_one(task) for task in ready])
+                try:
+                    results = await asyncio.gather(*[_run_one(task) for task in ready])
+                except TaskCanceled:
+                    for task in ready:
+                        if task.status == TaskStatus.RUNNING:
+                            task.mark_skipped()
+                            task.halt_reason = "user_canceled"
+                    plan.status = PlanStatus.CANCELLED
+                    raise
 
+                batch_failed = False
                 for task, result, error in results:
                     if error is not None:
+                        batch_failed = True
                         task.mark_failed(error)
                         failed[task.id] = error
                         yield {
@@ -415,21 +434,20 @@ class PlanExecutor:
                             "result": result,
                             "duration": task.duration,
                         }
-                    elif task.status == TaskStatus.SKIPPED:
-                        skipped.add(task.id)
-                        failed_deps = [
-                            d for d in task.depends_on if d in failed or d in skipped
-                        ]
-                        yield {
-                            "type": "task_skipped",
-                            "task_id": task.id,
-                            "dependencies": failed_deps,
-                        }
-
-        if failed or skipped:
-            plan.status = PlanStatus.FAILED
-            yield {"type": "plan_failed", "results": completed, "failed": failed}
-            return
+                if batch_failed:
+                    blocked, pending, blocked_events = _halt_remaining_tasks(remaining, set(failed))
+                    for blocked_event in blocked_events:
+                        yield blocked_event
+                    plan.status = PlanStatus.FAILED
+                    yield {
+                        "type": "plan_failed",
+                        "results": completed,
+                        "failed": failed,
+                        "blocked": blocked,
+                        "pending": pending,
+                        "progress": plan.progress_ratio,
+                    }
+                    return
 
         plan.status = PlanStatus.COMPLETED
         yield {"type": "plan_completed", "results": completed}
@@ -510,6 +528,8 @@ class JsonPlanner:
                 thinking += str(event.get("thinking") or event.get("text") or "")
             elif event.get("type") == "usage" and event_sink:
                 event_sink({"type": "usage", "usage": dict(event.get("usage") or {})})
+            elif event.get("type") in {"retry", "retry_exhausted"} and event_sink:
+                event_sink(dict(event))
             elif event.get("type") == "error":
                 raise event["error"]
 
@@ -523,18 +543,35 @@ class JsonPlanner:
         failure_reason: str,
         completed_tasks: dict[str, str],
         *,
+        failed_plan: ExecutionPlan | None = None,
         event_sink: EventSink | None = None,
     ) -> ExecutionPlan:
         completed_summary = "\n".join(
-            f"- {tid}: {result[:200]}" for tid, result in completed_tasks.items()
+            f"- {tid}: {result}" for tid, result in completed_tasks.items()
         )
+        state_summary = ""
+        if failed_plan is not None:
+            state_lines = []
+            for task in failed_plan.tasks:
+                detail = task.result or task.error or task.halt_reason or ""
+                blocked = f" blocked_by={','.join(task.blocked_by)}" if task.blocked_by else ""
+                state_lines.append(
+                    f"- {task.id} [{task.status.value}]{blocked}: {task.description}; {detail}"
+                )
+            state_summary = "\n原计划完整节点状态:\n" + "\n".join(state_lines)
         replan_goal = (
             f"原始目标: {original_goal}\n"
             f"失败原因: {failure_reason}\n"
             f"已完成任务:\n{completed_summary}\n"
-            f"请基于以上信息重新规划剩余任务。"
+            f"{state_summary}\n"
+            "请只重新规划尚未完成的工作。已成功完成的节点是不可重复执行的既成事实，"
+            "除非新计划明确说明必须补偿或回滚。失败节点可能留下部分副作用，执行前先检查"
+            "当前工作区。"
         )
-        return await self.create_plan(replan_goal, event_sink=event_sink)
+        replacement = await self.create_plan(replan_goal, event_sink=event_sink)
+        if failed_plan is not None:
+            _remove_completed_work(replacement, failed_plan)
+        return replacement
 
     @staticmethod
     def parse(raw: str, *, goal: str = "") -> ExecutionPlan:
@@ -553,9 +590,7 @@ class JsonPlanner:
             normalized_id = f"task_{index}" if not raw_task.get("id") else original_id
             id_mapping[original_id] = normalized_id
 
-            description = str(
-                raw_task.get("description") or raw_task.get("task") or ""
-            ).strip()
+            description = str(raw_task.get("description") or raw_task.get("task") or "").strip()
             if not description:
                 raise ValueError(f"plan task {normalized_id} needs a description")
 
@@ -565,23 +600,21 @@ class JsonPlanner:
             except ValueError:
                 task_type = TaskType.COMMAND
 
-            parsed.append({
-                "id": normalized_id,
-                "description": description,
-                "type": task_type,
-                "raw_deps": raw_task.get("depends_on")
-                or raw_task.get("dependencies")
-                or [],
-            })
+            parsed.append(
+                {
+                    "id": normalized_id,
+                    "description": description,
+                    "type": task_type,
+                    "raw_deps": raw_task.get("depends_on") or raw_task.get("dependencies") or [],
+                }
+            )
 
         tasks: list[PlanTask] = []
         for item in parsed:
             raw_deps = item["raw_deps"]
             if isinstance(raw_deps, str):
                 raw_deps = [raw_deps]
-            depends_on = [
-                id_mapping.get(str(d), str(d)) for d in raw_deps
-            ]
+            depends_on = [id_mapping.get(str(d), str(d)) for d in raw_deps]
             tasks.append(
                 PlanTask(
                     id=item["id"],
@@ -619,13 +652,32 @@ class PlanAndExecuteAgent:
 # Simple goal detection
 # ---------------------------------------------------------------------------
 
-_MULTI_STEP_CUES = frozenset([
-    "然后", "并且", "并", "再", "最后", "同时", "先", "之后", "接着", "以及",
-])
+_MULTI_STEP_CUES = frozenset(
+    [
+        "然后",
+        "并且",
+        "并",
+        "再",
+        "最后",
+        "同时",
+        "先",
+        "之后",
+        "接着",
+        "以及",
+    ]
+)
 
-_ACTION_WORDS = frozenset([
-    "列出", "查看", "读取", "显示", "执行", "运行", "搜索",
-])
+_ACTION_WORDS = frozenset(
+    [
+        "列出",
+        "查看",
+        "读取",
+        "显示",
+        "执行",
+        "运行",
+        "搜索",
+    ]
+)
 
 _FILE_READ_WORDS = frozenset(["读取", "查看", "显示", "列出", "搜索"])
 _COMMAND_WORDS = frozenset(["执行", "运行"])
@@ -674,7 +726,99 @@ def _task_payload(task: PlanTask) -> dict[str, Any]:
         "kind": task.kind,
         "type": task.type.value,
         "depends_on": list(task.depends_on),
+        "status": task.status.value,
+        "blocked_by": list(task.blocked_by),
+        "halt_reason": task.halt_reason,
+        "retry_history": list(task.retry_history),
     }
+
+
+def _halt_remaining_tasks(
+    remaining: list[PlanTask],
+    failed_ids: set[str],
+) -> tuple[dict[str, list[str]], list[str], list[dict[str, Any]]]:
+    unavailable = set(failed_ids)
+    blocked: dict[str, list[str]] = {}
+    changed = True
+    while changed:
+        changed = False
+        for task in remaining:
+            if task.id in blocked:
+                continue
+            dependencies = [
+                dependency for dependency in task.depends_on if dependency in unavailable
+            ]
+            if dependencies:
+                task.mark_blocked(dependencies)
+                blocked[task.id] = dependencies
+                unavailable.add(task.id)
+                changed = True
+
+    pending = []
+    events = []
+    for task in remaining:
+        if task.id in blocked:
+            events.append(
+                {
+                    "type": "task_blocked",
+                    "task_id": task.id,
+                    "dependencies": blocked[task.id],
+                }
+            )
+        else:
+            task.halt_reason = "plan_halted"
+            pending.append(task.id)
+    return blocked, pending, events
+
+
+def _record_task_events(
+    task: PlanTask,
+    event_sink: EventSink | None,
+) -> EventSink:
+    def handle(event: dict[str, Any]) -> None:
+        if event.get("type") in {"retry", "retry_exhausted"}:
+            task.retry_history.append(dict(event))
+        if event_sink:
+            event_sink(event)
+
+    return handle
+
+
+def _remove_completed_work(
+    replacement: ExecutionPlan,
+    failed_plan: ExecutionPlan,
+) -> None:
+    """Keep completed work immutable unless compensation is explicitly requested."""
+    completed = [task for task in failed_plan.tasks if task.status == TaskStatus.COMPLETED]
+    completed_ids = {task.id for task in completed}
+    completed_descriptions = {_normalize_task_text(task.description) for task in completed}
+    removed_ids = {
+        task.id
+        for task in replacement.tasks
+        if not _is_compensation_task(task)
+        and (
+            task.id in completed_ids
+            or _normalize_task_text(task.description) in completed_descriptions
+        )
+    }
+    if not removed_ids:
+        return
+    replacement.tasks = [task for task in replacement.tasks if task.id not in removed_ids]
+    satisfied = completed_ids | removed_ids
+    for task in replacement.tasks:
+        task.depends_on = [dep for dep in task.depends_on if dep not in satisfied]
+    _validate_plan(replacement)
+
+
+def _normalize_task_text(value: str) -> str:
+    return " ".join(value.casefold().split())
+
+
+def _is_compensation_task(task: PlanTask) -> bool:
+    normalized = _normalize_task_text(task.description)
+    return any(
+        marker in normalized for marker in ("compensat", "rollback", "roll back", "补偿", "回滚")
+    )
 
 
 async def _call_task_runner(
@@ -700,7 +844,7 @@ def _extract_json(raw: str) -> str:
     start = raw.find("{")
     end = raw.rfind("}")
     if start >= 0 and end >= start:
-        return raw[start: end + 1]
+        return raw[start : end + 1]
     return raw
 
 
@@ -724,11 +868,7 @@ def _dependency_batches(tasks: list[PlanTask]) -> list[list[str]]:
 
 
 def _final_task_ids(tasks: list[PlanTask]) -> list[str]:
-    dependencies = {
-        dependency
-        for task in tasks
-        for dependency in task.depends_on
-    }
+    dependencies = {dependency for task in tasks for dependency in task.depends_on}
     return [task.id for task in tasks if task.id not in dependencies]
 
 
@@ -743,9 +883,7 @@ def build_task_context(
         for dep_id in task.depends_on:
             dep = plan.get_task(dep_id)
             if dep:
-                parts.append(
-                    f"- {dep.id} / {dep.description} / 状态={dep.status.value}"
-                )
+                parts.append(f"- {dep.id} / {dep.description} / 状态={dep.status.value}")
                 if dep.result:
                     preview = dep.result[:4000]
                     parts.append(preview)

@@ -20,6 +20,26 @@ class PlainRenderer:
             marker = "error" if event.get("is_error") else "result"
             sys.stdout.write(f"[tool:{marker}] {event.get('name')}: {event.get('result')}\n")
             sys.stdout.flush()
+        elif self.print_events and event_type == "retry":
+            sys.stdout.write(
+                f"[retry] {event.get('scope')} attempt={event.get('attempt')} "
+                f"delay={event.get('delay')} error={event.get('error_kind')}\n"
+            )
+            sys.stdout.flush()
+        elif self.print_events and event_type == "retry_exhausted":
+            sys.stdout.write(
+                f"[retry-exhausted] {event.get('scope')} "
+                f"attempts={event.get('attempt')} error={event.get('error_kind')}\n"
+            )
+            sys.stdout.flush()
+        elif self.print_events and event_type == "plan_aggregate_result":
+            sys.stdout.write(
+                f"[plan-summary] status={event.get('status')} "
+                f"attempts={event.get('attempts')} "
+                f"completed={len(event.get('completed') or {})} "
+                f"failed={len(event.get('failed') or {})}\n"
+            )
+            sys.stdout.flush()
 
     def newline(self) -> None:
         sys.stdout.write("\n")

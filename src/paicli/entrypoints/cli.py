@@ -190,7 +190,12 @@ async def _run_prompt(prompt: str, cwd: str, config) -> None:
         for name, error in manager.last_errors.items():
             typer.echo(f"MCP server {name} failed to load: {error}", err=True)
     engine = QueryEngine(
-        llm_client=create_llm_client(config.llm),
+        llm_client=create_llm_client(
+            config.llm,
+            retry_policy=config.retry.resolve("llm"),
+            retry_audit_path=config.policy.audit_log_path,
+            retry_cwd=cwd,
+        ),
         tool_registry=registry,
         config=config,
         cwd=cwd,

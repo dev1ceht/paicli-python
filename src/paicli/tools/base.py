@@ -25,6 +25,9 @@ class ToolResult:
     is_error: bool = False
     display_summary: str | None = None
     tool_use_id: str | None = None
+    error_kind: str | None = None
+    retryable: bool = False
+    retry_after: float | None = None
 
 
 @dataclass(slots=True)
@@ -37,6 +40,7 @@ class ToolContext:
     session_allowed_tools: set[str] = field(default_factory=set)
     llm_client: LlmClient | None = None
     cancellation_check: CancellationCheck | None = None
+    event_sink: Callable[[dict[str, Any]], None] | None = None
 
     def raise_if_cancelled(self) -> None:
         raise_if_cancelled(self.cancellation_check)
@@ -49,6 +53,7 @@ class Tool:
     parameters: dict[str, Any]
     handler: Callable[[dict[str, Any], ToolContext], Awaitable[ToolResult]]
     is_read_only: bool = True
+    is_idempotent: bool = True
     is_concurrency_safe: bool = True
     danger_level: DangerLevel = "safe"
     requires_approval: bool = False

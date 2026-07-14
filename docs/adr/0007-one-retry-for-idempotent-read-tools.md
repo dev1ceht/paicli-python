@@ -1,3 +1,3 @@
-# One retry for idempotent read tools
+# Bounded retries for model endpoints and idempotent read tools
 
-PaiCLI will not automatically retry tools with side effects, commands, or approval denials. It may retry a marked read-only and idempotent tool once for a transient failure, while returning all other failures to the model for a deliberate next action.
+PaiCLI will retry only explicitly classified transient failures: connection failures, timeouts, HTTP 408/429/500/502/503/504, and provider overload responses. The default policy permits three retries with exponential backoff, full jitter, a bounded `Retry-After`, and a shared provider/model cooldown. A streamed model call is retryable only before visible output. Tools must be both read-only and idempotent, and structured tool errors must explicitly set `retryable`; tools with side effects, commands, approval denials, and deterministic failures are never retried. Exhausted tool failures return to the Agent for a deliberate next action, and every retry emits a redacted event and audit record.
