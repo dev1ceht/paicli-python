@@ -41,6 +41,7 @@ from paicli.runtime import DurableTaskManager
 from paicli.skill import SkillRegistry
 from paicli.snapshot import SnapshotService
 from paicli.tools import ToolRegistry
+from paicli.types import Message
 
 SLASH_COMMANDS = [
     "/help",
@@ -206,7 +207,7 @@ async def _run_plan_agent(
 
         # Use streaming agent.run() to forward events to renderer
         text = ""
-        async for event in agent.run(prompt):
+        async for event in agent.run(prompt, commit_history=False):
             event_type = event.get("type")
             if event_type == "text_delta":
                 text += str(event.get("text") or "")
@@ -336,9 +337,39 @@ async def _run_plan_agent(
                 replan_plan.status = PlanStatus.CANCELLED
                 renderer.handle({"type": "plan_cancelled"})
 
+        if plan and plan.status in {PlanStatus.COMPLETED, PlanStatus.FAILED}:
+            _record_plan_history(agent, original_goal, plan)
         break
 
     renderer.newline()
+
+
+def _record_plan_history(agent: Agent, goal: str, plan: ExecutionPlan) -> None:
+    """Append one deterministic plan summary without retaining task ReAct traces."""
+    history = getattr(agent, "history", None)
+    if not isinstance(history, list):
+        return
+
+    lines = [
+        "Plan execution summary:",
+        f"Goal: {goal}",
+        f"Status: {plan.status.value}",
+    ]
+    for task in plan.tasks:
+        lines.append(f"- {task.id} [{task.status.value}]: {task.description}")
+        detail = task.result if task.status == TaskStatus.COMPLETED else task.error
+        if detail:
+            preview = detail.strip()
+            if len(preview) > 1_000:
+                preview = f"{preview[:1_000]}... [truncated]"
+            lines.append(f"  Result: {preview}")
+
+    history.extend(
+        [
+            Message(role="user", content=goal),
+            Message(role="assistant", content="\n".join(lines)),
+        ]
+    )
 
 
 async def _review_plan(

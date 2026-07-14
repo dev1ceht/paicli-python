@@ -296,6 +296,30 @@ def test_agent_compacts_actual_messages_and_writes_back_history(tmp_path, monkey
     assert old_secret not in written_history
 
 
+def test_agent_run_can_skip_history_commit(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config = load_config(project_root=tmp_path)
+    client = FakeClient()
+    client.use_tool = False
+    agent = Agent(
+        llm_client=client,
+        tool_registry=ToolRegistry(),
+        system_prompt="system prompt",
+        cwd=str(tmp_path),
+        config=config,
+    )
+    original_history = [Message(role="user", content="keep this context")]
+    agent.history = list(original_history)
+
+    async def run() -> None:
+        events = [event async for event in agent.run("plan task", commit_history=False)]
+        assert events[-1]["type"] == "done"
+
+    asyncio.run(run())
+
+    assert agent.history == original_history
+
+
 def test_agent_reconfigure_llm_rebuilds_context_manager_and_preserves_history(
     tmp_path, monkeypatch
 ):

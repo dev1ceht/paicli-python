@@ -250,6 +250,23 @@ def test_run_plan_agent_expand_then_execute():
     assert agent.run_prompts
 
 
+def test_run_plan_agent_keeps_task_history_isolated_and_records_summary():
+    agent = FakeAgent(['{"tasks": [{"id": "inspect", "description": "Inspect files"}]}'])
+    renderer = RichRenderer(console=Console(file=StringIO(), color_system=None, width=120))
+
+    async def review(_plan: ExecutionPlan, _expanded: bool) -> PlanReviewDecision:
+        return PlanReviewDecision.execute()
+
+    asyncio.run(_run_plan_agent(agent, renderer, "ship it", review_input=review))
+
+    assert agent.run_commit_history == [False]
+    assert [message.role for message in agent.history] == ["user", "assistant"]
+    assert agent.history[0].content == "ship it"
+    assert "Plan execution summary:" in agent.history[1].content
+    assert "inspect [COMPLETED]: Inspect files" in agent.history[1].content
+    assert "Result: ok" in agent.history[1].content
+
+
 def test_run_plan_agent_updates_renderer_usage_for_planning_and_tasks():
     class UsageLlm:
         provider_name = "fake"
@@ -270,7 +287,8 @@ def test_run_plan_agent_updates_renderer_usage_for_planning_and_tasks():
         llm_client = UsageLlm()
         cwd = "/tmp/fake"
 
-        async def run(self, _prompt):
+        async def run(self, _prompt, *, commit_history=True):
+            _ = commit_history
             yield {
                 "type": "usage",
                 "usage": {"input_tokens": 13, "output_tokens": 17, "cached_tokens": 3},
@@ -703,11 +721,14 @@ class FakeAgent:
     def __init__(self, plan_json: list[str]):
         self.llm_client = FakeLlm(plan_json)
         self.run_prompts: list[str] = []
+        self.run_commit_history: list[bool] = []
+        self.history = []
         self.cwd = "/tmp/fake"
 
-    async def run(self, prompt: str):
+    async def run(self, prompt: str, *, commit_history: bool = True):
         """Streaming agent run for plan tasks."""
         self.run_prompts.append(prompt)
+        self.run_commit_history.append(commit_history)
         yield {"type": "text_delta", "text": "ok"}
         yield {"type": "done", "total_tokens": 0, "total_turns": 1, "messages": []}
 

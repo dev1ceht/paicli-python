@@ -53,6 +53,7 @@ class Agent:
         self,
         message: str,
         *,
+        commit_history: bool = True,
         execution_state: dict[str, Any] | None = None,
         checkpoint_callback=None,
     ) -> AsyncIterator[dict[str, Any]]:
@@ -79,7 +80,7 @@ class Agent:
                 execution_state=execution_state,
                 checkpoint_callback=checkpoint_callback,
             ):
-                if event.get("type") == "done":
+                if event.get("type") == "done" and commit_history:
                     self.history = list(event.get("messages") or [])
                 yield event
         except TaskCanceled:
