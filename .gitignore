@@ -10,3 +10,5 @@ dist/
 build/
 .paicli/
 .worktrees/
+.superpowers/
+.zcode/
