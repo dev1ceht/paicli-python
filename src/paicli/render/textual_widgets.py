@@ -634,7 +634,7 @@ class InputBar(Horizontal):
         yield Label("> ")
         yield CommandInput(
             history=self.prompt_history,
-            placeholder="Type your message or /command",
+            placeholder="输入消息，Enter 发送，Shift+Enter 换行",
             compact=True,
         )
 

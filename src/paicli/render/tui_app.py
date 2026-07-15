@@ -7,6 +7,7 @@ provides interactive, mouse-driven collapsible tool results.
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -69,7 +70,12 @@ class PaiCliApp(App):
         handle_slash: Any = None,
         approval_callback: Any = None,
     ) -> None:
-        super().__init__()
+        driver_class = None
+        if sys.platform == "win32":
+            from paicli.render.windows_driver import PaiWindowsDriver
+
+            driver_class = PaiWindowsDriver
+        super().__init__(driver_class=driver_class)
         self.agent = agent
         self.config = config
         self.cwd = cwd

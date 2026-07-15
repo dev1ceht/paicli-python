@@ -76,6 +76,10 @@ _Avoid_: transcript, chat log
 A paired experiment that compares PaiCLI context-reduction variants for task quality and context consumption.
 _Avoid_: context test, compression test
 
+**Context-management effectiveness**:
+The demonstrated result that, on live long-session coding tasks containing task-relevant prior information, a context-reduction variant lowers provider-reported actual input-token usage relative to full history without reducing task correctness.
+_Avoid_: compression works, token savings alone, scripted cost win
+
 **Scripted context-cost evaluation**:
 A context-management evaluation in which a scripted model replays fixed tool calls while PaiCLI executes them in an isolated fixture copy. Its token measurements are estimated proxies, not provider billing telemetry.
 _Avoid_: pure event replay, real-cost evaluation
