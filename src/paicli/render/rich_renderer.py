@@ -135,13 +135,11 @@ class RichRenderer:
         }
         reading = self._context_usage.current
         if reading is not None:
+            reading_state = str(reading.get("state") or "")
             context_window = reading.get("context_window")
             used_tokens = int(reading.get("used_tokens") or 0)
             status.update(
                 {
-                    "input_tokens": int(reading.get("input_tokens") or 0),
-                    "output_tokens": int(reading.get("output_tokens") or 0),
-                    "cached_tokens": int(reading.get("cached_tokens") or 0),
                     "context_used_tokens": used_tokens,
                     "context_window": context_window,
                     "context_ratio": (
@@ -149,9 +147,20 @@ class RichRenderer:
                     ),
                     "context_estimated": bool(reading.get("estimated")),
                     "context_active_count": self._context_usage.active_count,
-                    "has_usage": True,
                 }
             )
+            if reading_state != "retained":
+                status.update(
+                    {
+                        "input_tokens": int(reading.get("input_tokens") or 0),
+                        "output_tokens": int(reading.get("output_tokens") or 0),
+                        "cached_tokens": int(reading.get("cached_tokens") or 0),
+                        "has_usage": True,
+                        "usage_estimated": bool(reading.get("estimated")),
+                    }
+                )
+            elif status["has_usage"]:
+                status["usage_label"] = "last"
         return status
 
     def banner(

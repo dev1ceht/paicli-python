@@ -1015,10 +1015,14 @@ def _bottom_toolbar(
 
     stats = stats or {}
     has_usage = bool(stats.get("has_usage"))
-    context_ratio = float(stats.get("context_ratio") or 0)
-    context_text = _format_toolbar_percent(context_ratio) if has_usage else "0%"
-    context_window = int(stats.get("context_window") or 0)
     has_context_telemetry = "context_used_tokens" in stats
+    context_ratio = float(stats.get("context_ratio") or 0)
+    context_text = (
+        _format_toolbar_percent(context_ratio)
+        if has_usage or has_context_telemetry
+        else "0%"
+    )
+    context_window = int(stats.get("context_window") or 0)
     used_tokens = int(
         stats.get("context_used_tokens")
         if has_context_telemetry
@@ -1074,12 +1078,19 @@ def _bottom_toolbar(
         in_tok = int(stats.get("input_tokens") or 0)
         out_tok = int(stats.get("output_tokens") or 0)
         cache_tok = int(stats.get("cached_tokens") or 0)
+        usage_marker = "~" if stats.get("usage_estimated") else ""
         segments.append(("class:toolbar.gap", "  "))
+        if stats.get("usage_label") == "last":
+            segments.append(("class:toolbar.token.label", "last "))
         segments.append(("class:toolbar.token.label", "in "))
-        segments.append(("class:toolbar.token.value", format_tokens(in_tok)))
+        segments.append(
+            ("class:toolbar.token.value", f"{usage_marker}{format_tokens(in_tok)}")
+        )
         segments.append(("class:toolbar.gap", " "))
         segments.append(("class:toolbar.token.label", "out "))
-        segments.append(("class:toolbar.token.value", format_tokens(out_tok)))
+        segments.append(
+            ("class:toolbar.token.value", f"{usage_marker}{format_tokens(out_tok)}")
+        )
         if cache_tok:
             segments.append(("class:toolbar.gap", " "))
             segments.append(("class:toolbar.token.label", "cache "))
