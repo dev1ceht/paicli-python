@@ -24,6 +24,9 @@ MODEL_CONTEXT_WINDOWS = {
     "deepseek-chat": 1_000_000,
     "deepseek-reasoner": 1_000_000,
     "deepseek-coder": 128_000,
+    "qwen3.7-plus": 1_000_000,
+    "qwen3.7-max": 1_000_000,
+    "qwen3.6-flash": 1_000_000,
 }
 UNKNOWN_MODEL_SAFETY_WINDOW = 128_000
 
