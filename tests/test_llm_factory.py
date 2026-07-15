@@ -27,6 +27,14 @@ def test_known_model_uses_its_reported_context_window():
     assert client.reported_context_window == 1_000_000
 
 
+def test_current_qwen_models_use_their_official_one_million_token_window():
+    for model in ("qwen3.7-plus", "qwen3.7-max", "qwen3.6-flash"):
+        client = create_llm_client(LlmConfig(provider="qwen", model=model))
+
+        assert client.max_context_window == 1_000_000
+        assert client.reported_context_window == 1_000_000
+
+
 def test_unknown_model_uses_an_unreported_128k_safety_window():
     client = create_llm_client(LlmConfig(provider="openai", model="custom-model"))
 
