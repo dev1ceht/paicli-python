@@ -7,16 +7,17 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from prompt_toolkit import PromptSession
 from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
 from rich.prompt import Prompt
 from rich.table import Table
 
-from paicli import __version__
 from paicli.agent import Agent
 from paicli.bootstrap import build_tool_registry
 from paicli.browser import BrowserSession
 from paicli.config import PaiCliConfig, config_to_public_dict
+from paicli.context.telemetry import rounded_context_percent
 from paicli.llm import create_llm_client
 from paicli.mcp import McpClientManager
 from paicli.memory import MemoryManager
@@ -29,7 +30,6 @@ from paicli.plan import (
     PlanTask,
     TaskStatus,
     build_task_context,
-    build_task_system_prompt,
     parse_plan_review_input,
 )
 from paicli.policy import AuditLog
@@ -47,6 +47,7 @@ SLASH_COMMANDS = [
     "/help",
     "/exit",
     "/clear",
+    "/reset",
     "/context",
     "/memory",
     "/save",
@@ -72,7 +73,8 @@ HELP_LINES = [
     "可用命令：",
     "/help - 查看命令帮助",
     "/exit - 退出 PaiCLI",
-    "/clear - 清空当前会话历史",
+    "/clear - 清空屏幕显示（保留会话上下文）",
+    "/reset - 清空会话历史和屏幕显示",
     "/context - 查看当前上下文状态",
     "/memory - 查看记忆系统状态",
     "/memory list - 查看长期记忆列表",
@@ -205,14 +207,17 @@ async def _run_plan_agent(
     ) -> str:
         """Execute a single plan task with streaming output."""
         context = build_task_context(plan, task)
-        task_system = build_task_system_prompt(task)
         prompt = (
             f"Execute plan task `{task.id}`.\n\nTask description:\n{task.description}\n\n{context}"
         )
 
         # Use streaming agent.run() to forward events to renderer
         text = ""
-        async for event in agent.run(prompt, commit_history=False):
+        async for event in agent.run(
+            prompt,
+            commit_history=False,
+            context_scope=f"task:{task.id}",
+        ):
             event_type = event.get("type")
             if event_type == "text_delta":
                 text += str(event.get("text") or "")
@@ -262,7 +267,14 @@ async def _run_plan_agent(
                             "usage": dict(event.get("usage") or {}),
                         }
                     )
-            elif event_type in {"retry", "retry_exhausted"}:
+            elif event_type in {
+                "retry",
+                "retry_exhausted",
+                "context_usage",
+                "context_request_finished",
+                "context_pending_clear",
+                "context_scope_clear",
+            }:
                 if event_sink:
                     retry_event = dict(event)
                     retry_event["task_id"] = task.id
@@ -369,6 +381,10 @@ async def _run_plan_agent(
         if executed_plans:
             renderer.handle(_aggregate_plan_attempts(executed_plans))
             _record_plan_history(agent, original_goal, executed_plans)
+            build_context_event = getattr(agent, "context_usage_event", None)
+            context_event = build_context_event() if callable(build_context_event) else None
+            if context_event:
+                renderer.handle(context_event)
         break
 
     renderer.newline()
@@ -526,6 +542,8 @@ async def _handle_slash(
     if command == "/help":
         console.print(help_text())
     elif command == "/clear":
+        console.clear()
+    elif command == "/reset":
         agent.clear_history()
         console.clear()
     elif command == "/context":
@@ -993,14 +1011,21 @@ def _bottom_toolbar(
     model: str,
     stats: dict[str, Any] | None = None,
 ) -> list[tuple[str, str]]:
-    from paicli.render.rich_renderer import format_tokens, format_elapsed, format_cost
+    from paicli.render.rich_renderer import format_cost, format_elapsed, format_tokens
 
     stats = stats or {}
     has_usage = bool(stats.get("has_usage"))
     context_ratio = float(stats.get("context_ratio") or 0)
     context_text = _format_toolbar_percent(context_ratio) if has_usage else "0%"
     context_window = int(stats.get("context_window") or 0)
-    used_tokens = int(stats.get("input_tokens") or 0) if has_usage else 0
+    has_context_telemetry = "context_used_tokens" in stats
+    used_tokens = int(
+        stats.get("context_used_tokens")
+        if has_context_telemetry
+        else stats.get("input_tokens") or 0
+    )
+    estimated_marker = "~" if stats.get("context_estimated") else ""
+    active_count = int(stats.get("context_active_count") or 0)
     pressure_text = _format_pressure_tier(stats.get("pressure_tier"))
 
     segments: list[tuple[str, str]] = [
@@ -1010,21 +1035,36 @@ def _bottom_toolbar(
         # Model name
         ("class:toolbar.model", model),
         ("class:toolbar.gap", "  "),
-        # Last request context usage
-        ("class:toolbar.ctx.label", "ctx "),
+        # Last outbound model request context usage
+        (
+            "class:toolbar.ctx.label",
+            "ctx max " if active_count > 1 else "ctx ",
+        ),
     ]
 
     if context_window > 0:
         segments.append(
             (
                 "class:toolbar.ctx.detail",
-                f"{format_tokens(used_tokens)}/{format_tokens(context_window)}",
+                f"{estimated_marker}{format_tokens(used_tokens)}/"
+                f"{format_tokens(context_window)}",
             )
         )
         segments.append(("class:toolbar.gap", " "))
         segments.append(("class:toolbar.ctx.value", f"({context_text})"))
     else:
-        segments.append(("class:toolbar.ctx.value", context_text))
+        if has_context_telemetry:
+            segments.append(
+                (
+                    "class:toolbar.ctx.value",
+                    f"{estimated_marker}{format_tokens(used_tokens)}/?",
+                )
+            )
+        else:
+            segments.append(("class:toolbar.ctx.value", context_text))
+
+    if active_count > 1:
+        segments.append(("class:toolbar.gap", f" · {active_count} active"))
 
     segments.append(("class:toolbar.gap", " · "))
     segments.append(("class:toolbar.pressure", f"pressure:{pressure_text}"))
@@ -1096,7 +1136,7 @@ def _format_toolbar_bar(value: float, *, width: int = 12) -> str:
 def _format_toolbar_percent(value: float) -> str:
     if value <= 0:
         return "0%"
-    return f"{value:.0%}"
+    return f"{rounded_context_percent(value)}%"
 
 
 def _format_pressure_tier(tier: object) -> str:

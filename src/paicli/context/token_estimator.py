@@ -73,8 +73,13 @@ class TokenEstimator:
         if estimated_tokens <= 0:
             return
         
-        # 记录历史
-        self._usage_history.append((estimated_tokens, actual_tokens))
+        # `estimated_tokens` is the value shown for this request, so it already
+        # includes the current factor. Store the underlying raw estimate to
+        # keep repeated observations of the same request from feeding the
+        # calibration factor back into itself.
+        factor = self._calibration_factor if self._calibration_factor > 0 else 1.0
+        raw_estimated = max(1, round(estimated_tokens / factor))
+        self._usage_history.append((raw_estimated, actual_tokens))
         if len(self._usage_history) > self._max_history:
             self._usage_history.pop(0)
         
@@ -89,6 +94,10 @@ class TokenEstimator:
     def get_calibration_factor(self) -> float:
         """获取当前校准系数"""
         return self._calibration_factor
+
+    @property
+    def sample_count(self) -> int:
+        return len(self._usage_history)
     
     def reset_calibration(self) -> None:
         """重置校准"""

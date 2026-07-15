@@ -6,7 +6,6 @@ provides interactive, mouse-driven collapsible tool results.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from pathlib import Path
@@ -16,8 +15,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Footer, TextArea
 
-from paicli.render.tui_dialogs import ApprovalScreen, PlanReviewScreen
-from paicli.render.tui_events import UiEvent
+from paicli.context.telemetry import ContextUsageState, rounded_context_percent
 from paicli.render.textual_widgets import (
     ChatLog,
     InputBar,
@@ -27,6 +25,8 @@ from paicli.render.textual_widgets import (
     format_elapsed,
     format_tokens,
 )
+from paicli.render.tui_dialogs import ApprovalScreen, PlanReviewScreen
+from paicli.render.tui_events import UiEvent
 
 
 def _format_pressure_tier(tier: object) -> str:
@@ -102,6 +102,7 @@ class PaiCliApp(App):
         self._worker = None  # Reference to current agent worker for cancellation
         self._task_buffers: dict[str, list[str]] = {}
         self._task_thinking_buffers: dict[str, list[str]] = {}
+        self._context_usage = ContextUsageState()
 
     def compose(self) -> ComposeResult:
         yield ChatLog(id="chat-log")
@@ -111,6 +112,11 @@ class PaiCliApp(App):
 
     def on_mount(self) -> None:
         self.title = f"PaiCLI — {self.cwd}"
+        if self.agent:
+            build_context_event = getattr(self.agent, "context_usage_event", None)
+            context_event = build_context_event() if callable(build_context_event) else None
+            if context_event:
+                self._context_usage.apply(context_event)
         self._update_status_bar()
         self._show_banner()
         self.call_after_refresh(self.query_one(TextArea).focus)
@@ -190,9 +196,17 @@ class PaiCliApp(App):
             chat_log.add_info(self._help_text())
             return
         if command == "/clear":
+            chat_log.clear_conversation()
+            return
+        if command == "/reset":
             if self.agent:
                 self.agent.clear_history()
+                build_context_event = getattr(self.agent, "context_usage_event", None)
+                context_event = build_context_event() if callable(build_context_event) else None
+                if context_event:
+                    self._context_usage.apply(context_event)
             chat_log.clear_conversation()
+            self._update_status_bar()
             return
         if command == "/context":
             self._show_context(chat_log)
@@ -352,6 +366,14 @@ class PaiCliApp(App):
                 chat_log.begin_stream("thinking").append(thinking)
         elif event_type == "usage":
             self._record_usage(payload.get("usage") or {})
+        elif event_type in {
+            "context_usage",
+            "context_request_finished",
+            "context_pending_clear",
+            "context_scope_clear",
+        }:
+            self._context_usage.apply(payload)
+            self._update_status_bar()
         elif event_type == "retry":
             chat_log = self.query_one("#chat-log", ChatLog)
             target = payload.get("tool_name") or payload.get("model") or ""
@@ -403,7 +425,7 @@ class PaiCliApp(App):
             self._phase = "plan"
             chat_log = self.query_one("#chat-log", ChatLog)
             chat_log.add_info(
-                f"[bold cyan]\U0001f4cb \u4f7f\u7528 Plan-and-Execute \u6a21\u5f0f[/bold cyan]"
+                "[bold cyan]\U0001f4cb \u4f7f\u7528 Plan-and-Execute \u6a21\u5f0f[/bold cyan]"
             )
             chat_log.add_info(f"  \u6b63\u5728\u89c4\u5212\u4efb\u52a1: {payload.get('goal')}")
         elif event_type == "plan_thinking":
@@ -699,25 +721,61 @@ class PaiCliApp(App):
         status_bar.model = self._model
         status_bar.phase = self._phase
 
-        has_usage = self._last_has_usage
-        context_ratio = self._last_context_ratio
-        used_tokens = self._last_input_tokens if has_usage else 0
-        context_percent = f"{context_ratio:.0%}" if has_usage else "0%"
-        if self._context_window > 0:
-            context_text = (
-                f"ctx {format_tokens(used_tokens)}/"
-                f"{format_tokens(self._context_window)} ({context_percent})"
-            )
+        reading = self._context_usage.current
+        if reading is not None:
+            used_tokens = int(reading.get("used_tokens") or 0)
+            context_window = reading.get("context_window")
+            estimate_marker = "~" if reading.get("estimated") else ""
+            prefix = "ctx max " if self._context_usage.active_count > 1 else "ctx "
+            if context_window:
+                ratio = used_tokens / int(context_window)
+                if ratio >= 0.95:
+                    status_bar.context_level = "red"
+                elif ratio >= 0.80:
+                    status_bar.context_level = "orange"
+                elif ratio >= 0.60:
+                    status_bar.context_level = "yellow"
+                else:
+                    status_bar.context_level = "normal"
+                context_text = (
+                    f"{prefix}{estimate_marker}{format_tokens(used_tokens)}/"
+                    f"{format_tokens(int(context_window))} "
+                    f"({rounded_context_percent(ratio)}%)"
+                )
+            else:
+                status_bar.context_level = "neutral"
+                context_text = f"{prefix}{estimate_marker}{format_tokens(used_tokens)}/?"
+            if self._context_usage.active_count > 1:
+                context_text += f" · {self._context_usage.active_count} active"
+            has_usage = True
         else:
-            context_text = f"ctx {context_percent}"
+            status_bar.context_level = "neutral"
+            has_usage = self._last_has_usage
+            context_ratio = self._last_context_ratio
+            used_tokens = self._last_input_tokens if has_usage else 0
+            context_percent = (
+                f"{rounded_context_percent(context_ratio)}%" if has_usage else "0%"
+            )
+            if self._context_window > 0:
+                context_text = (
+                    f"ctx {format_tokens(used_tokens)}/"
+                    f"{format_tokens(self._context_window)} ({context_percent})"
+                )
+            else:
+                context_text = f"ctx {context_percent}"
         status_bar.context_text = context_text
         status_bar.pressure_text = f"pressure:{_format_pressure_tier(self._pressure_tier)}"
 
         token_detail = ""
         if has_usage:
-            in_tok = self._last_input_tokens
-            out_tok = self._last_output_tokens
-            cached = self._last_cached_tokens
+            if reading is not None:
+                in_tok = int(reading.get("input_tokens") or 0)
+                out_tok = int(reading.get("output_tokens") or 0)
+                cached = int(reading.get("cached_tokens") or 0)
+            else:
+                in_tok = self._last_input_tokens
+                out_tok = self._last_output_tokens
+                cached = self._last_cached_tokens
             parts = [f"in:{format_tokens(in_tok)}", f"out:{format_tokens(out_tok)}"]
             if cached:
                 parts.append(f"cached:{format_tokens(cached)}")
@@ -756,6 +814,7 @@ class PaiCliApp(App):
             self._agent_running = False
             self._phase = "idle"
             self._worker = None
+            self._context_usage.apply({"type": "context_scope_clear", "scope": "agent"})
             chat_log = self.query_one("#chat-log", ChatLog)
             chat_log.add_info("[yellow]⚠️ Agent interrupted[/yellow]")
             input_area = self.query_one(TextArea)
@@ -815,19 +874,57 @@ class PaiCliApp(App):
     def _show_context(self, chat_log: ChatLog) -> None:
         if not self.agent:
             return
-        from paicli.memory import MemoryManager
+        client = self.agent.llm_client
+        reported_window = getattr(client, "reported_context_window", None)
+        safety_window = int(getattr(client, "max_context_window", 0) or 0)
 
-        memories = MemoryManager(self.config.memory.long_term_path, project_path=self.cwd).list(
-            limit=5
-        )
+        def format_reading(reading: dict[str, Any] | None) -> str:
+            if not reading:
+                return "none"
+            marker = "~" if reading.get("estimated") else ""
+            used = format_tokens(int(reading.get("used_tokens") or 0))
+            window = reading.get("context_window")
+            if not window:
+                return f"{marker}{used}/?"
+            ratio = int(reading.get("used_tokens") or 0) / int(window)
+            return (
+                f"{marker}{used}/{format_tokens(int(window))} "
+                f"({rounded_context_percent(ratio)}%)"
+            )
+
         lines = [
-            f"cwd: {self.cwd}",
-            f"model: {self.config.llm.model} ({self.config.llm.provider})",
-            f"context window: {self.agent.llm_client.max_context_window}",
-            f"render: {self.config.render_mode}",
-            f"memory: {len(memories)} recent entries",
-            f"tools: {len(self.registry.list_names()) if self.registry else 0}",
+            f"model: {client.model_name} ({client.provider_name})",
+            (
+                f"model limit: {format_tokens(int(reported_window))}"
+                if reported_window
+                else "model limit: unknown"
+            ),
+            f"safety budget: {format_tokens(safety_window)}",
+            f"retained: {format_reading(self._context_usage.retained)}",
+            f"active outbound model requests: {self._context_usage.active_count}",
         ]
+        for reading in sorted(
+            self._context_usage.active.values(),
+            key=lambda item: str(item.get("scope") or ""),
+        ):
+            lines.append(
+                f"  {reading.get('scope') or 'request'}: {format_reading(reading)}"
+            )
+        if self._context_usage.active:
+            lines.append(f"max: {format_reading(self._context_usage.current)}")
+
+        estimator = getattr(client, "context_estimator", None)
+        if estimator:
+            factor = float(estimator.get_calibration_factor())
+            samples = int(getattr(estimator, "sample_count", 0))
+            lines.append(f"calibration: {factor:.2f} ({samples} samples)")
+
+        manager = getattr(self.agent, "context_manager", None)
+        manager_status = manager.get_status() if manager else {}
+        compaction = manager_status.get("last_compaction") or {}
+        compacted_items = int(compaction.get("compacted_items") or 0)
+        compaction_kind = "llm" if compaction.get("used_llm") else "deterministic"
+        lines.append(f"compaction: {compacted_items} items ({compaction_kind})")
         chat_log.add_info("\n".join(lines))
 
     def _model_command(self, arg: str, chat_log: ChatLog) -> None:
@@ -860,6 +957,11 @@ class PaiCliApp(App):
         self._model = client.model_name
         self._provider = client.provider_name
         self._context_window = client.max_context_window
+        self._context_usage = ContextUsageState()
+        build_context_event = getattr(self.agent, "context_usage_event", None)
+        context_event = build_context_event() if callable(build_context_event) else None
+        if context_event:
+            self._context_usage.apply(context_event)
         self.query_one(StartupBanner).update_model(self._model, self._provider)
         self._update_status_bar()
         chat_log.add_info(f"Model switched to {self._model} ({self._provider}).")
@@ -978,6 +1080,7 @@ class PaiCliApp(App):
         if sub == "disable":
             if self.mcp_manager.disable(name):
                 removed = self.registry.unregister_prefix(f"mcp__{name}__") if self.registry else 0
+                self._refresh_context_baseline()
                 chat_log.add_info(f"Disabled {name}; removed {removed} tools.")
             else:
                 chat_log.add_info(f'MCP server "{name}" not found.')
@@ -993,7 +1096,7 @@ class PaiCliApp(App):
         if sub == "logs":
             chat_log.add_info(self.mcp_manager.logs(name))
             return
-        chat_log.add_info(f"[red]Usage:[/red] /mcp [restart|logs|disable|enable] <name>")
+        chat_log.add_info("[red]Usage:[/red] /mcp [restart|logs|disable|enable] <name>")
 
     async def _mcp_async_command(self, sub: str, name: str, chat_log: ChatLog) -> None:
         """Handle async MCP subcommands (enable / restart) inside the event loop."""
@@ -1007,6 +1110,7 @@ class PaiCliApp(App):
                 tools = await self.mcp_manager.load_server_tools(name)
                 if self.registry:
                     self.registry.register_all(tools)
+                self._refresh_context_baseline()
                 chat_log.add_info(f"Enabled {name}; loaded {len(tools)} tools.")
             elif sub == "restart":
                 if self.registry:
@@ -1015,9 +1119,21 @@ class PaiCliApp(App):
                 tools = await self.mcp_manager.load_server_tools(name)
                 if self.registry:
                     self.registry.register_all(tools)
+                self._refresh_context_baseline()
                 chat_log.add_info(f"Restarted {name}; loaded {len(tools) or count} tools.")
         except Exception as exc:
             chat_log.add_info(f"[red]MCP error:[/red] {exc}")
+
+    def _refresh_context_baseline(self) -> None:
+        if not self.agent:
+            return
+        build_event = getattr(self.agent, "refresh_context_usage_event", None)
+        if not callable(build_event):
+            build_event = getattr(self.agent, "context_usage_event", None)
+        context_event = build_event() if callable(build_event) else None
+        if context_event:
+            self._context_usage.apply(context_event)
+            self._update_status_bar()
 
     def _browser_command_info(self, arg: str, chat_log: ChatLog) -> None:
         from paicli.browser import BrowserSession
@@ -1146,8 +1262,6 @@ class PaiCliApp(App):
         can_replan: bool = False,
     ) -> Any:
         """Push a PlanReviewScreen and return the user's PlanReviewDecision."""
-        from paicli.plan.executor import PlanReviewDecision
-
         screen = PlanReviewScreen(plan, can_replan=can_replan)
         result = await self.push_screen_wait(screen)
         return result

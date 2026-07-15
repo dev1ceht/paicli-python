@@ -20,20 +20,31 @@ def test_dashscope_provider_alias_uses_same_base_url():
     assert client.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 
-def test_supported_providers_default_to_one_million_token_context_windows():
-    deepseek = create_llm_client(LlmConfig(provider="deepseek", model="unlisted-model"))
-    openai = create_llm_client(LlmConfig(provider="openai", model="gpt-model"))
-    qwen = create_llm_client(LlmConfig(provider="qwen", model="qwen-plus"))
+def test_known_model_uses_its_reported_context_window():
+    client = create_llm_client(LlmConfig(provider="deepseek", model="deepseek-v4-flash"))
 
-    assert deepseek.max_context_window == 1_000_000
-    assert openai.max_context_window == 1_000_000
-    assert qwen.max_context_window == 1_000_000
+    assert client.max_context_window == 1_000_000
+    assert client.reported_context_window == 1_000_000
 
 
-def test_unrecognized_provider_falls_back_to_128k_context_window():
-    client = create_llm_client(LlmConfig(provider="custom", model="custom-model"))
+def test_unknown_model_uses_an_unreported_128k_safety_window():
+    client = create_llm_client(LlmConfig(provider="openai", model="custom-model"))
 
     assert client.max_context_window == 128_000
+    assert client.reported_context_window is None
+
+
+def test_user_context_window_override_is_reported_and_used_for_safety():
+    client = create_llm_client(
+        LlmConfig(
+            provider="openai",
+            model="custom-model",
+            context_window=64_000,
+        )
+    )
+
+    assert client.max_context_window == 64_000
+    assert client.reported_context_window == 64_000
 
 
 def test_deepseek_replays_reasoning_content_but_other_providers_do_not():

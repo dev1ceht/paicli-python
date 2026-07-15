@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from paicli.config import PaiCliConfig
 from paicli.context import ContextManager
 from paicli.context.assembler import (
@@ -24,6 +26,7 @@ from paicli.context.pressure import (
     PressureTier,
     calculate_pressure,
 )
+from paicli.context.telemetry import ContextUsageState
 from paicli.context.token_estimator import TokenEstimator, estimate_tokens
 from paicli.context.tool_result import (
     compress_old_tool_results,
@@ -116,6 +119,68 @@ class TestTokenEstimator:
         new_estimated = estimator.estimate(text)
         # 由于校准系数是 2.0，新估算应该是原来的 2 倍
         assert new_estimated >= estimated * 1.9  # 允许一些舍入误差
+
+    def test_repeated_calibration_uses_each_requests_uncalibrated_estimate(self):
+        estimator = TokenEstimator()
+        text = "stable calibration request text" * 10
+        raw_estimate = estimator.estimate(text)
+        actual = raw_estimate * 2
+
+        for _ in range(3):
+            emitted_estimate = estimator.estimate(text)
+            estimator.calibrate(emitted_estimate, actual)
+
+        assert estimator.get_calibration_factor() == pytest.approx(2.0, rel=0.05)
+        assert estimator.sample_count == 3
+
+
+def test_context_usage_pending_is_isolated_and_replaced_per_scope():
+    state = ContextUsageState()
+    state.apply(
+        {
+            "type": "context_usage",
+            "state": "retained",
+            "scope": "agent",
+            "used_tokens": 10,
+        }
+    )
+    for scope, used in [("task:a", 20), ("task:b", 30)]:
+        state.apply(
+            {
+                "type": "context_usage",
+                "state": "pending",
+                "scope": scope,
+                "used_tokens": used,
+            }
+        )
+
+    state.apply(
+        {
+            "type": "context_usage",
+            "state": "active",
+            "request_id": "request-a",
+            "scope": "task:a",
+            "used_tokens": 25,
+        }
+    )
+    assert "task:a" not in state.pending
+    assert "task:b" in state.pending
+
+    state.apply({"type": "context_scope_clear", "scope": "task:a"})
+    assert state.active_count == 0
+    assert state.current["scope"] == "task:b"
+
+    state.apply(
+        {
+            "type": "context_usage",
+            "state": "active",
+            "request_id": "request-b",
+            "scope": "task:b",
+            "used_tokens": 35,
+        }
+    )
+    state.apply({"type": "context_request_finished", "request_id": "request-b"})
+    assert state.current["state"] == "retained"
 
 
 class TestBudget:

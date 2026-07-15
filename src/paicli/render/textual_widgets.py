@@ -558,6 +558,7 @@ class StatusBar(Static):
     model: reactive[str] = reactive("")
     phase: reactive[str] = reactive("idle")
     context_text: reactive[str] = reactive("ctx 0%")
+    context_level: reactive[str] = reactive("neutral")
     pressure_text: reactive[str] = reactive("pressure:—")
     token_detail: reactive[str] = reactive("")
     cost_text: reactive[str] = reactive("")
@@ -574,7 +575,14 @@ class StatusBar(Static):
         if self.model:
             parts.append(f"  [bold]{self.model}[/bold]")
         # Context
-        parts.append(f"  {self.context_text}")
+        context_color = {
+            "normal": "#a8ff60",
+            "yellow": "#facc15",
+            "orange": "#fb923c",
+            "red": "#ef4444",
+            "neutral": "#94a3b8",
+        }.get(self.context_level, "#94a3b8")
+        parts.append(f"  [{context_color}]{self.context_text}[/{context_color}]")
         # Compression pressure after context assembly
         parts.append(f"  [dim]{self.pressure_text}[/dim]")
         # Token detail

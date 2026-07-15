@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import os
 import time
 from typing import Any
 
@@ -14,24 +12,38 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from paicli.context.telemetry import ContextUsageState
+
 # ---------------------------------------------------------------------------
 # Import shared utilities from _common (single source of truth)
 # ---------------------------------------------------------------------------
-
 from paicli.render._common import (
     NO_COLOR as _NO_COLOR,
-    TOOL_LABELS as _TOOL_LABELS,
+)
+from paicli.render._common import (
     PI_LOGO as _PI_LOGO,
+)
+from paicli.render._common import (
+    TOOL_LABELS as _TOOL_LABELS,
+)
+from paicli.render._common import (
     diff_ops as _diff_ops,
+)
+from paicli.render._common import (
     estimate_cost,
     format_cost,
     format_elapsed,
-    format_payload as _format_payload,
     format_tokens,
+)
+from paicli.render._common import (
+    format_payload as _format_payload,
+)
+from paicli.render._common import (
     shorten_home as _shorten_home,
+)
+from paicli.render._common import (
     tool_label as _tool_label,
 )
-
 
 # ---------------------------------------------------------------------------
 # RichRenderer
@@ -76,6 +88,7 @@ class RichRenderer:
         # Per-task streaming buffers
         self._task_buffers: dict[str, list[str]] = {}
         self._task_thinking_buffers: dict[str, list[str]] = {}
+        self._context_usage = ContextUsageState()
 
     def set_context_window(self, context_window: int | None) -> None:
         self._context_window = context_window or self._context_window
@@ -105,7 +118,7 @@ class RichRenderer:
         elapsed = self._last_elapsed
         if self._run_start_time and self._phase in {"running", "plan"}:
             elapsed = time.monotonic() - self._run_start_time
-        return {
+        status = {
             "turns": self._last_turns,
             "input_tokens": self._last_input_tokens,
             "output_tokens": self._last_output_tokens,
@@ -120,6 +133,26 @@ class RichRenderer:
             "phase": self._phase,
             "provider": self._provider,
         }
+        reading = self._context_usage.current
+        if reading is not None:
+            context_window = reading.get("context_window")
+            used_tokens = int(reading.get("used_tokens") or 0)
+            status.update(
+                {
+                    "input_tokens": int(reading.get("input_tokens") or 0),
+                    "output_tokens": int(reading.get("output_tokens") or 0),
+                    "cached_tokens": int(reading.get("cached_tokens") or 0),
+                    "context_used_tokens": used_tokens,
+                    "context_window": context_window,
+                    "context_ratio": (
+                        used_tokens / int(context_window) if context_window else 0.0
+                    ),
+                    "context_estimated": bool(reading.get("estimated")),
+                    "context_active_count": self._context_usage.active_count,
+                    "has_usage": True,
+                }
+            )
+        return status
 
     def banner(
         self,
@@ -171,6 +204,13 @@ class RichRenderer:
             self._update_live_thinking()
         elif event_type == "usage":
             self._record_usage(event.get("usage") or {})
+        elif event_type in {
+            "context_usage",
+            "context_request_finished",
+            "context_pending_clear",
+            "context_scope_clear",
+        }:
+            self._context_usage.apply(event)
         elif event_type == "retry":
             scope = event.get("scope", "call")
             target = event.get("tool_name") or event.get("model") or ""
