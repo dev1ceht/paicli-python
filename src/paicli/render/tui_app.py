@@ -90,6 +90,8 @@ class PaiCliApp(App):
         self._last_context_ratio = 0.0
         self._last_has_usage = False
         self._pressure_tier: str | None = None
+        self._pressure_ratio: float | None = None
+        self._pressure_estimated = False
         self._run_start_time: float | None = None
         self._last_elapsed: float = 0.0
         self._last_cost: float = 0.0
@@ -393,6 +395,18 @@ class PaiCliApp(App):
             )
         elif event_type == "context_status":
             self._pressure_tier = payload.get("pressure_tier")
+            ratio = payload.get("pressure_ratio")
+            self._pressure_ratio = float(ratio) if ratio is not None else None
+            self._pressure_estimated = bool(payload.get("estimated"))
+            self._update_status_bar()
+        elif event_type == "context_reduced":
+            before = round(float(payload.get("before_ratio") or 0) * 100)
+            after = round(float(payload.get("after_ratio") or 0) * 100)
+            actions = ", ".join(
+                str(action).replace("_", " ") for action in payload.get("actions") or []
+            )
+            chat_log = self.query_one("#chat-log", ChatLog)
+            chat_log.add_info(f"Context reduced: {before}% → {after}% · {actions}")
         elif event_type == "turn_complete":
             self._flush_thinking()
             stop_reason = str(payload.get("stop_reason") or "end_turn")
@@ -764,7 +778,24 @@ class PaiCliApp(App):
             else:
                 context_text = f"ctx {context_percent}"
         status_bar.context_text = context_text
-        status_bar.pressure_text = f"pressure:{_format_pressure_tier(self._pressure_tier)}"
+        pressure_ratio = (
+            reading.get("pressure_ratio") if reading is not None else self._pressure_ratio
+        )
+        if pressure_ratio is None:
+            status_bar.pressure_text = "pressure —"
+        else:
+            pressure_marker = (
+                "~"
+                if (
+                    (reading is not None and reading.get("estimated"))
+                    or (reading is None and self._pressure_estimated)
+                )
+                else ""
+            )
+            status_bar.pressure_text = (
+                f"pressure {pressure_marker}"
+                f"{rounded_context_percent(float(pressure_ratio))}%"
+            )
 
         token_detail = ""
         reading_state = str(reading.get("state") or "") if reading is not None else ""

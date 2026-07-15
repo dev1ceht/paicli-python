@@ -25,22 +25,30 @@ from paicli.context.compaction import (
 from paicli.context.pressure import (
     PressureTier,
     calculate_pressure,
+    calculate_pressure_from_tokens,
 )
 from paicli.context.telemetry import ContextUsageState
 from paicli.context.token_estimator import TokenEstimator, estimate_tokens
 from paicli.context.tool_result import (
+    cleanup_session_tool_results,
+    cleanup_stale_tool_results,
     compress_old_tool_results,
     offload_large_tool_results,
 )
+from paicli.llm.openai_compatible import OpenAICompatibleClient
+from paicli.prompt import PromptSections
 from paicli.types import Message
 
 
-class SummaryLlm:
-    model_name = "summary-model"
-    provider_name = "fake"
-    max_context_window = 200
-
+class SummaryLlm(OpenAICompatibleClient):
     def __init__(self):
+        super().__init__(
+            provider_name="fake",
+            model="summary-model",
+            api_key="secret",
+            base_url="https://example.test/v1",
+            max_context_window=2_000,
+        )
         self.calls = 0
 
     async def chat(self, messages, tools, *, system_prompt):  # noqa: ARG002
@@ -240,7 +248,7 @@ class TestToolResultCompression:
         assert len(tool_results) == 3
 
         # 第一条应该被压缩
-        assert "工具结果已压缩" in tool_results[0].content
+        assert tool_results[0].content.startswith("[tool-result-compressed")
         assert tool_results[1].content == "result 2"
         assert tool_results[2].content == "result 3"
 
@@ -277,12 +285,90 @@ class TestToolResultCompression:
 
         # 大的应该被落盘
         large_msg = offloaded[0]
-        assert "大工具结果已落盘" in large_msg.content
+        assert large_msg.content.startswith("[tool-result-offloaded")
         assert storage_dir in large_msg.content
 
         # 小的应该保留
         small_msg = offloaded[1]
         assert small_msg.content == small_content
+
+    def test_old_result_compression_preserves_offloaded_recovery_path(self, tmp_path):
+        messages = [
+            Message(role="tool", content="x" * 1000, tool_call_id="large"),
+            *[
+                Message(role="tool", content=f"recent {index}", tool_call_id=f"recent-{index}")
+                for index in range(5)
+            ],
+        ]
+        offloaded = offload_large_tool_results(
+            messages,
+            max_total_bytes=100,
+            storage_dir=str(tmp_path),
+            session_id="session-a",
+        )
+        recovery_reference = offloaded[0].content
+
+        compressed = compress_old_tool_results(offloaded, keep_recent=5)
+
+        assert compressed[0].content == recovery_reference
+        assert "session-a" in recovery_reference
+
+    def test_session_cleanup_removes_only_its_tool_results(self, tmp_path):
+        for session_id in ("session-a", "session-b"):
+            offload_large_tool_results(
+                [Message(role="tool", content="x" * 1000, tool_call_id="large")],
+                max_total_bytes=100,
+                storage_dir=str(tmp_path),
+                session_id=session_id,
+            )
+
+        cleanup_session_tool_results(str(tmp_path), "session-a")
+
+        assert not (tmp_path / "session-a").exists()
+        assert (tmp_path / "session-b").exists()
+
+    def test_stale_cleanup_only_removes_marked_uuid_session_directories(self, tmp_path):
+        owned_id = "a" * 32
+        owned = tmp_path / owned_id
+        offload_large_tool_results(
+            [Message(role="tool", content="x" * 1000, tool_call_id="large")],
+            max_total_bytes=100,
+            storage_dir=str(tmp_path),
+            session_id=owned_id,
+        )
+        unrelated = tmp_path / ("b" * 32)
+        unrelated.mkdir()
+        (unrelated / "user-file.txt").write_text("keep", encoding="utf-8")
+        now = owned.stat().st_mtime + 8 * 24 * 60 * 60
+
+        cleanup_stale_tool_results(str(tmp_path), max_age_days=7, now=now)
+
+        assert not owned.exists()
+        assert unrelated.exists()
+
+
+def test_compaction_delta_preserves_assistant_tool_call_name_and_arguments():
+    messages = [
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[
+                {
+                    "id": "call-1",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path":"notes.txt"}',
+                    },
+                }
+            ],
+        )
+    ]
+
+    delta, protected = extract_delta_items(messages, protected_turns=0)
+
+    assert not protected
+    assert "read_file" in delta[0].content
+    assert "notes.txt" in delta[0].content
 
 
 class TestAssembler:
@@ -336,8 +422,287 @@ class TestAssembler:
 
 
 class TestContextManagerBuildTurnContext:
+    def test_reset_cleans_the_old_session_directory_and_rotates_session_id(self, tmp_path):
+        config = PaiCliConfig()
+        config.context.tool_result_storage_dir = str(tmp_path / "tool-results")
+        first = ContextManager(config=config, llm_client=SummaryLlm(), cwd=str(tmp_path))
+        second = ContextManager(config=config, llm_client=SummaryLlm(), cwd=str(tmp_path))
+        old_session_id = first.session_id
+        old_directory = tmp_path / "tool-results" / old_session_id
+        old_directory.mkdir(parents=True)
+        (old_directory / "result.txt").write_text("result", encoding="utf-8")
+
+        first.reset()
+
+        assert old_session_id != second.session_id
+        assert first.session_id != old_session_id
+        assert not old_directory.exists()
+
+    def test_tier3_compacts_even_with_fewer_than_six_old_messages(self, tmp_path):
+        config = PaiCliConfig()
+        config.context.min_budget_chars = 1_600
+        config.context.max_budget_chars = 1_600
+        config.context.output_reserve_tokens = 0
+        config.context.protected_turns = 1
+        llm = SummaryLlm()
+        manager = ContextManager(config=config, llm_client=llm, cwd=str(tmp_path))
+        old_marker = "old-history-marker"
+
+        result = asyncio.run(
+            manager.build_turn_context(
+                prompt_sections=PromptSections(prefix="core", suffix="suffix"),
+                messages=[
+                    Message(role="user", content=(old_marker + " ") * 40),
+                    Message(role="assistant", content=(old_marker + " ") * 40),
+                    Message(role="user", content="recent request " * 10),
+                    Message(role="assistant", content="recent response " * 10),
+                    Message(role="user", content="current request"),
+                ],
+                tools=[],
+            )
+        )
+
+        assert llm.calls == 1
+        assert result.compacted
+        assert "history_summary" in result.reductions
+        assert old_marker not in "\n".join(str(message.content) for message in result.messages)
+        assert "Summarized old context" in str(result.messages[0].content)
+
+    def test_tier3_rejects_a_semantic_summary_that_does_not_save_tokens(self, tmp_path):
+        class VerboseSummaryLlm(SummaryLlm):
+            async def chat(self, messages, tools, *, system_prompt):  # noqa: ARG002
+                self.calls += 1
+                yield {
+                    "type": "text_delta",
+                    "text": "## Goal\n" + ("verbose " * 2_000) + "\n## Next Steps\nContinue.",
+                }
+
+        config = PaiCliConfig()
+        config.context.min_budget_chars = 1_600
+        config.context.max_budget_chars = 1_600
+        config.context.output_reserve_tokens = 0
+        config.context.protected_turns = 1
+        llm = VerboseSummaryLlm()
+        manager = ContextManager(config=config, llm_client=llm, cwd=str(tmp_path))
+
+        result = asyncio.run(
+            manager.build_turn_context(
+                prompt_sections=PromptSections(prefix="core", suffix="suffix"),
+                messages=[
+                    Message(role="user", content="old request " * 80),
+                    Message(role="assistant", content="old response " * 80),
+                    Message(role="user", content="recent request"),
+                    Message(role="assistant", content="recent response"),
+                    Message(role="user", content="current request"),
+                ],
+                tools=[],
+            )
+        )
+
+        assert llm.calls == 1
+        assert result.compacted
+        assert manager._last_compaction is not None
+        assert not manager._last_compaction.used_llm
+        assert "verbose " * 50 not in str(result.messages[0].content)
+
+    def test_tier3_aggressive_fallback_keeps_semantic_summary_and_latest_turn(self, tmp_path):
+        config = PaiCliConfig()
+        config.context.min_budget_chars = 1_600
+        config.context.max_budget_chars = 1_600
+        config.context.output_reserve_tokens = 0
+        config.context.protected_turns = 2
+        llm = SummaryLlm()
+        manager = ContextManager(config=config, llm_client=llm, cwd=str(tmp_path))
+        second_latest = "second-latest-marker"
+        latest = "latest-marker"
+
+        result = asyncio.run(
+            manager.build_turn_context(
+                prompt_sections=PromptSections(prefix="core", suffix="suffix"),
+                messages=[
+                    Message(role="user", content="old request " * 80),
+                    Message(role="assistant", content="old response " * 80),
+                    Message(role="user", content=(second_latest + " ") * 100),
+                    Message(role="assistant", content="large response " * 100),
+                    Message(role="user", content=latest),
+                    Message(role="assistant", content="latest response"),
+                    Message(role="user", content="current request"),
+                ],
+                tools=[],
+            )
+        )
+
+        rendered = "\n".join(str(message.content) for message in result.messages)
+        assert "history_summary" in result.reductions
+        assert "history_aggressive" in result.reductions
+        assert "Summarized old context" in rendered
+        assert "Emergency delta" in rendered
+        assert latest in rendered
+        assert len(rendered) < 1_000
+
+    def test_physical_overflow_can_offload_a_recent_result_below_the_normal_threshold(
+        self,
+        tmp_path,
+    ):
+        config = PaiCliConfig()
+        config.context.min_budget_chars = 8_000
+        config.context.max_budget_chars = 8_000
+        config.context.output_reserve_tokens = 0
+        config.context.tool_result_max_total_bytes = 200 * 1024
+        config.context.tool_result_storage_dir = str(tmp_path / "tool-results")
+        client = OpenAICompatibleClient(
+            "test",
+            "model",
+            "key",
+            "https://example.test/v1",
+            max_context_window=1_000,
+        )
+        manager = ContextManager(config=config, llm_client=client, cwd=str(tmp_path))
+
+        result = asyncio.run(
+            manager.build_turn_context(
+                prompt_sections=PromptSections(prefix="core", suffix="suffix"),
+                messages=[
+                    Message(role="tool", content="x" * 5_000, tool_call_id="recent"),
+                    Message(role="user", content="continue"),
+                ],
+                tools=[],
+            )
+        )
+
+        assert result.reductions == ["tool_offload_overflow"]
+        assert result.prepared.estimated_input_tokens <= 1_000
+        assert result.messages[0].content.startswith("[tool-result-offloaded")
+
+    def test_tier1_offloads_one_large_tool_result_and_stops_after_exiting_tier(
+        self,
+        tmp_path,
+    ):
+        config = PaiCliConfig()
+        config.context.min_budget_chars = 8_000
+        config.context.max_budget_chars = 8_000
+        config.context.output_reserve_tokens = 0
+        config.context.tool_result_max_total_bytes = 100
+        config.context.tool_result_storage_dir = str(tmp_path / "tool-results")
+        client = OpenAICompatibleClient("test", "model", "key", "https://example.test/v1")
+        manager = ContextManager(config=config, llm_client=client, cwd=str(tmp_path))
+        sections = PromptSections(
+            prefix="core",
+            relevant_memory="## Memory\n\n- keep me",
+            skills="skill index",
+            suffix="suffix",
+        )
+
+        result = asyncio.run(
+            manager.build_turn_context(
+                prompt_sections=sections,
+                messages=[
+                    Message(role="tool", content="x" * 5_000, tool_call_id="large"),
+                    Message(role="user", content="continue"),
+                ],
+                tools=[],
+            )
+        )
+
+        assert result.pressure_before.tier == PressureTier.TIER1_SNIP
+        assert result.pressure_after.tier == PressureTier.TIER0_OBSERVE
+        assert result.reductions == ["tool_offload"]
+        assert result.messages[0].content.startswith("[tool-result-offloaded")
+        assert "- keep me" in result.system_prompt
+        assert "skill index" in result.system_prompt
+
+    def test_tier2_drops_lowest_relevant_memory_entry_before_skills(self, tmp_path):
+        config = PaiCliConfig()
+        config.context.min_budget_chars = 8_000
+        config.context.max_budget_chars = 8_000
+        config.context.output_reserve_tokens = 0
+        client = OpenAICompatibleClient("test", "model", "key", "https://example.test/v1")
+        manager = ContextManager(config=config, llm_client=client, cwd=str(tmp_path))
+        entries = [f"- {str(index) * 1_000}" for index in range(6)]
+        sections = PromptSections(
+            prefix="core",
+            relevant_memory="## Memory\n\n" + "\n".join(entries),
+            skills="skill index",
+            suffix="suffix",
+        )
+
+        result = asyncio.run(
+            manager.build_turn_context(
+                prompt_sections=sections,
+                messages=[Message(role="user", content="continue")],
+                tools=[],
+            )
+        )
+
+        assert result.pressure_before.tier == PressureTier.TIER2_PRUNE
+        assert result.pressure_after.pressure_ratio < config.context.tier2_threshold
+        assert result.reductions == ["relevant_memory"]
+        assert entries[-1] not in result.system_prompt
+        assert entries[-2] in result.system_prompt
+        assert "skill index" in result.system_prompt
+
+    def test_tier2_removes_the_whole_skill_index_when_memory_cannot_reduce(self, tmp_path):
+        config = PaiCliConfig()
+        config.context.min_budget_chars = 8_000
+        config.context.max_budget_chars = 8_000
+        config.context.output_reserve_tokens = 0
+        client = OpenAICompatibleClient("test", "model", "key", "https://example.test/v1")
+        manager = ContextManager(config=config, llm_client=client, cwd=str(tmp_path))
+
+        result = asyncio.run(
+            manager.build_turn_context(
+                prompt_sections=PromptSections(
+                    prefix="core",
+                    skills="s" * 6_000,
+                    suffix="suffix",
+                ),
+                messages=[Message(role="user", content="continue")],
+                tools=[],
+            )
+        )
+
+        assert result.pressure_before.tier == PressureTier.TIER2_PRUNE
+        assert result.pressure_after.pressure_ratio < config.context.tier2_threshold
+        assert result.reductions == ["skills"]
+        assert "s" * 100 not in result.system_prompt
+
+    def test_build_turn_context_prepares_the_exact_final_request(self, tmp_path):
+        config = PaiCliConfig()
+        client = OpenAICompatibleClient(
+            provider_name="test",
+            model="test-model",
+            api_key="secret",
+            base_url="https://example.test/v1",
+        )
+        manager = ContextManager(config=config, llm_client=client, cwd=str(tmp_path))
+        sections = PromptSections(
+            prefix="core",
+            relevant_memory="## Memory\n\n- relevant",
+            skills="Available skills:\n- inspect: inspect files",
+            suffix="suffix",
+        )
+        tools = [{"type": "function", "function": {"name": "inspect"}}]
+        messages = [Message(role="user", content="current request")]
+
+        result = asyncio.run(
+            manager.build_turn_context(
+                prompt_sections=sections,
+                messages=messages,
+                tools=tools,
+            )
+        )
+        independently_prepared = client.prepare_request(
+            result.messages,
+            tools,
+            system_prompt=result.system_prompt,
+        )
+
+        assert result.prepared.payload_json == independently_prepared.payload_json
+        assert result.pressure_after.rendered_tokens == result.prepared.estimated_input_tokens
+
     def test_build_turn_context_keeps_history_out_of_system_prompt(self, tmp_path):
         config = PaiCliConfig()
+        config.context.output_reserve_tokens = 0
         manager = ContextManager(config=config, llm_client=SummaryLlm(), cwd=str(tmp_path))
         result = asyncio.run(
             manager.build_turn_context(
@@ -451,6 +816,17 @@ class TestPressure:
 
         assert pressure.tier == PressureTier.TIER0_OBSERVE
         assert pressure.pressure_ratio < 0.60
+
+    def test_configured_thresholds_are_50_70_90(self):
+        config = PaiCliConfig().context
+        config.tier1_threshold = 0.50
+        config.tier2_threshold = 0.70
+        config.tier3_threshold = 0.90
+
+        assert calculate_pressure_from_tokens(49, 100, config).tier == PressureTier.TIER0_OBSERVE
+        assert calculate_pressure_from_tokens(50, 100, config).tier == PressureTier.TIER1_SNIP
+        assert calculate_pressure_from_tokens(70, 100, config).tier == PressureTier.TIER2_PRUNE
+        assert calculate_pressure_from_tokens(90, 100, config).tier == PressureTier.TIER3_SUMMARY
 
     def test_calculate_pressure_tier3(self):
         """Tier 3: 压力 >= 95%"""

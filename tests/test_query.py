@@ -12,11 +12,49 @@ from paicli.agent import QueryEngine
 from paicli.agent.agent import Agent
 from paicli.cancellation import TaskCanceled
 from paicli.config import LlmConfig, load_config
+from paicli.context.telemetry import use_context_scope
 from paicli.llm.openai_compatible import OpenAICompatibleClient
 from paicli.retry import RetryPolicy
 from paicli.tools import ToolRegistry, get_builtin_tools
 from paicli.tools.base import Tool, ToolResult
 from paicli.types import Message
+
+
+def test_prepared_outbound_request_freezes_exact_payload_and_usage_numerator():
+    captured: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, content=b"data: [DONE]\n\n")
+
+    client = OpenAICompatibleClient(
+        provider_name="test",
+        model="test-model",
+        api_key="secret",
+        base_url="https://example.test/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    messages = [Message(role="user", content="original request")]
+    tools = [{"type": "function", "function": {"name": "original_tool"}}]
+
+    prepared = client.prepare_request(messages, tools, system_prompt="system").with_quality_budget(
+        100
+    )
+    messages[0].content = "mutated request"
+    tools[0]["function"]["name"] = "mutated_tool"
+
+    async def collect() -> list[dict]:
+        with use_context_scope("agent"):
+            return [event async for event in client.send_prepared(prepared)]
+
+    events = asyncio.run(collect())
+
+    assert captured[0]["messages"][1]["content"] == "original request"
+    assert captured[0]["tools"][0]["function"]["name"] == "original_tool"
+    active = next(event for event in events if event.get("type") == "context_usage")
+    assert active["input_tokens"] == prepared.estimated_input_tokens
+    assert active["pressure_ratio"] == pytest.approx(prepared.estimated_input_tokens / 100)
+    assert active["quality_budget_tokens"] == 100
 
 
 def test_agent_run_emits_current_context_estimate_before_model_output(tmp_path):
@@ -84,7 +122,7 @@ def test_agent_run_replaces_context_estimate_with_provider_usage(tmp_path):
         model="test-model",
         api_key="key",
         base_url="https://context-usage.example/v1",
-        max_context_window=1_000,
+        max_context_window=128_000,
         transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=body.encode())),
         retry_audit_path=tmp_path / "audit",
     )
@@ -112,6 +150,9 @@ def test_agent_run_replaces_context_estimate_with_provider_usage(tmp_path):
     assert actual["output_tokens"] == 5
     assert actual["cached_tokens"] == 40
     assert actual["used_tokens"] == 125
+    assert actual["pressure_ratio"] == pytest.approx(
+        actual["used_tokens"] / actual["quality_budget_tokens"]
+    )
 
 
 def test_provider_usage_remains_authoritative_after_later_stream_delta(tmp_path):
@@ -131,7 +172,7 @@ def test_provider_usage_remains_authoritative_after_later_stream_delta(tmp_path)
         model="test-model",
         api_key="key",
         base_url="https://context-authoritative.example/v1",
-        max_context_window=1_000,
+        max_context_window=128_000,
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(200, stream=UsageBeforeDeltaStream())
         ),
@@ -182,7 +223,7 @@ def test_same_request_provider_usage_calibrates_the_next_estimate(tmp_path, monk
         model="test-model",
         api_key="key",
         base_url="https://context-calibration.example/v1",
-        max_context_window=1_000,
+        max_context_window=128_000,
         transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=body.encode())),
         retry_audit_path=tmp_path / "audit",
     )
@@ -310,6 +351,10 @@ def test_agent_run_finishes_active_request_and_emits_retained_baseline(tmp_path)
     assert finish_index < retained_index
     assert events[retained_index]["estimated"] is True
     assert events[retained_index]["used_tokens"] > 0
+    assert events[retained_index]["pressure_ratio"] == pytest.approx(
+        events[retained_index]["used_tokens"]
+        / events[retained_index]["quality_budget_tokens"]
+    )
 
 
 def test_failed_agent_request_is_removed_without_committing_context(tmp_path):
@@ -357,7 +402,7 @@ def test_cooperative_cancellation_emits_context_scope_cleanup(tmp_path, monkeypa
     class CancelAfterActiveClient:
         provider_name = "fake"
         model_name = "fake"
-        max_context_window = 1_000
+        max_context_window = 128_000
 
         def __init__(self):
             self.cancel = False
@@ -429,7 +474,7 @@ def test_clear_history_also_resets_context_compaction_state(tmp_path):
 class FakeClient:
     model_name = "fake-model"
     provider_name = "fake-provider"
-    max_context_window = 1000
+    max_context_window = 128_000
 
     def __init__(self):
         self.calls = 0
@@ -461,7 +506,7 @@ class FakeClient:
 class FailingClient:
     model_name = "fake-model"
     provider_name = "fake-provider"
-    max_context_window = 1000
+    max_context_window = 128_000
 
     async def chat(self, messages, tools, *, system_prompt):  # noqa: ARG002
         raise OSError("connection refused")
@@ -471,7 +516,7 @@ class FailingClient:
 class CapturingSummaryClient:
     model_name = "fake-model"
     provider_name = "fake-provider"
-    max_context_window = 200
+    max_context_window = 128_000
 
     def __init__(self):
         self.calls = 0
@@ -494,7 +539,7 @@ class CapturingSummaryClient:
 class RepeatingToolClient:
     model_name = "fake-model"
     provider_name = "fake-provider"
-    max_context_window = 1000
+    max_context_window = 128_000
 
     def __init__(self):
         self.calls = 0
@@ -549,7 +594,7 @@ class ReasoningToolClient:
 class RetryingToolClient:
     model_name = "fake-model"
     provider_name = "fake-provider"
-    max_context_window = 1000
+    max_context_window = 128_000
 
     def __init__(self):
         self.calls = 0
@@ -592,7 +637,7 @@ def test_query_engine_executes_tool_and_replays_result(tmp_path, monkeypatch):
     assert result.turns == 2
 
 
-def test_agent_run_updates_pending_context_after_tool_result(tmp_path, monkeypatch):
+def test_agent_run_does_not_emit_an_uncanonical_pending_estimate(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("PAICLI_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
     (tmp_path / "note.txt").write_text("hello\n", encoding="utf-8")
@@ -633,20 +678,14 @@ def test_agent_run_updates_pending_context_after_tool_result(tmp_path, monkeypat
 
     events = asyncio.run(run())
 
-    tool_result_index = next(
-        index for index, event in enumerate(events) if event.get("type") == "tool_result"
+    assert any(event.get("type") == "tool_result" for event in events)
+    assert not any(
+        event.get("type") == "context_usage" and event.get("state") == "pending"
+        for event in events
     )
-    pending_index = next(
-        index
-        for index, event in enumerate(events)
-        if event.get("type") == "context_usage" and event.get("state") == "pending"
-    )
-    assert tool_result_index < pending_index
-    assert events[pending_index]["scope"] == "agent"
-    assert events[pending_index]["used_tokens"] > 0
 
 
-def test_failed_follow_up_request_clears_tool_result_pending_context(tmp_path, monkeypatch):
+def test_failed_follow_up_request_clears_context_without_committing_history(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("PAICLI_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
     (tmp_path / "note.txt").write_text("hello\n", encoding="utf-8")
@@ -690,15 +729,10 @@ def test_failed_follow_up_request_clears_tool_result_pending_context(tmp_path, m
 
     events = asyncio.run(run())
 
-    pending_index = next(
-        index
-        for index, event in enumerate(events)
-        if event.get("type") == "context_usage" and event.get("state") == "pending"
-    )
     clear_index = next(
         index for index, event in enumerate(events) if event.get("type") == "context_pending_clear"
     )
-    assert pending_index < clear_index
+    assert clear_index > 0
     assert not any(event.get("state") == "retained" for event in events)
 
 
@@ -857,6 +891,15 @@ def test_agent_run_can_skip_history_commit(tmp_path, monkeypatch):
     )
     original_history = [Message(role="user", content="keep this context")]
     agent.history = list(original_history)
+    agent.context_manager._current_summary = "retained summary"
+    original_build = agent.context_manager.build_turn_context
+
+    async def build_with_pending_summary(**kwargs):
+        result = await original_build(**kwargs)
+        agent.context_manager._current_summary = "uncommitted summary"
+        return result
+
+    agent.context_manager.build_turn_context = build_with_pending_summary
 
     async def run() -> None:
         events = [event async for event in agent.run("plan task", commit_history=False)]
@@ -865,9 +908,10 @@ def test_agent_run_can_skip_history_commit(tmp_path, monkeypatch):
     asyncio.run(run())
 
     assert agent.history == original_history
+    assert agent.context_manager._current_summary == "retained summary"
 
 
-def test_agent_reconfigure_llm_rebuilds_context_manager_and_preserves_history(
+def test_agent_reconfigure_llm_preserves_context_manager_session_and_history(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -889,7 +933,7 @@ def test_agent_reconfigure_llm_rebuilds_context_manager_and_preserves_history(
     )
 
     assert agent.llm_client is client
-    assert agent.context_manager is not old_context_manager
+    assert agent.context_manager is old_context_manager
     assert agent.context_manager.llm_client is client
     assert agent.history == [Message(role="user", content="keep this")]
     assert config.llm.model == "qwen-turbo"

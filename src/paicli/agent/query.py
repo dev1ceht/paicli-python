@@ -8,10 +8,11 @@ from typing import Any
 
 from paicli.cancellation import CancellationCheck, TaskCanceled, raise_if_cancelled
 from paicli.config import PaiCliConfig
-from paicli.context import ContextManager
+from paicli.context import ContextManager, ContextWindowExceededError
 from paicli.context.telemetry import current_context_scope
 from paicli.image import parse_image_references
 from paicli.llm.base import LlmClient
+from paicli.prompt import PromptSections
 from paicli.tools.base import ApprovalPending, ToolContext
 from paicli.tools.executor import ToolExecutor
 from paicli.tools.registry import ToolRegistry
@@ -23,6 +24,7 @@ async def query(
     llm_client: LlmClient,
     tool_registry: ToolRegistry,
     system_prompt: str,
+    prompt_sections: PromptSections | None = None,
     user_message: str,
     history: list[Message] | None,
     cwd: str,
@@ -141,16 +143,6 @@ async def query(
                             tool_call_id=result.tool_use_id,
                         )
                     )
-                build_context_event = getattr(llm_client, "context_usage_event", None)
-                context_scope = current_context_scope()
-                if callable(build_context_event) and context_scope:
-                    yield build_context_event(
-                        messages,
-                        tool_definitions,
-                        system_prompt,
-                        state="pending",
-                        scope=context_scope,
-                    )
                 next_tool_index = index + 1
             pending_tool_calls = []
             next_tool_index = 0
@@ -173,28 +165,54 @@ async def query(
         usage_output = 0
         tool_states: dict[int, dict[str, Any]] = {}
 
+        prepared = None
         if context_manager:
-            context_result = await context_manager.build_turn_context(
-                prefix=system_prompt,
-                messages=messages,
-                actual_usage=last_actual_usage,
-            )
+            try:
+                context_result = await context_manager.build_turn_context(
+                    prompt_sections=prompt_sections or PromptSections(prefix=system_prompt),
+                    messages=messages,
+                    tools=[] if finalizing else tool_definitions,
+                    actual_usage=last_actual_usage,
+                )
+            except ContextWindowExceededError as exc:
+                yield {"type": "context_pending_clear", "scope": current_context_scope()}
+                yield {"type": "error", "error": exc}
+                return
             final_system_prompt = context_result.system_prompt
             messages = context_result.messages
+            prepared = context_result.prepared
             yield {
                 "type": "context_status",
                 "pressure_tier": context_result.pressure_tier,
+                "pressure_ratio": (
+                    context_result.pressure_after.pressure_ratio
+                    if context_result.pressure_after
+                    else None
+                ),
+                "estimated": True,
             }
+            if context_result.reductions and context_result.pressure_before:
+                yield {
+                    "type": "context_reduced",
+                    "before_ratio": context_result.pressure_before.pressure_ratio,
+                    "after_ratio": context_result.pressure_after.pressure_ratio,
+                    "actions": list(context_result.reductions),
+                }
         else:
             final_system_prompt = system_prompt
 
         try:
             raise_if_cancelled(cancellation_check)
-            async for event in llm_client.chat(
-                messages,
-                [] if finalizing else tool_definitions,
-                system_prompt=final_system_prompt,
-            ):
+            stream = (
+                llm_client.send_prepared(prepared)
+                if prepared is not None and callable(getattr(llm_client, "send_prepared", None))
+                else llm_client.chat(
+                    messages,
+                    [] if finalizing else tool_definitions,
+                    system_prompt=final_system_prompt,
+                )
+            )
+            async for event in stream:
                 raise_if_cancelled(cancellation_check)
                 event_type = event.get("type")
                 if event_type == "text_delta":

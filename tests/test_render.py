@@ -68,13 +68,14 @@ def test_bottom_toolbar_uses_runtime_summary_segments():
             "total_tokens": 13187,
             "context_ratio": 0.013,
             "has_usage": True,
-            "pressure_tier": "tier2_prune",
+            "pressure_ratio": 0.88,
+            "pressure_estimated": True,
         },
     )
 
     assert ("class:toolbar.model", "deepseek-v4-flash") in toolbar
     assert ("class:toolbar.ctx.value", "1%") in toolbar
-    assert ("class:toolbar.pressure", "pressure:T2") in toolbar
+    assert ("class:toolbar.pressure", "pressure ~88%") in toolbar
     assert ("class:toolbar.cwd.value", "/Users/me/project") in toolbar
     assert not any(text == " TURN " for _style, text in toolbar)
     assert not any("Token" in text for _style, text in toolbar)
@@ -376,6 +377,25 @@ def test_toolbar_status_tracks_context_pressure_tier():
     renderer.handle({"type": "context_status", "pressure_tier": "tier3_summary"})
 
     assert renderer.toolbar_status()["pressure_tier"] == "tier3_summary"
+
+
+def test_context_reduction_is_printed_once_with_before_after_and_actions():
+    stream = StringIO()
+    renderer = RichRenderer(console=Console(file=stream, color_system=None, width=120))
+
+    renderer.handle(
+        {
+            "type": "context_reduced",
+            "before_ratio": 0.94,
+            "after_ratio": 0.88,
+            "actions": ["tool_offload", "history_summary"],
+        }
+    )
+
+    output = stream.getvalue()
+    assert output.count("Context reduced") == 1
+    assert "94% → 88%" in output
+    assert "tool offload, history summary" in output
 
 
 def test_toolbar_includes_token_details_and_cost():

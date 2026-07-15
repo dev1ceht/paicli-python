@@ -147,6 +147,8 @@ class RichRenderer:
                     ),
                     "context_estimated": bool(reading.get("estimated")),
                     "context_active_count": self._context_usage.active_count,
+                    "pressure_ratio": reading.get("pressure_ratio"),
+                    "pressure_estimated": bool(reading.get("estimated")),
                 }
             )
             if reading_state != "retained":
@@ -238,6 +240,13 @@ class RichRenderer:
             )
         elif event_type == "context_status":
             self._pressure_tier = event.get("pressure_tier")
+        elif event_type == "context_reduced":
+            before = round(float(event.get("before_ratio") or 0) * 100)
+            after = round(float(event.get("after_ratio") or 0) * 100)
+            actions = ", ".join(
+                str(action).replace("_", " ") for action in event.get("actions") or []
+            )
+            self.console.print(f"[dim]Context reduced: {before}% → {after}% · {actions}[/dim]")
         elif event_type == "turn_complete":
             stop_reason = str(event.get("stop_reason") or "end_turn")
             title = "Assistant Output" if stop_reason == "tool_use" else "Final Output"

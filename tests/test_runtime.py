@@ -256,7 +256,7 @@ def test_background_task_resumes_the_approved_tool_from_its_checkpoint(tmp_path,
     class ApprovalClient:
         model_name = "fake-model"
         provider_name = "fake-provider"
-        max_context_window = 1000
+        max_context_window = 128_000
 
         def __init__(self):
             self.calls = 0

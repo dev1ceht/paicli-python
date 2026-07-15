@@ -11,7 +11,7 @@ from paicli.context.telemetry import use_context_scope
 from paicli.llm import create_llm_client
 from paicli.llm.base import LlmClient
 from paicli.memory import MemoryManager
-from paicli.prompt import PromptAssembler
+from paicli.prompt import PromptAssembler, PromptSections
 from paicli.snapshot import SnapshotService
 from paicli.tools.registry import ToolRegistry
 from paicli.types import Message, QueryResult
@@ -62,15 +62,20 @@ class Agent:
         raise_if_cancelled(self.cancellation_check)
         snapshot = SnapshotService(self.cwd)
         canceled = False
+        context_checkpoint = self.context_manager.checkpoint_state()
+        context_committed = False
         with suppress(Exception):
             snapshot.create("pre-turn")
         try:
-            system_prompt = self._system_prompt_for_message(message)
+            prompt_sections = self._prompt_sections_for_message(message)
+            system_prompt = prompt_sections.render()
+            self.system_prompt = system_prompt
             with use_context_scope(context_scope):
                 async for event in query(
                     llm_client=self.llm_client,
                     tool_registry=self.tool_registry,
                     system_prompt=system_prompt,
+                    prompt_sections=prompt_sections,
                     user_message=message,
                     history=self.history,
                     cwd=self.cwd,
@@ -85,6 +90,7 @@ class Agent:
                 ):
                     if event.get("type") == "done" and commit_history:
                         self.history = list(event.get("messages") or [])
+                        context_committed = True
                         baseline = self.context_usage_event()
                         if baseline:
                             yield baseline
@@ -93,6 +99,8 @@ class Agent:
             canceled = True
             raise
         finally:
+            if not context_committed:
+                self.context_manager.restore_state(context_checkpoint)
             if not canceled:
                 with suppress(Exception):
                     snapshot.create("post-turn")
@@ -115,16 +123,29 @@ class Agent:
         self.history = []
         self.context_manager.reset()
 
+    def close(self) -> None:
+        self.context_manager.close()
+
     def context_usage_event(self) -> dict[str, Any] | None:
         build_event = getattr(self.llm_client, "context_usage_event", None)
         if not callable(build_event):
             return None
-        return build_event(
-            self.history,
-            self.tool_registry.definitions(),
-            self.system_prompt,
-            state="retained",
-        )
+        try:
+            return build_event(
+                self.history,
+                self.tool_registry.definitions(),
+                self.system_prompt,
+                state="retained",
+                quality_budget_tokens=self.context_manager.quality_budget_tokens(),
+                pressure_thresholds=self.context_manager.pressure_thresholds(),
+            )
+        except TypeError:
+            return build_event(
+                self.history,
+                self.tool_registry.definitions(),
+                self.system_prompt,
+                state="retained",
+            )
 
     def refresh_context_usage_event(self) -> dict[str, Any] | None:
         """Rebuild tool-dependent instructions and report the new idle baseline."""
@@ -142,19 +163,23 @@ class Agent:
         self.config.llm = llm_config
         self.llm_client = client
         self.system_prompt = self._build_system_prompt()
-        self.context_manager = ContextManager(
-            config=self.config,
-            llm_client=client,
-            cwd=self.cwd,
-        )
+        self.context_manager.llm_client = client
         return client
 
-    def _system_prompt_for_message(self, message: str) -> str:
+    def _prompt_sections_for_message(self, message: str) -> PromptSections:
         memory_context = self._memory_context_for_message(message)
-        self.system_prompt = self._build_system_prompt(relevant_memory=memory_context)
+        return self._build_prompt_sections(relevant_memory=memory_context)
+
+    def _system_prompt_for_message(self, message: str) -> str:
+        """Compatibility wrapper for callers that still need the rendered prompt."""
+        sections = self._prompt_sections_for_message(message)
+        self.system_prompt = sections.render()
         return self.system_prompt
 
     def _build_system_prompt(self, *, relevant_memory: str = "") -> str:
+        return self._build_prompt_sections(relevant_memory=relevant_memory).render()
+
+    def _build_prompt_sections(self, *, relevant_memory: str = "") -> PromptSections:
         return PromptAssembler(
             config=self.config,
             cwd=self.cwd,
@@ -162,7 +187,7 @@ class Agent:
             tool_summaries=self.tool_registry.summaries(),
             model=self.llm_client.model_name,
             provider=self.llm_client.provider_name,
-        ).build(relevant_memory=relevant_memory)
+        ).build_sections(relevant_memory=relevant_memory)
 
     def _memory_context_for_message(self, message: str) -> str:
         if not self.config.features.memory or not self.config.memory.long_term_enabled:

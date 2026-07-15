@@ -8,14 +8,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from paicli.config import ContextConfig
 from paicli.context.assembler import (
     AssembledPrompt,
-    Section,
     SectionType,
-    SECTION_TRIM_PRIORITY,
 )
 from paicli.context.budget import Budget
-from paicli.context.token_estimator import estimate_tokens
 
 
 class PressureTier(str, Enum):
@@ -50,6 +48,7 @@ class PressureResult:
 def calculate_pressure(
     assembled: AssembledPrompt,
     budget: Budget,
+    config: ContextConfig | None = None,
 ) -> PressureResult:
     """计算压力
     
@@ -73,27 +72,37 @@ def calculate_pressure(
     # 预算 token 数
     budget_tokens = budget.prompt_tokens
     
-    # 计算压力比
-    if budget_tokens == 0:
-        pressure_ratio = 1.0
-    else:
-        pressure_ratio = max(rendered_tokens, raw_tokens) / budget_tokens
-    
     # 确定压力等级
-    if pressure_ratio < 0.60:
+    result = calculate_pressure_from_tokens(
+        max(rendered_tokens, raw_tokens),
+        budget_tokens,
+        config or ContextConfig(),
+    )
+    result.rendered_tokens = rendered_tokens
+    result.raw_tokens = raw_tokens
+    return result
+
+
+def calculate_pressure_from_tokens(
+    used_tokens: int,
+    budget_tokens: int,
+    config: ContextConfig,
+) -> PressureResult:
+    """Classify the canonical outbound-token numerator against the quality budget."""
+    pressure_ratio = used_tokens / budget_tokens if budget_tokens > 0 else 1.0
+    if pressure_ratio < config.tier1_threshold:
         tier = PressureTier.TIER0_OBSERVE
-    elif pressure_ratio < 0.80:
+    elif pressure_ratio < config.tier2_threshold:
         tier = PressureTier.TIER1_SNIP
-    elif pressure_ratio < 0.95:
+    elif pressure_ratio < config.tier3_threshold:
         tier = PressureTier.TIER2_PRUNE
     else:
         tier = PressureTier.TIER3_SUMMARY
-    
     return PressureResult(
         tier=tier,
         pressure_ratio=pressure_ratio,
-        rendered_tokens=rendered_tokens,
-        raw_tokens=raw_tokens,
+        rendered_tokens=used_tokens,
+        raw_tokens=used_tokens,
         budget_tokens=budget_tokens,
     )
 
@@ -250,7 +259,4 @@ def should_trigger_compaction(
         return True
     
     # prompt 已超预算
-    if pressure.rendered_tokens > pressure.budget_tokens:
-        return True
-    
-    return False
+    return pressure.rendered_tokens > pressure.budget_tokens
