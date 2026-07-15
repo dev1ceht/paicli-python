@@ -150,9 +150,9 @@ class ContextConfig:
     max_budget_chars: int = 800_000
 
     # 阶段三：压力感知裁剪
-    tier1_threshold: float = 0.60
-    tier2_threshold: float = 0.80
-    tier3_threshold: float = 0.95
+    tier1_threshold: float = 0.50
+    tier2_threshold: float = 0.70
+    tier3_threshold: float = 0.90
 
     # 阶段四：结构化压缩
     protected_turns: int = 2

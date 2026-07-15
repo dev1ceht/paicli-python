@@ -1,3 +1,3 @@
-from paicli.prompt.assembler import PromptAssembler
+from paicli.prompt.assembler import PromptAssembler, PromptSections
 
-__all__ = ["PromptAssembler"]
+__all__ = ["PromptAssembler", "PromptSections"]

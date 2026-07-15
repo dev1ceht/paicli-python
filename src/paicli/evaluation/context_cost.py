@@ -16,7 +16,7 @@ from typing import Any
 from paicli.agent.query import query
 from paicli.config import PaiCliConfig
 from paicli.context import ContextBuildResult, ContextManager
-from paicli.context.compaction import CompactionResult, deterministic_compact, extract_delta_items
+from paicli.context.compaction import CompactionResult, DeltaItem, deterministic_compact
 from paicli.context.token_estimator import TokenEstimator
 from paicli.tools import ToolRegistry, get_builtin_tools
 from paicli.types import Message
@@ -75,7 +75,7 @@ class _BaselineContextManager:
 
 
 class _BenchmarkContextManager(ContextManager):
-    """Use raw role-preserving history for benchmark-only pressure triggering."""
+    """Record decisions made by the production pressure-governance pipeline."""
 
     async def build_turn_context(
         self,
@@ -84,30 +84,12 @@ class _BenchmarkContextManager(ContextManager):
         messages: list[Message] | None = None,
         **kwargs: Any,
     ) -> ContextBuildResult:
-        all_messages = list(messages or [])
-        result = await super().build_turn_context(prefix=prefix, messages=all_messages, **kwargs)
-        if result.compacted:
-            return self._record_decision(result)
-        history, current = _split_current_request(all_messages)
-        raw_text = prefix + "\n" + "\n".join(str(item.content) for item in all_messages)
-        raw_tokens = self._token_estimator.estimate(raw_text)
-        budget = self._calculate_budget()
-        if (
-            raw_tokens < budget.prompt_tokens * SYNTHETIC_PRESSURE_TRIGGER_RATIO
-            or len(history) < MIN_COMPACTION_HISTORY_ITEMS
-        ):
-            return self._record_decision(result)
-        compacted = await self._compact_messages(self._compress_tool_results(history))
-        if compacted is None:
-            return self._record_decision(result)
-        return self._record_decision(
-            ContextBuildResult(
-                system_prompt=prefix,
-                messages=[*compacted, *([current] if current else [])],
-                compacted=True,
-                pressure_tier="tier3_summary",
-            )
+        result = await super().build_turn_context(
+            prefix=prefix,
+            messages=list(messages or []),
+            **kwargs,
         )
+        return self._record_decision(result)
 
     def _record_decision(self, result: ContextBuildResult) -> ContextBuildResult:
         if not hasattr(self, "trace_decisions"):
@@ -134,53 +116,31 @@ class _BenchmarkContextManager(ContextManager):
 class _DeterministicContextManager(_BenchmarkContextManager):
     """Reuse production pressure handling but force the no-model compactor."""
 
-    async def _compact_messages(self, history: list[Message]) -> list[Message] | None:
-        delta_items, protected_items = extract_delta_items(
-            history,
-            protected_turns=self.config.context.protected_turns,
-        )
-        if not delta_items:
-            return None
-        result = deterministic_compact(delta_items, prior_summary=self._current_summary)
-        result.protected_items = len(protected_items)
-        self._last_compaction = result
-        self._current_summary = result.summary
-        return [
-            Message(role="system", content=f"[Previous conversation summary]\n{result.summary}"),
-            *[
-                Message(role=item.role, content=item.content, tool_call_id=item.tool_call_id)
-                for item in protected_items
-            ],
-        ]
+    async def _create_compaction(
+        self,
+        delta_items: list[DeltaItem],
+        prior_summary: str,
+    ) -> CompactionResult:
+        return deterministic_compact(delta_items, prior_summary=prior_summary)
 
 
 class _RecordedHandoffContextManager(_BenchmarkContextManager):
     """Replay exactly one reviewed handoff summary instead of map-reducing it."""
 
-    async def _compact_messages(self, history: list[Message]) -> list[Message] | None:
-        delta_items, protected_items = extract_delta_items(
-            history,
-            protected_turns=self.config.context.protected_turns,
-        )
-        if not delta_items:
-            return None
+    async def _create_compaction(
+        self,
+        delta_items: list[DeltaItem],
+        prior_summary: str,
+    ) -> CompactionResult:
+        del prior_summary
         summary, usage = self.llm_client.next_handoff()
-        result = CompactionResult(
+        return CompactionResult(
             summary=summary,
             compacted_items=len(delta_items),
-            protected_items=len(protected_items),
+            protected_items=0,
             used_llm=True,
             llm_usage=usage,
         )
-        self._last_compaction = result
-        self._current_summary = result.summary
-        return [
-            Message(role="system", content=f"[Previous conversation summary]\n{result.summary}"),
-            *[
-                Message(role=item.role, content=item.content, tool_call_id=item.tool_call_id)
-                for item in protected_items
-            ],
-        ]
 
 
 class _ScriptedClient:
@@ -572,12 +532,6 @@ def _core_metrics(row: dict[str, Any]) -> dict[str, Any]:
             "verifier_returncode",
         )
     }
-
-
-def _split_current_request(messages: list[Message]) -> tuple[list[Message], Message | None]:
-    if messages and messages[-1].role == "user":
-        return messages[:-1], messages[-1]
-    return messages, None
 
 
 def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:

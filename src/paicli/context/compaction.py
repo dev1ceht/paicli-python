@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 
@@ -89,7 +90,7 @@ def group_messages_by_turn(messages: list[Message]) -> list[list[DeltaItem]]:
             DeltaItem(
                 turn_id=turn_id,
                 role=msg.role,
-                content=msg.content if isinstance(msg.content, str) else str(msg.content),
+                content=message_content_for_compaction(msg),
                 tool_call_id=msg.tool_call_id,
             )
         )
@@ -99,6 +100,23 @@ def group_messages_by_turn(messages: list[Message]) -> list[list[DeltaItem]]:
         turns.append(current_turn)
 
     return turns
+
+
+def message_content_for_compaction(message: Message) -> str:
+    """Preserve structured assistant tool calls in semantic and rule summaries."""
+    content = (
+        message.content if isinstance(message.content, str) else str(message.content)
+    )
+    if not message.tool_calls:
+        return content
+    serialized_calls = json.dumps(
+        message.tool_calls,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    prefix = f"{content}\n" if content else ""
+    return f"{prefix}[tool_calls] {serialized_calls}"
 
 
 def extract_delta_items(
@@ -117,6 +135,9 @@ def extract_delta_items(
         (delta_items, protected_items)
     """
     turns = group_messages_by_turn(messages)
+
+    if protected_turns <= 0:
+        return [item for turn in turns for item in turn], []
 
     if len(turns) <= protected_turns:
         # 所有 turn 都受保护
@@ -372,7 +393,8 @@ def _build_llm_input(delta_items: list[DeltaItem], prior_summary: str) -> str:
 
 def _build_compaction_prompt() -> str:
     """构建压缩 prompt"""
-    return """You are a conversation summarizer. Your task is to create a structured summary of the conversation history.
+    return """You are a conversation summarizer. Your task is to create a structured
+summary of the conversation history.
 
 Output Format (Markdown):
 ## Goal
@@ -519,11 +541,12 @@ def _extract_rejected_paths(delta_items: list[DeltaItem]) -> list[str]:
 def _extract_last_error(delta_items: list[DeltaItem]) -> str:
     """提取最后的错误"""
     for item in reversed(delta_items):
-        if item.is_tool_result:
-            if any(kw in item.content for kw in ["Error", "Traceback", "FAILED", "错误"]):
-                # 截取前 200 字符
-                error = item.content[:200]
-                if len(item.content) > 200:
-                    error += "..."
-                return error
+        if item.is_tool_result and any(
+            kw in item.content for kw in ["Error", "Traceback", "FAILED", "错误"]
+        ):
+            # 截取前 200 字符
+            error = item.content[:200]
+            if len(item.content) > 200:
+                error += "..."
+            return error
     return ""

@@ -173,7 +173,10 @@ async def start_repl(cwd: str, config: PaiCliConfig) -> None:
     # Wire the native TUI approval modal as the agent's HITL callback
     agent.approval_callback = tui_app.request_approval
 
-    await tui_app.run_async()
+    try:
+        await tui_app.run_async()
+    finally:
+        agent.close()
 
 
 async def _run_agent(agent: Agent, renderer: RichRenderer, message: str) -> None:
@@ -1030,7 +1033,12 @@ def _bottom_toolbar(
     )
     estimated_marker = "~" if stats.get("context_estimated") else ""
     active_count = int(stats.get("context_active_count") or 0)
-    pressure_text = _format_pressure_tier(stats.get("pressure_tier"))
+    pressure_ratio = stats.get("pressure_ratio")
+    if pressure_ratio is None:
+        pressure_text = "—"
+    else:
+        pressure_marker = "~" if stats.get("pressure_estimated") else ""
+        pressure_text = f"{pressure_marker}{rounded_context_percent(float(pressure_ratio))}%"
 
     segments: list[tuple[str, str]] = [
         # Phase indicator
@@ -1071,7 +1079,7 @@ def _bottom_toolbar(
         segments.append(("class:toolbar.gap", f" · {active_count} active"))
 
     segments.append(("class:toolbar.gap", " · "))
-    segments.append(("class:toolbar.pressure", f"pressure:{pressure_text}"))
+    segments.append(("class:toolbar.pressure", f"pressure {pressure_text}"))
 
     # Token details (only when we have usage data)
     if has_usage:

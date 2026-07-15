@@ -1,22 +1,65 @@
-"""工具结果裁剪模块
-
-实现两个互补的裁剪策略：
-1. 压缩旧工具结果 - 保留最近 N 条完整，更早的替换为占位符
-2. 大工具结果落盘 - 超过预算的保存到磁盘，保留预览
-"""
+"""Recoverability-aware reduction and lifecycle management for tool results."""
 
 from __future__ import annotations
 
-import os
+import hashlib
+import re
+import shutil
+import time
 from pathlib import Path
-from typing import Any
 
 from paicli.types import Message
 
+COMPRESSED_PREFIX = "[tool-result-compressed"
+OFFLOADED_PREFIX = "[tool-result-offloaded"
+COMPRESSED_PLACEHOLDER = (
+    "[tool-result-compressed; tool_call_id={tool_call_id}; rerun the tool if needed]"
+)
+OFFLOADED_PLACEHOLDER = (
+    "[tool-result-offloaded; path={file_path}; preview={preview}]"
+)
+SESSION_MARKER = ".paicli-tool-results"
+_SESSION_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
-# 占位符模板
-COMPRESSED_PLACEHOLDER = "[工具结果已压缩，tool_call_id={tool_call_id}，需要时重新执行]"
-OFFLOADED_PLACEHOLDER = "[大工具结果已落盘，路径={file_path}，预览={preview}...]"
+
+def is_compressed_tool_result(message: Message) -> bool:
+    return message.role == "tool" and str(message.content).startswith(COMPRESSED_PREFIX)
+
+
+def is_offloaded_tool_result(message: Message) -> bool:
+    return message.role == "tool" and str(message.content).startswith(OFFLOADED_PREFIX)
+
+
+def is_inline_tool_result(message: Message) -> bool:
+    return (
+        message.role == "tool"
+        and not is_compressed_tool_result(message)
+        and not is_offloaded_tool_result(message)
+    )
+
+
+def compress_next_old_tool_result(
+    messages: list[Message],
+    *,
+    keep_recent: int = 5,
+) -> tuple[list[Message], bool]:
+    """Lossily replace one oldest eligible inline result, preserving recent results."""
+    tool_indices = [index for index, message in enumerate(messages) if message.role == "tool"]
+    protected = set(tool_indices[-max(0, keep_recent) :]) if keep_recent else set()
+    for index in tool_indices:
+        message = messages[index]
+        if index in protected or not is_inline_tool_result(message):
+            continue
+        result = list(messages)
+        result[index] = Message(
+            role="tool",
+            content=COMPRESSED_PLACEHOLDER.format(
+                tool_call_id=message.tool_call_id or "unknown"
+            ),
+            tool_call_id=message.tool_call_id,
+        )
+        return result, True
+    return messages, False
 
 
 def compress_old_tool_results(
@@ -24,143 +67,84 @@ def compress_old_tool_results(
     *,
     keep_recent: int = 5,
 ) -> list[Message]:
-    """压缩旧工具结果
-    
-    保留最近 keep_recent 条工具结果的完整内容，更早的替换为占位符。
-    
-    Args:
-        messages: 消息列表
-        keep_recent: 保留最近 N 条完整结果，默认 5
-        
-    Returns:
-        裁剪后的消息列表（新列表，不修改原列表）
-    """
-    if not messages:
-        return messages
-    
-    # 找出所有工具结果的位置
-    tool_result_indices = [
-        i for i, msg in enumerate(messages) 
-        if msg.role == "tool"
+    result = list(messages)
+    while True:
+        result, changed = compress_next_old_tool_result(result, keep_recent=keep_recent)
+        if not changed:
+            return result
+
+
+def offload_next_tool_result(
+    messages: list[Message],
+    *,
+    max_total_bytes: int = 200 * 1024,
+    preview_chars: int = 200,
+    storage_dir: str = "~/.paicli/tool_results",
+    session_id: str = "default",
+    force: bool = False,
+) -> tuple[list[Message], bool]:
+    """Offload one largest inline result when the byte threshold is exceeded."""
+    inline = [
+        (index, message)
+        for index, message in enumerate(messages)
+        if is_inline_tool_result(message)
     ]
-    
-    # 如果工具结果数量不超过 keep_recent，不需要裁剪
-    if len(tool_result_indices) <= keep_recent:
-        return messages
-    
-    # 需要压缩的索引（保留最后 keep_recent 个）
-    indices_to_compress = set(tool_result_indices[:-keep_recent])
-    
-    # 构建新消息列表
-    result = []
-    for i, msg in enumerate(messages):
-        if i in indices_to_compress and msg.role == "tool":
-            # 替换为占位符
-            tool_call_id = msg.tool_call_id or "unknown"
-            placeholder = COMPRESSED_PLACEHOLDER.format(tool_call_id=tool_call_id)
-            result.append(Message(
-                role="tool",
-                content=placeholder,
-                tool_call_id=msg.tool_call_id,
-            ))
-        else:
-            result.append(msg)
-    
-    return result
+    if not inline:
+        return messages, False
+    total_bytes = sum(len(str(message.content).encode("utf-8")) for _, message in inline)
+    if not force and total_bytes <= max_total_bytes:
+        return messages, False
+
+    index, message = max(
+        inline,
+        key=lambda item: len(str(item[1].content).encode("utf-8")),
+    )
+    storage_path = Path(storage_dir).expanduser().resolve() / session_id
+    try:
+        storage_path.mkdir(parents=True, exist_ok=True)
+        (storage_path / SESSION_MARKER).touch(exist_ok=True)
+    except OSError:
+        return messages, False
+    identity = f"{message.tool_call_id or 'tool'}:{index}"
+    safe_name = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+    file_path = storage_path / f"{safe_name}.txt"
+    try:
+        file_path.write_text(str(message.content), encoding="utf-8")
+    except OSError:
+        return messages, False
+
+    preview = str(message.content)[:preview_chars].replace("\n", " ").strip()
+    if len(str(message.content)) > preview_chars:
+        preview += "..."
+    placeholder = OFFLOADED_PLACEHOLDER.format(file_path=file_path, preview=preview)
+    result = list(messages)
+    result[index] = Message(
+        role="tool",
+        content=placeholder,
+        tool_call_id=message.tool_call_id,
+    )
+    return result, True
 
 
 def offload_large_tool_results(
     messages: list[Message],
     *,
-    max_total_bytes: int = 200 * 1024,  # 200KB
+    max_total_bytes: int = 200 * 1024,
     preview_chars: int = 200,
     storage_dir: str = "~/.paicli/tool_results",
     session_id: str = "default",
 ) -> list[Message]:
-    """大工具结果落盘
-    
-    统计所有工具结果的总大小，超过预算时按大小排序，
-    把最大的保存到磁盘，上下文保留预览。
-    
-    Args:
-        messages: 消息列表
-        max_total_bytes: 最大总字节数，默认 200KB
-        preview_chars: 保留的预览字符数，默认 200
-        storage_dir: 存储目录，默认 ~/.paicli/tool_results
-        session_id: 会话 ID，用于隔离不同会话的文件
-        
-    Returns:
-        裁剪后的消息列表（新列表，不修改原列表）
-    """
-    if not messages:
-        return messages
-    
-    # 找出所有工具结果
-    tool_results = [
-        (i, msg) for i, msg in enumerate(messages)
-        if msg.role == "tool" and not msg.content.startswith("[工具结果已压缩")
-    ]
-    
-    if not tool_results:
-        return messages
-    
-    # 计算总大小
-    total_bytes = sum(len(msg.content.encode('utf-8')) for _, msg in tool_results)
-    
-    # 如果未超过预算，不需要落盘
-    if total_bytes <= max_total_bytes:
-        return messages
-    
-    # 按大小排序（从大到小）
-    tool_results.sort(
-        key=lambda x: len(x[1].content.encode('utf-8')),
-        reverse=True
-    )
-    
-    # 准备存储目录
-    storage_path = Path(storage_dir).expanduser() / session_id
-    storage_path.mkdir(parents=True, exist_ok=True)
-    
-    # 逐步落盘，直到总大小 <= 预算
     result = list(messages)
-    current_total = total_bytes
-    
-    for idx, msg in tool_results:
-        if current_total <= max_total_bytes:
-            break
-        
-        # 保存到磁盘
-        tool_call_id = msg.tool_call_id or f"tool_{idx}"
-        file_path = storage_path / f"{tool_call_id}.txt"
-        
-        try:
-            file_path.write_text(msg.content, encoding='utf-8')
-        except OSError:
-            # 写入失败，跳过这个结果
-            continue
-        
-        # 生成预览
-        preview = msg.content[:preview_chars]
-        if len(msg.content) > preview_chars:
-            preview = preview.rstrip() + "..."
-        
-        # 替换为占位符
-        placeholder = OFFLOADED_PLACEHOLDER.format(
-            file_path=str(file_path),
-            preview=preview,
+    while True:
+        result, changed = offload_next_tool_result(
+            result,
+            max_total_bytes=max_total_bytes,
+            preview_chars=preview_chars,
+            storage_dir=storage_dir,
+            session_id=session_id,
         )
-        
-        result[idx] = Message(
-            role="tool",
-            content=placeholder,
-            tool_call_id=msg.tool_call_id,
-        )
-        
-        # 更新当前总大小
-        current_total -= len(msg.content.encode('utf-8'))
-        current_total += len(placeholder.encode('utf-8'))
-    
-    return result
+        if not changed:
+            return result
 
 
 def apply_tool_result_compression(
@@ -172,31 +156,52 @@ def apply_tool_result_compression(
     storage_dir: str = "~/.paicli/tool_results",
     session_id: str = "default",
 ) -> list[Message]:
-    """应用工具结果裁剪（组合两个策略）
-    
-    先压缩旧结果，再落盘大结果。
-    
-    Args:
-        messages: 消息列表
-        keep_recent: 保留最近 N 条完整结果
-        max_total_bytes: 最大总字节数
-        preview_chars: 保留的预览字符数
-        storage_dir: 存储目录
-        session_id: 会话 ID
-        
-    Returns:
-        裁剪后的消息列表
-    """
-    # 1. 压缩旧工具结果
-    messages = compress_old_tool_results(messages, keep_recent=keep_recent)
-    
-    # 2. 大工具结果落盘
-    messages = offload_large_tool_results(
+    """Compatibility helper: offload recoverably before lossy old-result compression."""
+    result = offload_large_tool_results(
         messages,
         max_total_bytes=max_total_bytes,
         preview_chars=preview_chars,
         storage_dir=storage_dir,
         session_id=session_id,
     )
-    
-    return messages
+    return compress_old_tool_results(result, keep_recent=keep_recent)
+
+
+def cleanup_session_tool_results(storage_dir: str, session_id: str) -> None:
+    root = Path(storage_dir).expanduser().resolve()
+    target = (root / session_id).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return
+    is_owned = _SESSION_ID_PATTERN.fullmatch(session_id) or (
+        target / SESSION_MARKER
+    ).is_file()
+    if is_owned and target != root and target.is_dir() and not target.is_symlink():
+        shutil.rmtree(target, ignore_errors=True)
+
+
+def cleanup_stale_tool_results(
+    storage_dir: str,
+    *,
+    max_age_days: int = 7,
+    now: float | None = None,
+) -> None:
+    root = Path(storage_dir).expanduser().resolve()
+    if not root.is_dir():
+        return
+    cutoff = (time.time() if now is None else now) - max_age_days * 24 * 60 * 60
+    for child in root.iterdir():
+        try:
+            is_session = bool(_SESSION_ID_PATTERN.fullmatch(child.name))
+            is_owned = (child / SESSION_MARKER).is_file()
+            if (
+                is_session
+                and is_owned
+                and child.is_dir()
+                and not child.is_symlink()
+                and child.stat().st_mtime < cutoff
+            ):
+                shutil.rmtree(child, ignore_errors=True)
+        except OSError:
+            continue

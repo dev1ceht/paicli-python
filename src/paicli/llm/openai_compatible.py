@@ -13,6 +13,7 @@ import httpx
 
 from paicli.context.telemetry import current_context_scope
 from paicli.context.token_estimator import TokenEstimator
+from paicli.llm.base import PreparedOutboundRequest
 from paicli.policy import AuditLog
 from paicli.retry import RetryPolicy, classify_transient_error, compute_retry_delay
 from paicli.types import Message
@@ -63,16 +64,17 @@ class OpenAICompatibleClient:
         *,
         system_prompt: str,
     ) -> AsyncIterator[dict[str, Any]]:
-        if not self.api_key:
-            yield {
-                "type": "error",
-                "error": RuntimeError(
-                    "PAICLI_API_KEY is not configured. Set it in env, ~/.paicli/config.json, "
-                    "or project .paicli/config.json."
-                ),
-            }
-            return
+        prepared = self.prepare_request(messages, tools, system_prompt=system_prompt)
+        async for event in self.send_prepared(prepared):
+            yield event
 
+    def prepare_request(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]],
+        *,
+        system_prompt: str,
+    ) -> PreparedOutboundRequest:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": self._format_messages(messages, system_prompt),
@@ -84,6 +86,33 @@ class OpenAICompatibleClient:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+        estimated_input = self.context_estimator.estimate(
+            json.dumps(
+                {"messages": payload["messages"], "tools": payload.get("tools", [])},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return PreparedOutboundRequest(
+            payload_json=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            estimated_input_tokens=estimated_input,
+        )
+
+    async def send_prepared(
+        self,
+        prepared: PreparedOutboundRequest,
+    ) -> AsyncIterator[dict[str, Any]]:
+        if not self.api_key:
+            yield {
+                "type": "error",
+                "error": RuntimeError(
+                    "PAICLI_API_KEY is not configured. Set it in env, ~/.paicli/config.json, "
+                    "or project .paicli/config.json."
+                ),
+            }
+            return
+
+        payload = prepared.payload
 
         headers = {
             "authorization": f"Bearer {self.api_key}",
@@ -100,19 +129,14 @@ class OpenAICompatibleClient:
         last_context_update = time.monotonic()
         provider_usage_received = False
         if context_scope:
-            estimated_input = self.context_estimator.estimate(
-                json.dumps(
-                    {"messages": payload["messages"], "tools": payload.get("tools", [])},
-                    ensure_ascii=False,
-                    sort_keys=True,
-                )
-            )
+            estimated_input = prepared.estimated_input_tokens
             yield self._context_usage_payload(
                 state="active",
                 scope=context_scope,
                 estimated=True,
                 input_tokens=estimated_input,
                 request_id=logical_call_id,
+                prepared=prepared,
             )
         visible_stream_started = False
         message_started = False
@@ -192,6 +216,7 @@ class OpenAICompatibleClient:
                                     output_tokens=actual_output,
                                     cached_tokens=int(usage.get("cached_tokens") or 0),
                                     request_id=logical_call_id,
+                                    prepared=prepared,
                                 )
                             elif (
                                 context_scope
@@ -209,6 +234,7 @@ class OpenAICompatibleClient:
                                     input_tokens=estimated_input,
                                     output_tokens=estimated_output,
                                     request_id=logical_call_id,
+                                    prepared=prepared,
                                 )
                                 last_context_update = time.monotonic()
                 if context_scope:
@@ -304,20 +330,25 @@ class OpenAICompatibleClient:
         *,
         state: str,
         scope: str = "agent",
+        quality_budget_tokens: int | None = None,
+        pressure_thresholds: tuple[float, float, float] | None = None,
     ) -> dict[str, Any]:
-        formatted = self._format_messages(messages, system_prompt)
-        estimated_input = self.context_estimator.estimate(
-            json.dumps(
-                {"messages": formatted, "tools": tools},
-                ensure_ascii=False,
-                sort_keys=True,
-            )
+        prepared = self.prepare_request(
+            messages,
+            tools,
+            system_prompt=system_prompt,
         )
+        if quality_budget_tokens is not None:
+            prepared = prepared.with_quality_budget(
+                quality_budget_tokens,
+                pressure_thresholds,
+            )
         return self._context_usage_payload(
             state=state,
             scope=scope,
             estimated=True,
-            input_tokens=estimated_input,
+            input_tokens=prepared.estimated_input_tokens,
+            prepared=prepared,
         )
 
     def _context_usage_payload(
@@ -330,7 +361,9 @@ class OpenAICompatibleClient:
         output_tokens: int = 0,
         cached_tokens: int = 0,
         request_id: str | None = None,
+        prepared: PreparedOutboundRequest | None = None,
     ) -> dict[str, Any]:
+        used_tokens = input_tokens + output_tokens
         event: dict[str, Any] = {
             "type": "context_usage",
             "state": state,
@@ -338,11 +371,23 @@ class OpenAICompatibleClient:
             "estimated": estimated,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
-            "used_tokens": input_tokens + output_tokens,
+            "used_tokens": used_tokens,
             "cached_tokens": cached_tokens,
             "context_window": self.reported_context_window,
             "safety_context_window": self.max_context_window,
         }
+        if prepared and prepared.quality_budget_tokens:
+            pressure_ratio = used_tokens / prepared.quality_budget_tokens
+            event.update(
+                {
+                    "quality_budget_tokens": prepared.quality_budget_tokens,
+                    "pressure_ratio": pressure_ratio,
+                    "pressure_tier": _pressure_tier(
+                        pressure_ratio,
+                        prepared.pressure_thresholds,
+                    ),
+                }
+            )
         if request_id:
             event["request_id"] = request_id
         return event
@@ -476,6 +521,20 @@ def _context_output_fragment(event: dict[str, Any]) -> str:
     if event_type == "tool_call_delta":
         return json.dumps(event.get("tool_call") or {}, ensure_ascii=False, sort_keys=True)
     return ""
+
+
+def _pressure_tier(
+    ratio: float,
+    thresholds: tuple[float, float, float],
+) -> str:
+    tier1, tier2, tier3 = thresholds
+    if ratio < tier1:
+        return "tier0_observe"
+    if ratio < tier2:
+        return "tier1_snip"
+    if ratio < tier3:
+        return "tier2_prune"
+    return "tier3_summary"
 
 
 def _map_finish_reason(reason: str) -> str:
