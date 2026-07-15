@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import glob as glob_module
+import locale
 import os
 import re
 import signal
@@ -123,7 +124,10 @@ def get_builtin_tools() -> list[Tool]:
         ),
         Tool(
             name="bash",
-            description="Execute a shell command in the current workspace.",
+            description=(
+                "Execute a non-interactive shell command in the current workspace. "
+                "Commands cannot read terminal input."
+            ),
             parameters=object_schema(
                 {
                     "command": {"type": "string", "description": "Shell command"},
@@ -140,7 +144,10 @@ def get_builtin_tools() -> list[Tool]:
         ),
         Tool(
             name="execute_command",
-            description="Alias of bash. Execute a shell command in the current workspace.",
+            description=(
+                "Alias of bash. Execute a non-interactive shell command in the current "
+                "workspace. Commands cannot read terminal input."
+            ),
             parameters=object_schema(
                 {
                     "command": {"type": "string", "description": "Shell command"},
@@ -385,6 +392,7 @@ async def bash(payload: dict[str, Any], context: ToolContext) -> ToolResult:
     proc = await asyncio.create_subprocess_shell(
         command,
         cwd=context.cwd,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=os.environ.copy(),
@@ -399,13 +407,42 @@ async def bash(payload: dict[str, Any], context: ToolContext) -> ToolResult:
         if context.cancellation_check and proc.returncode is None:
             await _stop_process_tree(proc)
         raise
-    output = (stdout + stderr).decode("utf-8", errors="replace")
+    output = _decode_shell_output(stdout + stderr)
     if len(output) > 20_000:
         output = output[:20_000] + "\n... [truncated]"
     return ToolResult(
         output or f"(exit {proc.returncode}, no output)",
         is_error=proc.returncode != 0,
     )
+
+
+def _decode_shell_output(data: bytes) -> str:
+    """Decode shell bytes without corrupting localized Windows output."""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        if os.name != "nt":
+            return data.decode("utf-8", errors="replace")
+
+    encodings: list[str] = []
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        for getter_name in ("GetConsoleOutputCP", "GetOEMCP"):
+            code_page = getattr(kernel32, getter_name)()
+            if code_page:
+                encodings.append(f"cp{code_page}")
+    except (AttributeError, OSError):
+        pass
+    encodings.append(locale.getpreferredencoding(False))
+
+    for encoding in dict.fromkeys(encodings):
+        try:
+            return data.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return data.decode(encodings[-1], errors="replace")
 
 
 async def _stop_process_tree(proc: asyncio.subprocess.Process) -> None:
@@ -500,7 +537,9 @@ async def save_memory(payload: dict[str, Any], context: ToolContext) -> ToolResu
         return ToolResult("保存长期记忆失败: fact 不能为空", is_error=True)
     scope = "global" if str(payload.get("scope") or "").lower() == "global" else "project"
     manager = MemoryManager(context.config.memory.long_term_path, project_path=context.cwd)
-    result = await manager.save_with_classification(fact, scope=scope, llm_client=context.llm_client)
+    result = await manager.save_with_classification(
+        fact, scope=scope, llm_client=context.llm_client
+    )
     if result.status == "pending":
         return ToolResult(f"Created pending memory change: {result.change_id}")
     if result.status == "duplicate":

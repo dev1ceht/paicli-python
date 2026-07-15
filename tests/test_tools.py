@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from threading import Event
 
 import pytest
@@ -12,6 +13,60 @@ from paicli.retry import RetryPolicy
 from paicli.tools import ToolRegistry, get_builtin_tools
 from paicli.tools.base import Tool, ToolContext, ToolResult
 from paicli.tools.executor import ToolExecutor
+
+
+def test_bash_cannot_read_textual_terminal_input(tmp_path, monkeypatch):
+    config = load_config(project_root=tmp_path)
+    config.policy.hitl_mode = "never"
+    registry = ToolRegistry()
+    registry.register_all(get_builtin_tools())
+    context = ToolContext(cwd=str(tmp_path), config=config)
+    captured_options = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return b"ok", b""
+
+    async def create_process(_command, **options):
+        captured_options.update(options)
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", create_process)
+
+    async def run():
+        tool = registry.get("bash")
+        assert tool
+        return await tool.execute({"command": "date"}, context)
+
+    result = asyncio.run(run())
+
+    assert result.content == "ok"
+    assert captured_options["stdin"] is asyncio.subprocess.DEVNULL
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows shell encoding regression")
+def test_bash_decodes_windows_shell_output_without_replacement_characters(tmp_path):
+    config = load_config(project_root=tmp_path)
+    config.policy.hitl_mode = "never"
+    registry = ToolRegistry()
+    registry.register_all(get_builtin_tools())
+    context = ToolContext(cwd=str(tmp_path), config=config)
+    command = (
+        f'"{sys.executable}" -c "import sys;'
+        "sys.stdout.buffer.write(bytes.fromhex('b5b1c7b0c8d5c6da'))\""
+    )
+
+    async def run():
+        tool = registry.get("bash")
+        assert tool
+        return await tool.execute({"command": command}, context)
+
+    result = asyncio.run(run())
+
+    assert result.content == "当前日期"
+    assert "\ufffd" not in result.content
 
 
 def test_read_write_file_tool(tmp_path, monkeypatch):
