@@ -275,21 +275,21 @@ def test_command_input_grows_with_multiline_draft_and_resets_after_submit():
     asyncio.run(run())
 
 
-def test_startup_banner_recedes_in_place_after_first_submission():
+def test_startup_banner_keeps_its_adaptive_height_after_first_submission():
     async def run() -> None:
         app = PaiCliApp(cwd=".")
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.pause()
             banner = app.query_one(StartupBanner)
-
-            assert banner.is_receded is False
+            original_height = banner.size.height
+            original_text = banner.plain_text
 
             app._submit_message("/help")
             await pilot.pause()
 
             assert app.query_one(StartupBanner) is banner
-            assert banner.is_receded is True
-            assert "PAICLI" in banner.plain_text
+            assert banner.size.height == original_height
+            assert banner.plain_text == original_text
 
     asyncio.run(run())
 

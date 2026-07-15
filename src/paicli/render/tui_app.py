@@ -186,7 +186,6 @@ class PaiCliApp(App):
             return
         if self._agent_running:
             return
-        self.query_one(StartupBanner).recede()
         if message.startswith("/"):
             self._handle_slash_command(message)
         else:

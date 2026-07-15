@@ -37,7 +37,7 @@ A non-empty message or slash command accepted by the focused PaiCLI input field 
 _Avoid_: typing, draft
 
 **Startup banner**:
-The adaptive session introduction displayed when the PaiCLI TUI opens; it presents application identity and current capabilities, then recedes once conversation begins.
+The adaptive session introduction displayed throughout the PaiCLI TUI session; it presents application identity and current capabilities without shrinking after submission.
 _Avoid_: splash screen, chat area
 
 **Restrained Aurora visual language**:

@@ -80,7 +80,7 @@ There is no separate persistent shortcut footer.
 - Replace the large ASCII logo with a single-line wordmark, for example `PAICLI  v0.1.0  —  Ready to build`.
 - Show the active model, provider, HITL mode, capability counts, and workspace in two or three subordinate lines.
 - Use about four to five lines on wide terminals and about three lines at the 80-column baseline.
-- After the first user submission, recede to a one-line session summary.
+- Keep the adaptive banner at its current height after user submissions; it remains three lines at the 80-column baseline and about four lines on wider terminals.
 - The banner must not compete with active conversation content.
 
 ### Conversation canvas
@@ -186,7 +186,7 @@ This iteration provides one default Restrained Aurora theme. Semantic colors and
 
 Implementation should preserve the existing TUI regression suite and add coverage for:
 
-- 80x24 layout and banner collapse;
+- 80x24 layout and persistent adaptive banner height;
 - unboxed assistant output and compact user prompts;
 - activity grouping, completion collapse, and expanded failures;
 - inline approval decisions and retained audit traces;
