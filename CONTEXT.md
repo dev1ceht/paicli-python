@@ -37,8 +37,44 @@ A non-empty message or slash command accepted by the focused PaiCLI input field 
 _Avoid_: typing, draft
 
 **Startup banner**:
-The compact, pre-conversation information area displayed when the PaiCLI TUI opens; it presents application identity and current session capabilities.
+The adaptive session introduction displayed when the PaiCLI TUI opens; it presents application identity and current capabilities, then recedes once conversation begins.
 _Avoid_: splash screen, chat area
+
+**Restrained Aurora visual language**:
+PaiCLI's calm, professional terminal aesthetic: neutral dark surfaces carry content, while Aurora green, cyan, purple, yellow, and red are reserved for focus, state, and key actions.
+_Avoid_: cyberpunk theme, neon-heavy UI, decorative color
+
+**Aurora semantic colors**:
+The fixed status vocabulary within the restrained Aurora visual language: cyan means focus or active work, green success, blue user input, purple reasoning or planning, yellow warning or approval, and red error or high risk.
+_Avoid_: decorative accents, role-dependent recoloring, rainbow status
+
+**Terminal-safe status glyph**:
+A single-cell Unicode status symbol with a textual label and an ASCII fallback, chosen to preserve alignment across supported terminals and fonts.
+_Avoid_: emoji status icon, color-only status, decorative symbol
+
+**Conversation canvas**:
+The primary reading surface where assistant output appears as unboxed content and each user submission appears as a compact, subordinate prompt block.
+_Avoid_: message-card stack, chat bubbles, transcript panel
+
+**Conversation follow mode**:
+The automatic tracking of new conversation output while the user remains at the bottom of the canvas; manual history navigation suspends tracking until the user explicitly returns.
+_Avoid_: forced auto-scroll, scroll lock, sticky bottom
+
+**Activity rail**:
+The compact chronological group of Agent thinking and tool activity, where active events remain visible, completed events recede to expandable summaries, and failures remain exposed.
+_Avoid_: tool-card stack, execution log, debug console
+
+**Command dock**:
+The bottom interaction area combining an adaptive message input with PaiCLI's persistent one-line operational status; it excludes a separate shortcut footer.
+_Avoid_: input bar, command prompt, footer stack
+
+**Inline approval request**:
+A blocking safety decision presented inside the current activity rail, retaining its resolved outcome as a compact audit trace without navigating away from the conversation canvas.
+_Avoid_: approval screen, confirmation dialog, warning popup
+
+**Inline plan review**:
+A blocking plan decision presented inside the conversation canvas, where the user can inspect, supplement, execute, or cancel a plan without navigating away from its surrounding context.
+_Avoid_: plan screen, plan dialog, full-screen review
 
 **MCP server**:
 A configured external Model Context Protocol service, regardless of how many capabilities it exposes to PaiCLI.
@@ -83,6 +119,34 @@ _Avoid_: compression works, token savings alone, scripted cost win
 **Scripted context-cost evaluation**:
 A context-management evaluation in which a scripted model replays fixed tool calls while PaiCLI executes them in an isolated fixture copy. Its token measurements are estimated proxies, not provider billing telemetry.
 _Avoid_: pure event replay, real-cost evaluation
+
+**Coding benchmark task**:
+An isolated repository-level coding problem with a stated goal and an independent correctness check.
+_Avoid_: unit test, fixture, prompt
+
+**Benchmark fixture**:
+The version-controlled starting repository for a coding benchmark task, copied into an isolated workspace for each attempt so the source remains unchanged.
+_Avoid_: live workspace, task manifest, verifier
+
+**Public benchmark test**:
+A task test available inside the Agent workspace to support diagnosis and iteration; it provides development feedback but does not alone determine task correctness.
+_Avoid_: acceptance test, verifier, quality gate
+
+**Acceptance verifier**:
+The authoritative correctness check executed outside the Agent workspace against the Agent's resulting change, using validation material the Agent could neither inspect nor modify during the attempt.
+_Avoid_: public test, self-verification, Agent test run
+
+**Coding benchmark attempt**:
+One execution of PaiCLI against a coding benchmark task, producing a workspace change, an Agent response, execution evidence, and a verification outcome.
+_Avoid_: test run, chat session, evaluation task
+
+**Local verification benchmark**:
+A coding benchmark whose task repository and correctness check run entirely in a controlled local environment, used as the first end-to-end gate for the shared coding-evaluation protocol.
+_Avoid_: unit-test suite, scripted context-cost evaluation, official benchmark
+
+**Production-path benchmark execution**:
+A coding benchmark attempt that uses the same Agent orchestration and safety boundaries as normal PaiCLI use, while allowing benchmark-specific configuration and a controlled model client.
+_Avoid_: benchmark Agent, test-only loop, simulated Agent
 
 **Context-reduction variant**:
 One controlled context-handling policy used for every run of the same benchmark task: full history, deterministic compaction, or LLM-handoff compaction.
