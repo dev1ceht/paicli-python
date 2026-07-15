@@ -129,6 +129,20 @@ HELP_LINES = [
     "/snapshot status - 查看 Side-Git 快照状态",
     "/snapshot clean - 清理当前项目快照",
     "/restore <snapshot-id-or-index> - 恢复到指定快照",
+    "",
+    "快捷键：",
+    "  Enter       - 发送消息",
+    "  Shift+Enter - 换行",
+    "  Ctrl+C      - 中断运行中任务 / 空闲时退出",
+    "  Ctrl+Q      - 立即退出",
+    "  Ctrl+L      - 清屏",
+    "  Ctrl+Y      - 切换 HITL / YOLO",
+    "  Ctrl+End    - 返回最新消息并恢复跟随",
+    "  Up/Down     - 历史浏览",
+    "  Tab         - 补全 slash 命令",
+    "",
+    "内联审批：Y 批准 / N 拒绝 / A 本会话允许 / S 跳过",
+    "内联计划：Enter 执行 / Ctrl+O 展开 / I 补充 / Esc 取消",
 ]
 
 
@@ -646,7 +660,9 @@ async def _memory_command(arg: str, console: Console, cwd: str, config: PaiCliCo
         console.print(manager.status())
         console.print(f"Current project: {manager.project_path}")
         console.print(
-            "/memory list | /memory search <query> | /memory delete <id> | /memory clear | /memory pending | /memory apply <id> | /memory reject <id>"
+            "/memory list | /memory search <query> | /memory delete <id> | "
+            "/memory clear | /memory pending | /memory apply <id> | "
+            "/memory reject <id>"
         )
     elif sub == "list":
         rows = manager.list(limit=50)

@@ -14,19 +14,19 @@ from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Footer, TextArea
+from textual.widgets import TextArea
 
 from paicli.context.telemetry import ContextUsageState, rounded_context_percent
+from paicli.render._common import format_cost, format_elapsed, format_tokens
 from paicli.render.textual_widgets import (
     ChatLog,
+    CommandInput,
     InputBar,
     StartupBanner,
     StatusBar,
-    format_cost,
-    format_elapsed,
-    format_tokens,
+    status_glyph,
 )
-from paicli.render.tui_dialogs import ApprovalScreen, PlanReviewScreen
+from paicli.render.tui_dialogs import InlineApprovalRequest, InlinePlanReview
 from paicli.render.tui_events import UiEvent
 
 
@@ -56,6 +56,7 @@ class PaiCliApp(App):
         Binding("ctrl+q", "quit", "Quit", show=True),
         Binding("ctrl+l", "clear_screen", "Clear", show=True),
         Binding("ctrl+y", "toggle_hitl", "Toggle HITL", show=True, priority=True),
+        Binding("ctrl+end", "follow_latest", "Latest", show=False, priority=True),
     ]
 
     def __init__(
@@ -114,9 +115,8 @@ class PaiCliApp(App):
 
     def compose(self) -> ComposeResult:
         yield ChatLog(id="chat-log")
-        yield StatusBar(id="status-bar")
         yield InputBar(id="input-bar")
-        yield Footer()
+        yield StatusBar(id="status-bar")
 
     def on_mount(self) -> None:
         self.title = f"PaiCLI — {self.cwd}"
@@ -139,7 +139,7 @@ class PaiCliApp(App):
         provider = self._provider or (self.config.llm.provider if self.config else "unknown")
         hitl_text = self._hitl_banner_text()
         counts = self._startup_capability_counts()
-        chat_log.mount(
+        chat_log.add_startup_banner(
             StartupBanner(
                 version=version,
                 model=model,
@@ -186,6 +186,7 @@ class PaiCliApp(App):
             return
         if self._agent_running:
             return
+        self.query_one(StartupBanner).recede()
         if message.startswith("/"):
             self._handle_slash_command(message)
         else:
@@ -385,12 +386,20 @@ class PaiCliApp(App):
         elif event_type == "retry":
             chat_log = self.query_one("#chat-log", ChatLog)
             target = payload.get("tool_name") or payload.get("model") or ""
-            chat_log.add_info(
-                f"[yellow]Retrying {payload.get('scope', 'call')} {target} "
-                f"({payload.get('attempt')}/{payload.get('max_retries')}) "
-                f"after {float(payload.get('delay') or 0):.2f}s "
-                f"[{payload.get('error_kind', 'unknown')}][/yellow]"
+            grouped = bool(target) and chat_log.record_tool_retry(
+                str(target),
+                attempt=int(payload.get("attempt") or 0),
+                max_retries=int(payload.get("max_retries") or 0),
+                error_kind=str(payload.get("error_kind") or "unknown"),
+                delay=float(payload.get("delay") or 0),
             )
+            if not grouped:
+                chat_log.add_info(
+                    f"[yellow]Retrying {payload.get('scope', 'call')} {target} "
+                    f"({payload.get('attempt')}/{payload.get('max_retries')}) "
+                    f"after {float(payload.get('delay') or 0):.2f}s "
+                    f"[{payload.get('error_kind', 'unknown')}][/yellow]"
+                )
         elif event_type == "retry_exhausted":
             chat_log = self.query_one("#chat-log", ChatLog)
             target = payload.get("tool_name") or payload.get("model") or ""
@@ -445,7 +454,7 @@ class PaiCliApp(App):
             self._phase = "plan"
             chat_log = self.query_one("#chat-log", ChatLog)
             chat_log.add_info(
-                "[bold cyan]\U0001f4cb \u4f7f\u7528 Plan-and-Execute \u6a21\u5f0f[/bold cyan]"
+                f"[bold #c084fc]{status_glyph('plan')} 使用 Plan-and-Execute 模式[/bold #c084fc]"
             )
             chat_log.add_info(f"  \u6b63\u5728\u89c4\u5212\u4efb\u52a1: {payload.get('goal')}")
         elif event_type == "plan_thinking":
@@ -469,7 +478,7 @@ class PaiCliApp(App):
                 "  [bold]Enter[/bold]  \u6309\u5f53\u524d\u8ba1\u5212\u6267\u884c\n"
                 "  [bold]Ctrl+O[/bold] \u5c55\u5f00\u5b8c\u6574\u8ba1\u5212\n"
                 "  [bold]ESC[/bold]    \u6298\u53e0\u6216\u53d6\u6d88\u672c\u6b21\u8ba1\u5212\n"
-                "  [bold]I[/bold]      \u8f93\u5165\u8865\u5145\u8981\u6c42\u540e\u91cd\u65b0\u89c4\u5212"
+                "  [bold]I[/bold]      输入补充要求后重新规划"
             )
         elif event_type == "plan_cancelled":
             self._flush_thinking()
@@ -477,17 +486,13 @@ class PaiCliApp(App):
             self._phase = "idle"
             self._record_run_summary({})
             chat_log = self.query_one("#chat-log", ChatLog)
-            chat_log.add_info(
-                "[yellow]\u23f9\ufe0f \u5df2\u53d6\u6d88\u672c\u6b21\u8ba1\u5212\u6267\u884c\u3002[/yellow]"
-            )
+            chat_log.add_info(f"[yellow]{status_glyph('idle')} 已取消本次计划执行。[/yellow]")
         elif event_type == "plan_started":
             self._flush_thinking()
             self._flush_text("Assistant Output")
             self._phase = "plan"
             chat_log = self.query_one("#chat-log", ChatLog)
-            chat_log.add_info(
-                "[bold green]\U0001f680 \u5f00\u59cb\u6267\u884c\u8ba1\u5212...[/bold green]"
-            )
+            chat_log.add_info(f"[bold cyan]{status_glyph('running')} 开始执行计划...[/bold cyan]")
         elif event_type == "plan_aggregate_result":
             chat_log = self.query_one("#chat-log", ChatLog)
             completed = payload.get("completed") or {}
@@ -504,7 +509,7 @@ class PaiCliApp(App):
             self._record_run_summary({})
             chat_log = self.query_one("#chat-log", ChatLog)
             chat_log.add_info(
-                "[bold green]\n\u2705 \u8ba1\u5212\u6267\u884c\u5b8c\u6210\uff01[/bold green]"
+                f"[bold green]\n{status_glyph('success')} 计划执行完成！[/bold green]"
             )
             results = payload.get("results") or {}
             if results:
@@ -516,7 +521,7 @@ class PaiCliApp(App):
             self._record_run_summary({})
             detail = payload.get("error") or payload.get("failed")
             chat_log = self.query_one("#chat-log", ChatLog)
-            chat_log.add_info(f"[bold red]\u274c \u8ba1\u5212\u5931\u8d25:[/bold red] {detail}")
+            chat_log.add_info(f"[bold red]{status_glyph('error')} 计划失败:[/bold red] {detail}")
             results = payload.get("results") or {}
             if results:
                 chat_log.add_info(f"[dim]部分完成: {len(results)} 个任务[/dim]")
@@ -528,7 +533,7 @@ class PaiCliApp(App):
             self._flush_text("Assistant Output")
             chat_log = self.query_one("#chat-log", ChatLog)
             chat_log.add_info(
-                f"[yellow]\u26a0\ufe0f \u8ba1\u5212\u6267\u884c\u5931\u8d25 "
+                f"[yellow]! 计划执行失败 "
                 f"(\u8fdb\u5ea6: {payload.get('progress', '?')})[/yellow]\n"
                 f"[dim]\u5931\u8d25\u539f\u56e0: {payload.get('failure_reason', '?')}[/dim]\n"
                 f"[yellow]\u662f\u5426\u91cd\u65b0\u89c4\u5212\u5269\u4f59\u4efb\u52a1\uff1f[/yellow]"
@@ -544,7 +549,7 @@ class PaiCliApp(App):
             self._task_thinking_buffers[task_id] = []
             chat_log = self.query_one("#chat-log", ChatLog)
             chat_log.add_info(
-                f"\u25b6\ufe0f [bold #60a5fa]\u6267\u884c\u4efb\u52a1:[/bold #60a5fa] "
+                f"{status_glyph('running')} [bold #60d8ff]执行任务:[/bold #60d8ff] "
                 f"{task_id} [dim][{task_type}][/dim]"
             )
         elif event_type == "task_completed":
@@ -553,19 +558,19 @@ class PaiCliApp(App):
             duration_str = f" ({format_elapsed(duration)})" if duration else ""
             self._flush_task_output(task_id)
             chat_log = self.query_one("#chat-log", ChatLog)
-            chat_log.add_info(f"\u2705 [green]\u5b8c\u6210[/green] {task_id}{duration_str}")
+            chat_log.add_info(
+                f"{status_glyph('success')} [green]完成[/green] {task_id}{duration_str}"
+            )
         elif event_type == "task_failed":
             task_id = ui_event.task_id
             self._flush_task_output(task_id)
             chat_log = self.query_one("#chat-log", ChatLog)
             chat_log.add_info(
-                f"\u274c [red]\u4efb\u52a1\u5931\u8d25:[/red] {task_id} {payload.get('error')}"
+                f"{status_glyph('error')} [red]任务失败:[/red] {task_id} {payload.get('error')}"
             )
         elif event_type == "task_skipped":
             chat_log = self.query_one("#chat-log", ChatLog)
-            chat_log.add_info(
-                f"\u23ed\ufe0f [yellow]\u4efb\u52a1\u8df3\u8fc7:[/yellow] {ui_event.task_id}"
-            )
+            chat_log.add_info(f"> [yellow]任务跳过:[/yellow] {ui_event.task_id}")
         elif event_type == "task_blocked":
             chat_log = self.query_one("#chat-log", ChatLog)
             chat_log.add_info(
@@ -628,7 +633,7 @@ class PaiCliApp(App):
         before = event.get("before")
         after = event.get("after")
         chat_log = self.query_one("#chat-log", ChatLog)
-        chat_log.add_info(f"\U0001f4dd {file_path}", style="bold cyan")
+        chat_log.add_info(f"> {file_path}", style="bold cyan")
         if before is None:
             # New file: all additions
             lines = (after or "").splitlines()
@@ -773,9 +778,7 @@ class PaiCliApp(App):
             has_usage = self._last_has_usage
             context_ratio = self._last_context_ratio
             used_tokens = self._last_input_tokens if has_usage else 0
-            context_percent = (
-                f"{rounded_context_percent(context_ratio)}%" if has_usage else "0%"
-            )
+            context_percent = f"{rounded_context_percent(context_ratio)}%" if has_usage else "0%"
             if self._context_window > 0:
                 context_text = (
                     f"ctx {format_tokens(used_tokens)}/"
@@ -799,8 +802,7 @@ class PaiCliApp(App):
                 else ""
             )
             status_bar.pressure_text = (
-                f"pressure {pressure_marker}"
-                f"{rounded_context_percent(float(pressure_ratio))}%"
+                f"pressure {pressure_marker}{rounded_context_percent(float(pressure_ratio))}%"
             )
 
         token_detail = ""
@@ -818,9 +820,7 @@ class PaiCliApp(App):
                 parts.append(f"cached:{format_tokens(cached)}")
             token_detail = " ".join(parts)
         elif self._last_has_usage:
-            last_prefix = (
-                "last " if reading_state == "retained" or self._phase == "idle" else ""
-            )
+            last_prefix = "last " if reading_state == "retained" or self._phase == "idle" else ""
             parts = [
                 f"{last_prefix}in:{format_tokens(self._last_input_tokens)}",
                 f"out:{format_tokens(self._last_output_tokens)}",
@@ -841,6 +841,10 @@ class PaiCliApp(App):
     def action_clear_screen(self) -> None:
         chat_log = self.query_one("#chat-log", ChatLog)
         chat_log.clear_conversation()
+
+    def action_follow_latest(self) -> None:
+        """Return to the newest conversation activity."""
+        self.query_one("#chat-log", ChatLog).resume_following()
 
     def action_toggle_hitl(self) -> None:
         """Toggle between default approval and explicit unattended mode."""
@@ -864,7 +868,7 @@ class PaiCliApp(App):
             self._worker = None
             self._context_usage.apply({"type": "context_scope_clear", "scope": "agent"})
             chat_log = self.query_one("#chat-log", ChatLog)
-            chat_log.add_info("[yellow]⚠️ Agent interrupted[/yellow]")
+            chat_log.add_info("[yellow]! Agent interrupted[/yellow]")
             input_area = self.query_one(TextArea)
             input_area.disabled = False
             input_area.focus()
@@ -878,46 +882,6 @@ class PaiCliApp(App):
         from paicli.entrypoints.repl import help_text
 
         return help_text()
-        return "\n".join(
-            [
-                "可用命令：",
-                "/help - 查看命令帮助",
-                "/exit - 退出 PaiCLI",
-                "/clear - 清空当前会话历史",
-                "/context - 查看当前上下文状态",
-                "/memory - 查看记忆系统状态",
-                "/save <事实> - 保存项目级长期记忆",
-                "/memory pending - 查看待确认的记忆变更",
-                "/memory apply <id> - 确认待处理记忆变更",
-                "/memory reject <id> - 拒绝待处理记忆变更",
-                "/config - 查看当前配置",
-                "/tools - 查看可用工具",
-                "/model - 查看当前模型",
-                "/model <模型名> - 切换当前模型名",
-                "/plan <任务内容> - 用计划模式执行",
-                "/team <任务内容> - 用多 Agent 协作执行",
-                "/hitl on|off - 切换 HITL 审批",
-                "/policy - 查看安全策略",
-                "/audit [N] - 查看审计记录",
-                "/index [path] - 索引代码库",
-                "/search <查询> - 搜索本地代码索引",
-                "/mcp - 查看 MCP server 状态",
-                "/skill - 查看可用 Skill",
-                "/browser - 查看浏览器会话状态",
-                "/task - 查看后台任务列表",
-                "/snapshot - 查看快照",
-                "/restore <id> - 恢复到指定快照",
-                "",
-                "快捷键：",
-                "  Enter       - 发送消息",
-                "  Shift+Enter - 换行",
-                "  Ctrl+C      - 中断运行中任务 / 空闲时退出",
-                "  Ctrl+Q      - 立即退出",
-                "  Ctrl+L      - 清屏",
-                "  Up/Down     - 历史浏览",
-                "  Tab         - 补全 slash 命令",
-            ]
-        )
 
     def _show_context(self, chat_log: ChatLog) -> None:
         if not self.agent:
@@ -936,8 +900,7 @@ class PaiCliApp(App):
                 return f"{marker}{used}/?"
             ratio = int(reading.get("used_tokens") or 0) / int(window)
             return (
-                f"{marker}{used}/{format_tokens(int(window))} "
-                f"({rounded_context_percent(ratio)}%)"
+                f"{marker}{used}/{format_tokens(int(window))} ({rounded_context_percent(ratio)}%)"
             )
 
         lines = [
@@ -955,9 +918,7 @@ class PaiCliApp(App):
             self._context_usage.active.values(),
             key=lambda item: str(item.get("scope") or ""),
         ):
-            lines.append(
-                f"  {reading.get('scope') or 'request'}: {format_reading(reading)}"
-            )
+            lines.append(f"  {reading.get('scope') or 'request'}: {format_reading(reading)}")
         if self._context_usage.active:
             lines.append(f"max: {format_reading(self._context_usage.current)}")
 
@@ -1309,16 +1270,27 @@ class PaiCliApp(App):
         *,
         can_replan: bool = False,
     ) -> Any:
-        """Push a PlanReviewScreen and return the user's PlanReviewDecision."""
-        screen = PlanReviewScreen(plan, can_replan=can_replan)
-        result = await self.push_screen_wait(screen)
-        return result
+        """Wait for a plan decision embedded in the conversation canvas."""
+        review = InlinePlanReview(plan, can_replan=can_replan)
+        return await self._wait_for_inline_decision(review)
 
     async def request_approval(self, request: dict[str, Any]) -> str:
-        """Push an ApprovalScreen and return the decision string."""
-        screen = ApprovalScreen(request)
-        result = await self.push_screen_wait(screen)
-        return result
+        """Wait for a safety decision embedded in the conversation canvas."""
+        approval = InlineApprovalRequest(request)
+        return await self._wait_for_inline_decision(approval)
+
+    async def _wait_for_inline_decision(self, decision_widget: Any) -> Any:
+        """Own the shared input and focus lifecycle for an inline decision."""
+        chat_log = self.query_one("#chat-log", ChatLog)
+        input_area = self.query_one(CommandInput)
+        input_area.disabled = True
+        chat_log.add_inline_decision(decision_widget)
+        self.call_after_refresh(lambda: decision_widget.focus(scroll_visible=False))
+        try:
+            return await decision_widget.wait()
+        finally:
+            input_area.disabled = False
+            self.call_after_refresh(lambda: input_area.focus(scroll_visible=False))
 
     def run_plan_task(self, message: str) -> None:
         """Launch a plan-and-execute loop via the TUI's native modal flow."""

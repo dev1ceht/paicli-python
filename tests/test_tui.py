@@ -4,18 +4,24 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+from rich.panel import Panel
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Static, TextArea
+from textual.widgets import Footer, Static, TextArea
 
 from paicli.config import PaiCliConfig
 from paicli.render.history import PromptHistory
 from paicli.render.textual_widgets import (
+    ActivityRail,
     ChatLog,
     CommandInput,
+    InputBar,
+    MessageBlock,
     StartupBanner,
     StatusBar,
+    ThinkingBlock,
     ToolCard,
+    status_glyph,
 )
 from paicli.render.tui_app import PaiCliApp
 
@@ -67,13 +73,14 @@ def test_tui_renders_compact_full_width_startup_banner(monkeypatch):
             await pilot.pause()
             banner = app.query_one(StartupBanner)
 
-            assert "ＰａｉＣＬＩ\nv0.1.0" in banner.plain_text
+            assert "PAICLI  v0.1.0" in banner.plain_text
             assert "Ready to build" in banner.plain_text
             assert "Tools: 1" in banner.plain_text
             assert "Skills: 1" in banner.plain_text
             assert "MCP: 1 servers" in banner.plain_text
             assert "D:/project/PaiCLI-Python" in banner.plain_text
             assert "/help commands" in banner.plain_text
+            assert len(banner.plain_text.splitlines()) <= 5
 
     asyncio.run(run())
 
@@ -226,6 +233,67 @@ def test_tui_starts_with_the_agent_base_context_estimate():
     asyncio.run(run())
 
 
+def test_command_dock_has_no_persistent_shortcut_footer():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+
+            assert len(app.query(Footer)) == 0
+            assert app.query_one(StatusBar).styles.height.value == 1
+            children = list(app.screen.children)
+            assert children.index(app.query_one(InputBar)) < children.index(
+                app.query_one(StatusBar)
+            )
+
+    asyncio.run(run())
+
+
+def test_command_input_grows_with_multiline_draft_and_resets_after_submit():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            command_input = app.query_one(CommandInput)
+            input_bar = app.query_one(InputBar)
+
+            assert command_input.size.height == 2
+            assert len(input_bar.query("Label")) == 0
+
+            await pilot.press("shift+enter", "shift+enter", "shift+enter")
+            await pilot.pause()
+
+            assert command_input.size.height == 4
+            assert input_bar.size.height == 4
+
+            command_input.load_text("/help")
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert command_input.size.height == 2
+
+    asyncio.run(run())
+
+
+def test_startup_banner_recedes_in_place_after_first_submission():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            banner = app.query_one(StartupBanner)
+
+            assert banner.is_receded is False
+
+            app._submit_message("/help")
+            await pilot.pause()
+
+            assert app.query_one(StartupBanner) is banner
+            assert banner.is_receded is True
+            assert "PAICLI" in banner.plain_text
+
+    asyncio.run(run())
+
+
 def test_tui_distinguishes_live_estimates_from_last_actual_usage():
     async def run() -> None:
         app = PaiCliApp(cwd=".")
@@ -345,7 +413,9 @@ def test_tui_help_renders_literal_bracketed_arguments():
             await pilot.press("enter")
             await pilot.pause()
 
-            assert "/index [path]" in app.query_one(ChatLog).renderable_text()
+            rendered = app.query_one(ChatLog).renderable_text()
+            assert "/index [path]" in rendered
+            assert "Ctrl+End" in rendered
 
     asyncio.run(run())
 
@@ -646,6 +716,7 @@ def test_tool_success_card_collapses_after_result():
             assert card.status == "success"
             assert card.is_expanded is False
             assert card.output_text == "ok"
+            assert "Success" in card.plain_text
 
     asyncio.run(run())
 
@@ -654,7 +725,7 @@ def test_tool_error_card_stays_expanded_and_retains_full_result():
     async def run() -> None:
         app = PaiCliApp(cwd=".")
         async with app.run_test(size=(80, 24)) as pilot:
-            result = "x" * 5000
+            result = "Permission denied: a.py\n" + "x" * 5000
             app.handle_event({"type": "tool_call", "name": "read_file", "input": {"path": "a.py"}})
             app.handle_event(
                 {
@@ -670,6 +741,8 @@ def test_tool_error_card_stays_expanded_and_retains_full_result():
             assert card.status == "error"
             assert card.is_expanded is True
             assert card.output_text == result
+            assert card.error_summary == "Permission denied: a.py"
+            assert card.has_class("tool-error")
 
     asyncio.run(run())
 
@@ -824,6 +897,144 @@ def test_command_input_handles_enter_only_while_focused_and_keeps_shift_enter_ne
     asyncio.run(run())
 
 
+def test_conversation_follow_mode_preserves_history_position_until_resumed():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(80, 12)) as pilot:
+            chat_log = app.query_one(ChatLog)
+            for index in range(20):
+                chat_log.add_info(f"history {index}")
+            await pilot.pause()
+            chat_log.scroll_end(animate=False)
+            await pilot.pause()
+
+            chat_log.scroll_to(y=0, animate=False)
+            await pilot.pause()
+            assert chat_log.is_vertical_scroll_end is False
+
+            chat_log.add_info("new activity")
+            await pilot.pause()
+
+            assert chat_log.scroll_y == 0
+            assert chat_log.new_activity_pending is True
+
+            chat_log.scroll_end(animate=False, immediate=True)
+            await pilot.pause()
+
+            assert chat_log.is_vertical_scroll_end is True
+            assert chat_log.new_activity_pending is False
+
+    asyncio.run(run())
+
+
+def test_tool_retries_are_grouped_into_the_running_activity():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.handle_event({"type": "tool_call", "name": "read_file", "input": {"path": "a.py"}})
+            app.handle_event(
+                {
+                    "type": "retry",
+                    "scope": "tool",
+                    "tool_name": "read_file",
+                    "attempt": 1,
+                    "max_retries": 3,
+                    "delay": 0.25,
+                    "error_kind": "timeout",
+                }
+            )
+            await pilot.pause()
+
+            card = app.query_one(ToolCard)
+            assert card.retry_count == 1
+            assert "retry 1/3" in card.plain_text
+            assert len(app.query(ActivityRail)) == 1
+
+    asyncio.run(run())
+
+
+def test_thinking_and_consecutive_tool_work_share_one_activity_rail():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.handle_event({"type": "thinking_delta", "thinking": "inspect structure"})
+            app.handle_event({"type": "tool_call", "name": "read_file", "input": {"path": "a.py"}})
+            app.handle_event(
+                {"type": "tool_result", "name": "read_file", "result": "ok", "is_error": False}
+            )
+            await pilot.pause()
+
+            rails = list(app.query(ActivityRail))
+            thinking = app.query_one(ThinkingBlock)
+            tool = app.query_one(ToolCard)
+
+            assert len(rails) == 1
+            assert rails[0].item_count == 2
+            assert thinking.is_expanded is False
+            assert tool.is_expanded is False
+
+    asyncio.run(run())
+
+
+def test_startup_banner_uses_three_rows_at_the_80_column_baseline():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            banner = app.query_one(StartupBanner)
+
+            assert banner.is_compact is True
+            assert banner.size.height == 3
+            assert len(banner.plain_text.splitlines()) == 3
+
+    asyncio.run(run())
+
+
+def test_running_activity_pulse_stops_when_the_activity_completes():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.handle_event({"type": "thinking_delta", "thinking": "inspect"})
+            await pilot.pause()
+            thinking = app.query_one(ThinkingBlock)
+            assert thinking.animation_active is True
+
+            app.handle_event({"type": "tool_call", "name": "read_file", "input": {"path": "a.py"}})
+            await pilot.pause()
+            tool = app.query_one(ToolCard)
+
+            assert thinking.animation_active is False
+            assert tool.animation_active is True
+
+            app.handle_event(
+                {"type": "tool_result", "name": "read_file", "result": "ok", "is_error": False}
+            )
+            await pilot.pause()
+
+            assert tool.animation_active is False
+
+    asyncio.run(run())
+
+
+def test_conversation_canvas_uses_unboxed_assistant_output_and_compact_user_prompt():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            chat_log = app.query_one(ChatLog)
+            chat_log.add_assistant_text("answer")
+            chat_log.add_user_message("question")
+            await pilot.pause()
+
+            assistant, user = list(app.query(MessageBlock))
+
+            assert not isinstance(assistant.render(), Panel)
+            assert not isinstance(user.render(), Panel)
+            assert assistant.has_class("message-assistant")
+            assert user.has_class("message-user")
+
+    asyncio.run(run())
+
+
 def test_command_input_posts_submission_message_on_enter():
     async def run() -> None:
         app = CommandInputHarness()
@@ -916,8 +1127,19 @@ def test_status_bar_render_uses_exact_phase_and_cost_colors():
 
     rendered = status_bar.render()
 
-    assert "[bold #a8ff60]● running[/bold #a8ff60]" in rendered
+    assert "[bold #60d8ff]● running[/bold #60d8ff]" in rendered
     assert "[bold #facc15]$0.1234[/bold #facc15]" in rendered
+
+    status_bar.phase = "plan"
+    assert "[bold #c084fc]◆ plan[/bold #c084fc]" in status_bar.render()
+
+
+def test_status_glyph_uses_single_width_unicode_with_ascii_fallback():
+    assert status_glyph("running", encoding="utf-8") == "●"
+    assert status_glyph("success", encoding="utf-8") == "✓"
+    assert status_glyph("running", encoding="ascii") == "*"
+    assert status_glyph("success", encoding="ascii") == "OK"
+    assert status_glyph("error", encoding="ascii") == "ERR"
 
 
 def test_tui_context_pressure_colors_follow_confirmed_thresholds():
@@ -995,7 +1217,7 @@ def test_plan_review_screen_execute_returns_decision():
                 screen = PlanReviewScreen(plan)
                 result[0] = await app.push_screen_wait(screen)
 
-            worker = app.run_worker(push_and_test)
+            app.run_worker(push_and_test)
 
             # Wait for screen to be pushed and mounted
             await pilot.pause()
@@ -1008,7 +1230,7 @@ def test_plan_review_screen_execute_returns_decision():
                 await pilot.pause()
                 await pilot.pause()
 
-        assert result[0] is not None, f"Result is None"
+        assert result[0] is not None, "Result is None"
         assert result[0].action == "execute"
 
     asyncio.run(run())
@@ -1047,6 +1269,90 @@ def test_approval_screen_approve_returns_approve():
             await pilot.pause()
 
         assert result == "approve"
+
+    asyncio.run(run())
+
+
+def test_app_reviews_plan_inline_without_changing_screen():
+    from paicli.plan import ExecutionPlan, PlanTask, TaskType
+    from paicli.render.tui_dialogs import InlinePlanReview, PlanReviewScreen
+
+    async def run() -> None:
+        plan = ExecutionPlan(
+            tasks=[PlanTask(id="one", description="read file", type=TaskType.FILE_READ)]
+        )
+        app = PaiCliApp(cwd=".")
+        result = None
+
+        async with app.run_test(size=(80, 24)) as pilot:
+
+            async def review() -> None:
+                nonlocal result
+                result = await app.review_plan(plan)
+
+            app.run_worker(review())
+            await pilot.pause()
+            await pilot.pause()
+
+            review_widget = app.query_one(InlinePlanReview)
+            assert not isinstance(app.screen, PlanReviewScreen)
+            assert app.query_one(CommandInput).disabled is True
+            assert "read file" in review_widget.plain_text
+
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert result is not None
+            assert result.action == "execute"
+            assert review_widget.is_resolved is True
+            assert app.query_one(CommandInput).disabled is False
+
+    asyncio.run(run())
+
+
+def test_app_requests_approval_inline_without_changing_screen():
+    from paicli.render.tui_dialogs import ApprovalScreen, InlineApprovalRequest
+
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        result: str | None = None
+
+        async with app.run_test(size=(80, 24)) as pilot:
+            chat_log = app.query_one(ChatLog)
+            for index in range(20):
+                chat_log.add_info(f"history {index}")
+            await pilot.pause()
+            chat_log.scroll_end(animate=False, immediate=True)
+            chat_log.scroll_to(y=0, animate=False)
+            await pilot.pause()
+
+            async def request() -> None:
+                nonlocal result
+                result = await app.request_approval(
+                    {
+                        "tool_name": "write_file",
+                        "danger_level": "write",
+                        "description": "Write a file",
+                        "input": {"path": "a.py", "content": "hello"},
+                    }
+                )
+
+            app.run_worker(request())
+            await pilot.pause()
+            await pilot.pause()
+
+            approval = app.query_one(InlineApprovalRequest)
+            assert not isinstance(app.screen, ApprovalScreen)
+            assert app.query_one(CommandInput).disabled is True
+            assert chat_log.scroll_y == 0
+            assert chat_log.new_activity_pending is True
+
+            await pilot.press("y")
+            await pilot.pause()
+
+            assert result == "approve"
+            assert approval.is_resolved is True
+            assert app.query_one(CommandInput).disabled is False
 
     asyncio.run(run())
 
