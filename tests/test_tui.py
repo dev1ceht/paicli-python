@@ -212,7 +212,74 @@ def test_tui_starts_with_the_agent_base_context_estimate():
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.pause()
 
-            assert app.query_one(StatusBar).context_text == "ctx ~42/1.0k (4%)"
+            status = app.query_one(StatusBar)
+            assert status.context_text == "ctx ~42/1.0k (4%)"
+            assert status.token_detail == ""
+
+    asyncio.run(run())
+
+
+def test_tui_distinguishes_live_estimates_from_last_actual_usage():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+
+            app.handle_event(
+                {
+                    "type": "context_usage",
+                    "state": "retained",
+                    "scope": "agent",
+                    "estimated": True,
+                    "used_tokens": 80,
+                    "input_tokens": 80,
+                    "output_tokens": 0,
+                    "cached_tokens": 0,
+                    "context_window": 1_000,
+                }
+            )
+            app.handle_event(
+                {
+                    "type": "context_usage",
+                    "state": "active",
+                    "request_id": "request-a",
+                    "scope": "agent",
+                    "estimated": True,
+                    "used_tokens": 100,
+                    "input_tokens": 90,
+                    "output_tokens": 10,
+                    "cached_tokens": 0,
+                    "context_window": 1_000,
+                }
+            )
+            status = app.query_one(StatusBar)
+            assert status.token_detail == "in:~90 out:~10"
+
+            app.handle_event(
+                {
+                    "type": "usage",
+                    "usage": {"input_tokens": 120, "output_tokens": 5, "cached_tokens": 40},
+                }
+            )
+            app.handle_event(
+                {
+                    "type": "context_usage",
+                    "state": "active",
+                    "request_id": "request-a",
+                    "scope": "agent",
+                    "estimated": False,
+                    "used_tokens": 125,
+                    "input_tokens": 120,
+                    "output_tokens": 5,
+                    "cached_tokens": 40,
+                    "context_window": 1_000,
+                }
+            )
+            assert status.token_detail == "in:120 out:5 cached:40"
+
+            app.handle_event({"type": "context_request_finished", "request_id": "request-a"})
+            assert status.context_text == "ctx ~80/1.0k (8%)"
+            assert status.token_detail == "last in:120 out:5 cached:40"
 
     asyncio.run(run())
 

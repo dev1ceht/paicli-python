@@ -510,6 +510,62 @@ def test_rich_renderer_toolbar_uses_max_live_context_request():
     assert "ctx max ~200/1.0k (20%) · 2 active" in plain
 
 
+def test_rich_toolbar_distinguishes_idle_baseline_live_estimate_and_last_usage():
+    renderer = RichRenderer(context_window=1_000)
+    renderer.handle(
+        {
+            "type": "context_usage",
+            "state": "retained",
+            "scope": "agent",
+            "estimated": True,
+            "used_tokens": 80,
+            "input_tokens": 80,
+            "output_tokens": 0,
+            "cached_tokens": 0,
+            "context_window": 1_000,
+        }
+    )
+
+    idle_status = renderer.toolbar_status()
+    idle_plain = "".join(
+        text for _style, text in _bottom_toolbar("/tmp/project", "test-model", idle_status)
+    )
+    assert "ctx ~80/1.0k (8%)" in idle_plain
+    assert "· idle" not in idle_plain
+    assert "in " not in idle_plain
+    assert "out " not in idle_plain
+
+    renderer.handle(
+        {
+            "type": "context_usage",
+            "state": "active",
+            "request_id": "request-a",
+            "scope": "agent",
+            "estimated": True,
+            "used_tokens": 100,
+            "input_tokens": 90,
+            "output_tokens": 10,
+            "cached_tokens": 0,
+            "context_window": 1_000,
+        }
+    )
+    active_status = renderer.toolbar_status()
+    active_plain = "".join(
+        text for _style, text in _bottom_toolbar("/tmp/project", "test-model", active_status)
+    )
+    assert "in ~90 out ~10" in active_plain
+
+    renderer.handle({"type": "usage", "usage": {"input_tokens": 120, "output_tokens": 5}})
+    renderer.handle({"type": "context_request_finished", "request_id": "request-a"})
+    finished_status = renderer.toolbar_status()
+    finished_plain = "".join(
+        text for _style, text in _bottom_toolbar("/tmp/project", "test-model", finished_status)
+    )
+    assert "ctx ~80/1.0k (8%)" in finished_plain
+    assert "· idle" not in finished_plain
+    assert "last in 120 out 5" in finished_plain
+
+
 def test_diff_rendering_new_file():
     stream = StringIO()
     console = Console(file=stream, color_system=None, width=120)

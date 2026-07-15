@@ -723,6 +723,7 @@ class PaiCliApp(App):
 
         reading = self._context_usage.current
         if reading is not None:
+            reading_state = str(reading.get("state") or "")
             used_tokens = int(reading.get("used_tokens") or 0)
             context_window = reading.get("context_window")
             estimate_marker = "~" if reading.get("estimated") else ""
@@ -747,7 +748,6 @@ class PaiCliApp(App):
                 context_text = f"{prefix}{estimate_marker}{format_tokens(used_tokens)}/?"
             if self._context_usage.active_count > 1:
                 context_text += f" · {self._context_usage.active_count} active"
-            has_usage = True
         else:
             status_bar.context_level = "neutral"
             has_usage = self._last_has_usage
@@ -767,18 +767,29 @@ class PaiCliApp(App):
         status_bar.pressure_text = f"pressure:{_format_pressure_tier(self._pressure_tier)}"
 
         token_detail = ""
-        if has_usage:
-            if reading is not None:
-                in_tok = int(reading.get("input_tokens") or 0)
-                out_tok = int(reading.get("output_tokens") or 0)
-                cached = int(reading.get("cached_tokens") or 0)
-            else:
-                in_tok = self._last_input_tokens
-                out_tok = self._last_output_tokens
-                cached = self._last_cached_tokens
-            parts = [f"in:{format_tokens(in_tok)}", f"out:{format_tokens(out_tok)}"]
+        reading_state = str(reading.get("state") or "") if reading is not None else ""
+        if reading is not None and reading_state != "retained":
+            in_tok = int(reading.get("input_tokens") or 0)
+            out_tok = int(reading.get("output_tokens") or 0)
+            cached = int(reading.get("cached_tokens") or 0)
+            estimate_marker = "~" if reading.get("estimated") else ""
+            parts = [
+                f"in:{estimate_marker}{format_tokens(in_tok)}",
+                f"out:{estimate_marker}{format_tokens(out_tok)}",
+            ]
             if cached:
                 parts.append(f"cached:{format_tokens(cached)}")
+            token_detail = " ".join(parts)
+        elif self._last_has_usage:
+            last_prefix = (
+                "last " if reading_state == "retained" or self._phase == "idle" else ""
+            )
+            parts = [
+                f"{last_prefix}in:{format_tokens(self._last_input_tokens)}",
+                f"out:{format_tokens(self._last_output_tokens)}",
+            ]
+            if self._last_cached_tokens:
+                parts.append(f"cached:{format_tokens(self._last_cached_tokens)}")
             token_detail = " ".join(parts)
         status_bar.token_detail = token_detail
 
