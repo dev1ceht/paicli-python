@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from paicli.context.telemetry import use_context_scope
 from paicli.llm.base import LlmClient
 from paicli.types import Message
 
@@ -111,12 +112,13 @@ class MemoryManager:
             prompt = json.dumps({"fact": content, "candidates": [
                 {"id": item.id, "content": item.content} for item in candidates
             ]}, ensure_ascii=False)
-            async for event in llm_client.chat([Message(role="user", content=prompt)], [], system_prompt=(
-                "Classify the fact against candidates. Return JSON only with relationship "
-                "(duplicate, merge, replace, independent), target_memory_ids, proposed_content, reason."
-            )):
-                if event.get("type") == "text_delta":
-                    response += str(event.get("text") or "")
+            with use_context_scope(None):
+                async for event in llm_client.chat([Message(role="user", content=prompt)], [], system_prompt=(
+                    "Classify the fact against candidates. Return JSON only with relationship "
+                    "(duplicate, merge, replace, independent), target_memory_ids, proposed_content, reason."
+                )):
+                    if event.get("type") == "text_delta":
+                        response += str(event.get("text") or "")
             result = json.loads(response)
             relationship = str(result.get("relationship") or "independent")
             targets = [str(value) for value in result.get("target_memory_ids") or []]

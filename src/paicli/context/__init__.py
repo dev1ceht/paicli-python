@@ -25,6 +25,7 @@ from paicli.context.pressure import (
     calculate_pressure,
     should_trigger_compaction,
 )
+from paicli.context.telemetry import use_context_scope
 from paicli.context.token_estimator import (
     TokenEstimator,
     calibrate_estimation,
@@ -143,13 +144,10 @@ class ContextManager:
         current_request: str = "",
         actual_usage: dict[str, int] | None = None,
     ) -> tuple[AssembledPrompt, Budget, PressureResult]:
-        if actual_usage:
-            estimated = self._token_estimator.estimate(
-                prefix + memory + skills + relevant_memory + current_request
-            )
-            actual = actual_usage.get("input_tokens", 0)
-            if actual > 0:
-                self._token_estimator.calibrate(estimated, actual)
+        # Usage calibration belongs to the exact outbound request and is
+        # maintained by the current LLM client. A prior turn's provider usage
+        # must not be paired with this turn's different prompt.
+        del actual_usage
 
         budget = self._calculate_budget()
         assembled = assemble_prompt(
@@ -191,11 +189,12 @@ class ContextManager:
             return None
 
         try:
-            compaction_result = await compact_with_llm(
-                delta_items,
-                self.llm_client,
-                prior_summary=self._current_summary,
-            )
+            with use_context_scope(None):
+                compaction_result = await compact_with_llm(
+                    delta_items,
+                    self.llm_client,
+                    prior_summary=self._current_summary,
+                )
         except Exception:
             compaction_result = deterministic_compact(
                 delta_items,
@@ -237,6 +236,12 @@ class ContextManager:
                 "used_llm": self._last_compaction.used_llm if self._last_compaction else False,
             },
         }
+
+    def reset(self) -> None:
+        self._current_summary = ""
+        self._last_pressure = None
+        self._last_compaction = None
+        self._token_estimator.reset_calibration()
 
 
 def _split_current_request(messages: list[Message]) -> tuple[list[Message], Message | None]:

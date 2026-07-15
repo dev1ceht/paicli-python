@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 
+from paicli.context.telemetry import current_context_scope, use_context_scope
 from paicli.memory import MemoryManager, estimate_tokens
 
 
@@ -108,3 +110,31 @@ def test_memory_manager_applies_and_rejects_pending_changes(tmp_path):
     )
     assert manager.reject_pending(rejected.id)
     assert [item.content for item in manager.list()] == ["Use unittest for verification"]
+
+
+def test_memory_classification_is_excluded_from_context_telemetry(tmp_path):
+    scopes: list[str | None] = []
+
+    class ClassificationClient:
+        async def chat(self, messages, tools, *, system_prompt):
+            del messages, tools, system_prompt
+            scopes.append(current_context_scope())
+            yield {
+                "type": "text_delta",
+                "text": '{"relationship":"independent"}',
+            }
+
+    manager = MemoryManager(tmp_path / "memory.json", project_path=tmp_path)
+    manager.save("Use pytest for verification")
+
+    async def run():
+        with use_context_scope("agent"):
+            await manager.save_with_classification(
+                "Use pytest for all verification",
+                scope="project",
+                llm_client=ClassificationClient(),
+            )
+
+    asyncio.run(run())
+
+    assert scopes == [None]

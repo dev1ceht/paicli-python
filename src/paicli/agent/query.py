@@ -9,6 +9,7 @@ from typing import Any
 from paicli.cancellation import CancellationCheck, TaskCanceled, raise_if_cancelled
 from paicli.config import PaiCliConfig
 from paicli.context import ContextManager
+from paicli.context.telemetry import current_context_scope
 from paicli.image import parse_image_references
 from paicli.llm.base import LlmClient
 from paicli.tools.base import ApprovalPending, ToolContext
@@ -140,6 +141,16 @@ async def query(
                             tool_call_id=result.tool_use_id,
                         )
                     )
+                build_context_event = getattr(llm_client, "context_usage_event", None)
+                context_scope = current_context_scope()
+                if callable(build_context_event) and context_scope:
+                    yield build_context_event(
+                        messages,
+                        tool_definitions,
+                        system_prompt,
+                        state="pending",
+                        scope=context_scope,
+                    )
                 next_tool_index = index + 1
             pending_tool_calls = []
             next_tool_index = 0
@@ -204,12 +215,26 @@ async def query(
                     usage_output += int(usage.get("output_tokens") or 0)
                     last_actual_usage = usage
                     yield {"type": "usage", "usage": usage}
-                elif event_type in {"retry", "retry_exhausted"}:
+                elif event_type in {
+                    "retry",
+                    "retry_exhausted",
+                    "context_usage",
+                    "context_request_finished",
+                    "context_scope_clear",
+                }:
                     yield dict(event)
                 elif event_type == "error":
+                    yield {
+                        "type": "context_pending_clear",
+                        "scope": current_context_scope(),
+                    }
                     yield {"type": "error", "error": event["error"]}
                     return
         except TaskCanceled:
+            yield {
+                "type": "context_scope_clear",
+                "scope": current_context_scope() or "agent",
+            }
             raise
         except Exception as exc:  # noqa: BLE001 - keep REPL alive on model/network failures
             exc_type = type(exc).__name__
@@ -223,6 +248,10 @@ async def query(
                         exc_body = f"\n响应体: {body_text[:500]}"
                 except Exception:  # noqa: BLE001
                     pass
+            yield {
+                "type": "context_pending_clear",
+                "scope": current_context_scope(),
+            }
             yield {
                 "type": "error",
                 "error": RuntimeError(f"调用 LLM 失败 [{exc_type}]: {exc_detail}{exc_body}"),

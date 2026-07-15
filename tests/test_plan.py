@@ -8,6 +8,7 @@ from rich.console import Console
 
 from paicli.cancellation import TaskCanceled
 from paicli.config import PaiCliConfig
+from paicli.context.telemetry import current_context_scope
 from paicli.entrypoints.repl import _run_plan_agent
 from paicli.plan import (
     ExecutionPlan,
@@ -315,7 +316,10 @@ def test_run_plan_agent_replans_once_after_early_failure_and_merges_history():
             )
             self.config = PaiCliConfig()
 
-        async def run(self, prompt: str, *, commit_history: bool = True):
+        async def run(
+            self, prompt: str, *, commit_history: bool = True, context_scope: str = "agent"
+        ):
+            del context_scope
             self.run_prompts.append(prompt)
             self.run_commit_history.append(commit_history)
             if "`fails`" in prompt:
@@ -359,7 +363,10 @@ def test_replacement_plan_supplement_regenerates_and_is_reviewed_again():
             )
             self.config = PaiCliConfig()
 
-        async def run(self, prompt: str, *, commit_history: bool = True):
+        async def run(
+            self, prompt: str, *, commit_history: bool = True, context_scope: str = "agent"
+        ):
+            del context_scope
             self.run_prompts.append(prompt)
             self.run_commit_history.append(commit_history)
             if "`fails`" in prompt:
@@ -399,7 +406,10 @@ def test_run_plan_agent_emits_aggregate_result_after_replan():
             )
             self.config = PaiCliConfig()
 
-        async def run(self, prompt: str, *, commit_history: bool = True):
+        async def run(
+            self, prompt: str, *, commit_history: bool = True, context_scope: str = "agent"
+        ):
+            del context_scope
             self.run_prompts.append(prompt)
             self.run_commit_history.append(commit_history)
             if "`fails`" in prompt:
@@ -451,7 +461,10 @@ def test_run_plan_agent_returns_partial_result_at_exactly_half_progress():
             )
             self.config = PaiCliConfig()
 
-        async def run(self, prompt: str, *, commit_history: bool = True):
+        async def run(
+            self, prompt: str, *, commit_history: bool = True, context_scope: str = "agent"
+        ):
+            del context_scope
             self.run_prompts.append(prompt)
             self.run_commit_history.append(commit_history)
             if "`fails`" in prompt:
@@ -522,6 +535,7 @@ def test_run_plan_agent_keeps_task_history_isolated_and_records_summary():
     asyncio.run(_run_plan_agent(agent, renderer, "ship it", review_input=review))
 
     assert agent.run_commit_history == [False]
+    assert agent.run_context_scopes == ["task:inspect"]
     assert [message.role for message in agent.history] == ["user", "assistant"]
     assert agent.history[0].content == "ship it"
     assert "Plan execution summary:" in agent.history[1].content
@@ -549,7 +563,8 @@ def test_run_plan_agent_updates_renderer_usage_for_planning_and_tasks():
         llm_client = UsageLlm()
         cwd = "/tmp/fake"
 
-        async def run(self, _prompt, *, commit_history=True):
+        async def run(self, _prompt, *, commit_history=True, context_scope: str = "agent"):
+            del context_scope
             _ = commit_history
             yield {
                 "type": "usage",
@@ -783,6 +798,31 @@ def test_planner_injects_project_memory():
     asyncio.run(run())
     assert len(captured_system) == 1
     assert "# My Project" in captured_system[0]
+
+
+def test_planner_llm_request_uses_planner_context_scope():
+    captured_scopes: list[str | None] = []
+
+    class ScopeLlm:
+        provider_name = "fake"
+        model_name = "fake"
+        max_context_window = 1000
+
+        async def chat(self, _messages, _tools, *, system_prompt=""):
+            del system_prompt
+            captured_scopes.append(current_context_scope())
+            yield {
+                "type": "text_delta",
+                "text": '{"tasks": [{"id": "t1", "description": "step"}]}',
+            }
+
+    async def run():
+        planner = JsonPlanner(ScopeLlm())
+        await planner.create_plan("complex task with multiple dependent verification steps")
+
+    asyncio.run(run())
+
+    assert captured_scopes == ["planner"]
 
 
 def test_visualize_shows_status_icons():
@@ -1047,13 +1087,15 @@ class FakeAgent:
         self.llm_client = FakeLlm(plan_json)
         self.run_prompts: list[str] = []
         self.run_commit_history: list[bool] = []
+        self.run_context_scopes: list[str] = []
         self.history = []
         self.cwd = "/tmp/fake"
 
-    async def run(self, prompt: str, *, commit_history: bool = True):
+    async def run(self, prompt: str, *, commit_history: bool = True, context_scope: str = "agent"):
         """Streaming agent run for plan tasks."""
         self.run_prompts.append(prompt)
         self.run_commit_history.append(commit_history)
+        self.run_context_scopes.append(context_scope)
         yield {"type": "text_delta", "text": "ok"}
         yield {"type": "done", "total_tokens": 0, "total_turns": 1, "messages": []}
 

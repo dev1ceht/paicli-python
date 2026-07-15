@@ -188,3 +188,19 @@ def test_replan_configuration_rejects_more_than_one_automatic_replan(tmp_path, m
 
     with pytest.raises(ValueError, match="max_replans"):
         load_config(project_root=tmp_path, overrides={"plan": {"max_replans": 2}})
+
+
+def test_llm_context_window_can_be_overridden(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    config = load_config(
+        project_root=tmp_path,
+        overrides={"llm": {"context_window": 64_000}},
+    )
+
+    assert config.llm.context_window == 64_000
+
+
+def test_llm_context_window_must_be_positive():
+    with pytest.raises(ValueError, match="context_window"):
+        PaiCliConfig().llm.__class__(context_window=0)

@@ -7,6 +7,7 @@ from typing import Any
 from paicli.cancellation import CancellationCheck, TaskCanceled, raise_if_cancelled
 from paicli.config import LlmConfig, PaiCliConfig
 from paicli.context import ContextManager
+from paicli.context.telemetry import use_context_scope
 from paicli.llm import create_llm_client
 from paicli.llm.base import LlmClient
 from paicli.memory import MemoryManager
@@ -54,6 +55,7 @@ class Agent:
         message: str,
         *,
         commit_history: bool = True,
+        context_scope: str = "agent",
         execution_state: dict[str, Any] | None = None,
         checkpoint_callback=None,
     ) -> AsyncIterator[dict[str, Any]]:
@@ -64,25 +66,29 @@ class Agent:
             snapshot.create("pre-turn")
         try:
             system_prompt = self._system_prompt_for_message(message)
-            async for event in query(
-                llm_client=self.llm_client,
-                tool_registry=self.tool_registry,
-                system_prompt=system_prompt,
-                user_message=message,
-                history=self.history,
-                cwd=self.cwd,
-                config=self.config,
-                approval_callback=self.approval_callback,
-                session_allowed_tools=self.session_allowed_tools,
-                max_turns=self.max_turns,
-                context_manager=self.context_manager,
-                cancellation_check=self.cancellation_check,
-                execution_state=execution_state,
-                checkpoint_callback=checkpoint_callback,
-            ):
-                if event.get("type") == "done" and commit_history:
-                    self.history = list(event.get("messages") or [])
-                yield event
+            with use_context_scope(context_scope):
+                async for event in query(
+                    llm_client=self.llm_client,
+                    tool_registry=self.tool_registry,
+                    system_prompt=system_prompt,
+                    user_message=message,
+                    history=self.history,
+                    cwd=self.cwd,
+                    config=self.config,
+                    approval_callback=self.approval_callback,
+                    session_allowed_tools=self.session_allowed_tools,
+                    max_turns=self.max_turns,
+                    context_manager=self.context_manager,
+                    cancellation_check=self.cancellation_check,
+                    execution_state=execution_state,
+                    checkpoint_callback=checkpoint_callback,
+                ):
+                    if event.get("type") == "done" and commit_history:
+                        self.history = list(event.get("messages") or [])
+                        baseline = self.context_usage_event()
+                        if baseline:
+                            yield baseline
+                    yield event
         except TaskCanceled:
             canceled = True
             raise
@@ -107,6 +113,23 @@ class Agent:
 
     def clear_history(self) -> None:
         self.history = []
+        self.context_manager.reset()
+
+    def context_usage_event(self) -> dict[str, Any] | None:
+        build_event = getattr(self.llm_client, "context_usage_event", None)
+        if not callable(build_event):
+            return None
+        return build_event(
+            self.history,
+            self.tool_registry.definitions(),
+            self.system_prompt,
+            state="retained",
+        )
+
+    def refresh_context_usage_event(self) -> dict[str, Any] | None:
+        """Rebuild tool-dependent instructions and report the new idle baseline."""
+        self.system_prompt = self._build_system_prompt()
+        return self.context_usage_event()
 
     def reconfigure_llm(self, llm_config: LlmConfig) -> LlmClient:
         """Replace the idle session's client while retaining its conversation history."""

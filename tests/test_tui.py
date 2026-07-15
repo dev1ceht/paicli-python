@@ -107,9 +107,7 @@ def test_tui_updates_status_bar_from_plan_usage_events():
             await pilot.pause()
 
             app.handle_event({"type": "plan_generation_started", "goal": "inspect"})
-            app.handle_event(
-                {"type": "context_status", "pressure_tier": "tier1_snip"}
-            )
+            app.handle_event({"type": "context_status", "pressure_tier": "tier1_snip"})
             app.handle_event(
                 {
                     "type": "usage",
@@ -136,6 +134,89 @@ def test_tui_updates_status_bar_from_plan_usage_events():
     asyncio.run(run())
 
 
+def test_tui_context_bar_shows_max_active_request_then_retained_baseline():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.pause()
+
+            app.handle_event(
+                {
+                    "type": "context_usage",
+                    "state": "retained",
+                    "estimated": True,
+                    "used_tokens": 80,
+                    "input_tokens": 80,
+                    "output_tokens": 0,
+                    "cached_tokens": 0,
+                    "context_window": 1_000,
+                }
+            )
+            app.handle_event(
+                {
+                    "type": "context_usage",
+                    "state": "active",
+                    "request_id": "request-a",
+                    "scope": "agent",
+                    "estimated": True,
+                    "used_tokens": 100,
+                    "input_tokens": 90,
+                    "output_tokens": 10,
+                    "cached_tokens": 0,
+                    "context_window": 1_000,
+                }
+            )
+            app.handle_event(
+                {
+                    "type": "context_usage",
+                    "state": "active",
+                    "request_id": "request-b",
+                    "scope": "task:test",
+                    "estimated": True,
+                    "used_tokens": 200,
+                    "input_tokens": 150,
+                    "output_tokens": 50,
+                    "cached_tokens": 20,
+                    "context_window": 1_000,
+                }
+            )
+
+            status_bar = app.query_one(StatusBar)
+            assert status_bar.context_text == "ctx max ~200/1.0k (20%) · 2 active"
+
+            app.handle_event({"type": "context_request_finished", "request_id": "request-b"})
+            assert status_bar.context_text == "ctx ~100/1.0k (10%)"
+
+            app.handle_event({"type": "context_request_finished", "request_id": "request-a"})
+            assert status_bar.context_text == "ctx ~80/1.0k (8%)"
+
+    asyncio.run(run())
+
+
+def test_tui_starts_with_the_agent_base_context_estimate():
+    class ContextAgent:
+        def context_usage_event(self):
+            return {
+                "type": "context_usage",
+                "state": "retained",
+                "estimated": True,
+                "used_tokens": 42,
+                "input_tokens": 42,
+                "output_tokens": 0,
+                "cached_tokens": 0,
+                "context_window": 1_000,
+            }
+
+    async def run() -> None:
+        app = PaiCliApp(agent=ContextAgent(), cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+
+            assert app.query_one(StatusBar).context_text == "ctx ~42/1.0k (4%)"
+
+    asyncio.run(run())
+
+
 def test_tui_enter_submits_message_and_sets_running_state():
     class WaitingAgent:
         async def run(self, message: str):
@@ -157,9 +238,25 @@ def test_tui_enter_submits_message_and_sets_running_state():
             assert app._phase == "running", log_text
             assert "hello" in log_text
 
+            app.handle_event(
+                {
+                    "type": "context_usage",
+                    "state": "active",
+                    "request_id": "cancel-me",
+                    "scope": "agent",
+                    "estimated": True,
+                    "used_tokens": 100,
+                    "input_tokens": 100,
+                    "output_tokens": 0,
+                    "cached_tokens": 0,
+                    "context_window": 1_000,
+                }
+            )
+
             app.action_interrupt()
             await pilot.pause()
             assert app._agent_running is False
+            assert app._context_usage.active_count == 0
 
     asyncio.run(run())
 
@@ -193,6 +290,123 @@ def test_tui_clear_preserves_startup_banner():
             assert "Ready to build" in text
             assert "temporary conversation" not in text
             assert app.query_one(StartupBanner) is banner
+
+    asyncio.run(run())
+
+
+def test_tui_clear_only_clears_display_and_reset_clears_session_history():
+    class SessionAgent:
+        def __init__(self):
+            self.history = ["retained"]
+            self.reset_calls = 0
+
+        def clear_history(self):
+            self.reset_calls += 1
+            self.history.clear()
+
+        def context_usage_event(self):
+            return {
+                "type": "context_usage",
+                "state": "retained",
+                "estimated": True,
+                "used_tokens": 10 if self.history else 2,
+                "input_tokens": 10 if self.history else 2,
+                "output_tokens": 0,
+                "cached_tokens": 0,
+                "context_window": 100,
+            }
+
+    async def run() -> None:
+        agent = SessionAgent()
+        app = PaiCliApp(agent=agent, cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+
+            app._handle_slash_command("/clear")
+            assert agent.history == ["retained"]
+            assert agent.reset_calls == 0
+
+            app._handle_slash_command("/reset")
+            assert agent.history == []
+            assert agent.reset_calls == 1
+            assert app.query_one(StatusBar).context_text == "ctx ~2/100 (2%)"
+
+    asyncio.run(run())
+
+
+def test_tui_context_command_shows_retained_active_calibration_and_unknown_limit(tmp_path):
+    class ContextManagerStatus:
+        def get_status(self):
+            return {
+                "last_compaction": {"compacted_items": 4, "used_llm": True},
+            }
+
+    class ContextAgent:
+        llm_client = SimpleNamespace(
+            model_name="unknown-model",
+            provider_name="test",
+            max_context_window=128_000,
+            reported_context_window=None,
+            context_estimator=SimpleNamespace(
+                get_calibration_factor=lambda: 1.25,
+                sample_count=3,
+            ),
+        )
+        context_manager = ContextManagerStatus()
+
+        def context_usage_event(self):
+            return {
+                "type": "context_usage",
+                "state": "retained",
+                "estimated": True,
+                "used_tokens": 50,
+                "input_tokens": 50,
+                "output_tokens": 0,
+                "cached_tokens": 0,
+                "context_window": None,
+                "safety_context_window": 128_000,
+            }
+
+    config = PaiCliConfig()
+    config.memory.long_term_path = str(tmp_path / "memory.json")
+    config.llm.model = "unknown-model"
+    config.llm.provider = "test"
+    registry = SimpleNamespace(list_names=lambda: [])
+
+    async def run() -> None:
+        app = PaiCliApp(
+            agent=ContextAgent(),
+            config=config,
+            registry=registry,
+            cwd=str(tmp_path),
+        )
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.handle_event(
+                {
+                    "type": "context_usage",
+                    "state": "active",
+                    "request_id": "request-a",
+                    "scope": "planner",
+                    "estimated": True,
+                    "used_tokens": 80,
+                    "input_tokens": 80,
+                    "output_tokens": 0,
+                    "cached_tokens": 0,
+                    "context_window": None,
+                    "safety_context_window": 128_000,
+                }
+            )
+            app._handle_slash_command("/context")
+            await pilot.pause()
+
+            text = app.query_one(ChatLog).renderable_text()
+            assert "model limit: unknown" in text
+            assert "safety budget: 128.0k" in text
+            assert "retained: ~50/?" in text
+            assert "planner: ~80/?" in text
+            assert "calibration: 1.25 (3 samples)" in text
+            assert "compaction: 4 items (llm)" in text
 
     asyncio.run(run())
 
@@ -257,6 +471,18 @@ def test_tui_model_command_rebuilds_the_idle_agent_and_refreshes_ui(tmp_path):
                 max_context_window=128_000,
             )
 
+        def context_usage_event(self):
+            return {
+                "type": "context_usage",
+                "state": "retained",
+                "estimated": True,
+                "used_tokens": 7,
+                "input_tokens": 7,
+                "output_tokens": 0,
+                "cached_tokens": 0,
+                "context_window": 128_000,
+            }
+
     (tmp_path / ".env").write_text(
         "PAICLI_QWEN_API_KEY=qwen-key\nPAICLI_QWEN_BASE_URL=https://qwen.example/v1\n",
         encoding="utf-8",
@@ -269,6 +495,20 @@ def test_tui_model_command_rebuilds_the_idle_agent_and_refreshes_ui(tmp_path):
         app._model = config.llm.model
         app._provider = config.llm.provider
         async with app.run_test(size=(80, 24)) as pilot:
+            app.handle_event(
+                {
+                    "type": "context_usage",
+                    "state": "active",
+                    "request_id": "old-model-request",
+                    "scope": "agent",
+                    "estimated": True,
+                    "used_tokens": 99,
+                    "input_tokens": 99,
+                    "output_tokens": 0,
+                    "cached_tokens": 0,
+                    "context_window": 128_000,
+                }
+            )
             app._model_command("qwen qwen-turbo", app.query_one(ChatLog))
             await pilot.pause()
 
@@ -276,8 +516,12 @@ def test_tui_model_command_rebuilds_the_idle_agent_and_refreshes_ui(tmp_path):
             assert config.llm.model == "qwen-turbo"
             assert agent.history == ["preserved"]
             assert app._context_window == 128_000
+            assert app._context_usage.active_count == 0
+            assert app.query_one(StatusBar).context_text == "ctx ~7/128.0k (0%)"
             assert "qwen-turbo" in app.query_one(StartupBanner).plain_text
-            assert "Model switched to qwen-turbo (qwen)." in app.query_one(ChatLog).renderable_text()
+            assert (
+                "Model switched to qwen-turbo (qwen)." in app.query_one(ChatLog).renderable_text()
+            )
 
     asyncio.run(run())
 
@@ -318,9 +562,7 @@ def test_tool_success_card_collapses_after_result():
     async def run() -> None:
         app = PaiCliApp(cwd=".")
         async with app.run_test(size=(80, 24)) as pilot:
-            app.handle_event(
-                {"type": "tool_call", "name": "read_file", "input": {"path": "a.py"}}
-            )
+            app.handle_event({"type": "tool_call", "name": "read_file", "input": {"path": "a.py"}})
             app.handle_event(
                 {"type": "tool_result", "name": "read_file", "result": "ok", "is_error": False}
             )
@@ -339,9 +581,7 @@ def test_tool_error_card_stays_expanded_and_retains_full_result():
         app = PaiCliApp(cwd=".")
         async with app.run_test(size=(80, 24)) as pilot:
             result = "x" * 5000
-            app.handle_event(
-                {"type": "tool_call", "name": "read_file", "input": {"path": "a.py"}}
-            )
+            app.handle_event({"type": "tool_call", "name": "read_file", "input": {"path": "a.py"}})
             app.handle_event(
                 {
                     "type": "tool_result",
@@ -461,9 +701,7 @@ class CommandInputHarness(App[None]):
             compact=True,
         )
 
-    def on_command_input_message_submitted(
-        self, message: CommandInput.MessageSubmitted
-    ) -> None:
+    def on_command_input_message_submitted(self, message: CommandInput.MessageSubmitted) -> None:
         self.submissions.append(message.value)
 
     def action_submit_message(self) -> None:
@@ -608,6 +846,50 @@ def test_status_bar_render_uses_exact_phase_and_cost_colors():
     assert "[bold #facc15]$0.1234[/bold #facc15]" in rendered
 
 
+def test_tui_context_pressure_colors_follow_confirmed_thresholds():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            status = app.query_one(StatusBar)
+
+            for used, expected in [
+                (590, "normal"),
+                (600, "yellow"),
+                (800, "orange"),
+                (950, "red"),
+            ]:
+                app.handle_event(
+                    {
+                        "type": "context_usage",
+                        "state": "retained",
+                        "estimated": True,
+                        "used_tokens": used,
+                        "input_tokens": used,
+                        "output_tokens": 0,
+                        "cached_tokens": 0,
+                        "context_window": 1_000,
+                    }
+                )
+                assert status.context_level == expected
+
+            app.handle_event(
+                {
+                    "type": "context_usage",
+                    "state": "retained",
+                    "estimated": True,
+                    "used_tokens": 999,
+                    "input_tokens": 999,
+                    "output_tokens": 0,
+                    "cached_tokens": 0,
+                    "context_window": None,
+                }
+            )
+            assert status.context_level == "neutral"
+
+    asyncio.run(run())
+
+
 def test_plan_review_screen_execute_returns_decision():
     from paicli.plan import ExecutionPlan, PlanTask, TaskType
     from paicli.render.tui_dialogs import PlanReviewScreen
@@ -628,6 +910,7 @@ def test_plan_review_screen_execute_returns_decision():
         class ReviewApp(App[None]):
             def compose(self) -> ComposeResult:
                 from textual.widgets import Footer, Label
+
                 yield Label("Test App")
                 yield Footer()
 
@@ -639,12 +922,12 @@ def test_plan_review_screen_execute_returns_decision():
                 result[0] = await app.push_screen_wait(screen)
 
             worker = app.run_worker(push_and_test)
-            
+
             # Wait for screen to be pushed and mounted
             await pilot.pause()
             await pilot.pause()
             await pilot.pause()
-            
+
             # Directly call the action (key bindings are tested separately)
             if isinstance(app.screen, PlanReviewScreen):
                 app.screen.action_execute()
@@ -672,6 +955,7 @@ def test_approval_screen_approve_returns_approve():
         class ApprovalApp(App[None]):
             def compose(self) -> ComposeResult:
                 from textual.widgets import Footer
+
                 yield Footer()
 
             def on_mount(self) -> None:
@@ -679,6 +963,7 @@ def test_approval_screen_approve_returns_approve():
                     nonlocal result
                     screen = ApprovalScreen(request)
                     result = await self.push_screen_wait(screen)
+
                 self.run_worker(_push)
 
         app = ApprovalApp()
@@ -707,6 +992,7 @@ def test_approval_screen_deny_returns_deny():
         class DenyApp(App[None]):
             def compose(self) -> ComposeResult:
                 from textual.widgets import Footer
+
                 yield Footer()
 
             def on_mount(self) -> None:
@@ -714,6 +1000,7 @@ def test_approval_screen_deny_returns_deny():
                     nonlocal result
                     screen = ApprovalScreen(request)
                     result = await self.push_screen_wait(screen)
+
                 self.run_worker(_push)
 
         app = DenyApp()
@@ -729,22 +1016,25 @@ def test_approval_screen_deny_returns_deny():
 
 def test_interrupt_exits_when_idle():
     """Ctrl+C exits the app when not running."""
+
     async def run() -> None:
         app = PaiCliApp(cwd=".")
         exited = False
         original_exit = app.exit
+
         def mock_exit():
             nonlocal exited
             exited = True
             original_exit()
+
         app.exit = mock_exit
-        
+
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.pause()
             # App is idle, Ctrl+C should exit
             app.action_interrupt()
             await pilot.pause()
-        
+
         assert exited is True
 
     asyncio.run(run())
@@ -752,12 +1042,13 @@ def test_interrupt_exits_when_idle():
 
 def test_interrupt_cancels_worker_when_running():
     """Ctrl+C cancels the worker when running."""
+
     async def run() -> None:
         app = PaiCliApp(cwd=".")
-        
+
         async def long_task():
             await asyncio.sleep(10)  # Long-running task
-        
+
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.pause()
             # Start a worker
@@ -766,11 +1057,11 @@ def test_interrupt_cancels_worker_when_running():
             worker = app.run_worker(long_task())
             app._worker = worker
             await pilot.pause()
-            
+
             # App is running, Ctrl+C should cancel
             app.action_interrupt()
             await pilot.pause()
-            
+
             # Worker should be cancelled
             assert app._agent_running is False
             assert app._phase == "idle"

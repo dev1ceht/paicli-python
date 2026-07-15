@@ -11,6 +11,8 @@ from uuid import uuid4
 
 import httpx
 
+from paicli.context.telemetry import current_context_scope
+from paicli.context.token_estimator import TokenEstimator
 from paicli.policy import AuditLog
 from paicli.retry import RetryPolicy, classify_transient_error, compute_retry_delay
 from paicli.types import Message
@@ -29,16 +31,22 @@ class OpenAICompatibleClient:
     temperature: float = 0.7
     timeout: float = 120.0
     max_context_window: int = 128_000
+    context_window_known: bool = True
     prompt_cache: bool = False
     supports_reasoning_content: bool = False
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     transport: httpx.AsyncBaseTransport | None = field(default=None, repr=False)
     retry_audit_path: str | Path = field(default="~/.paicli/audit", repr=False)
     retry_cwd: str = field(default="", repr=False)
+    context_estimator: TokenEstimator = field(default_factory=TokenEstimator, repr=False)
 
     @property
     def model_name(self) -> str:
         return self.model
+
+    @property
+    def reported_context_window(self) -> int | None:
+        return self.max_context_window if self.context_window_known else None
 
     @property
     def supports_images(self) -> bool:
@@ -86,6 +94,26 @@ class OpenAICompatibleClient:
 
         cooldown_key = (self.provider_name, self.model, self.base_url)
         logical_call_id = f"llm_{uuid4().hex}"
+        context_scope = current_context_scope()
+        estimated_input = 0
+        streamed_output = ""
+        last_context_update = time.monotonic()
+        provider_usage_received = False
+        if context_scope:
+            estimated_input = self.context_estimator.estimate(
+                json.dumps(
+                    {"messages": payload["messages"], "tools": payload.get("tools", [])},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+            yield self._context_usage_payload(
+                state="active",
+                scope=context_scope,
+                estimated=True,
+                input_tokens=estimated_input,
+                request_id=logical_call_id,
+            )
         visible_stream_started = False
         message_started = False
         attempt = 0
@@ -142,7 +170,53 @@ class OpenAICompatibleClient:
                         async for parsed in self._parse_chunk(chunk):
                             if parsed.get("type") in _VISIBLE_STREAM_EVENTS:
                                 visible_stream_started = True
+                            fragment = _context_output_fragment(parsed)
+                            if fragment:
+                                streamed_output += fragment
                             yield parsed
+                            if parsed.get("type") == "usage" and context_scope:
+                                provider_usage_received = True
+                                usage = dict(parsed.get("usage") or {})
+                                actual_input = int(usage.get("input_tokens") or 0)
+                                actual_output = int(usage.get("output_tokens") or 0)
+                                if actual_input > 0:
+                                    self.context_estimator.calibrate(
+                                        estimated_input,
+                                        actual_input,
+                                    )
+                                yield self._context_usage_payload(
+                                    state="active",
+                                    scope=context_scope,
+                                    estimated=False,
+                                    input_tokens=actual_input,
+                                    output_tokens=actual_output,
+                                    cached_tokens=int(usage.get("cached_tokens") or 0),
+                                    request_id=logical_call_id,
+                                )
+                            elif (
+                                context_scope
+                                and not provider_usage_received
+                                and fragment
+                                and time.monotonic() - last_context_update >= 0.25
+                            ):
+                                estimated_output = self.context_estimator.estimate(
+                                    streamed_output
+                                )
+                                yield self._context_usage_payload(
+                                    state="active",
+                                    scope=context_scope,
+                                    estimated=True,
+                                    input_tokens=estimated_input,
+                                    output_tokens=estimated_output,
+                                    request_id=logical_call_id,
+                                )
+                                last_context_update = time.monotonic()
+                if context_scope:
+                    yield {
+                        "type": "context_request_finished",
+                        "request_id": logical_call_id,
+                        "scope": context_scope,
+                    }
                 return
             except Exception as exc:
                 decision = classify_transient_error(exc)
@@ -171,8 +245,22 @@ class OpenAICompatibleClient:
                         "error_kind": decision.error_kind,
                         "reason": reason,
                     }
+                    if context_scope:
+                        yield {
+                            "type": "context_request_finished",
+                            "request_id": logical_call_id,
+                            "scope": context_scope,
+                            "outcome": "failed",
+                        }
                     raise
                 if not retry_enabled:
+                    if context_scope:
+                        yield {
+                            "type": "context_request_finished",
+                            "request_id": logical_call_id,
+                            "scope": context_scope,
+                            "outcome": "failed",
+                        }
                     raise
 
                 retry_number = attempt + 1
@@ -208,7 +296,60 @@ class OpenAICompatibleClient:
                 await asyncio.sleep(delay)
                 skip_shared_cooldown_once = True
 
-    def _format_messages(self, messages: list[Message], system_prompt: str) -> list[dict[str, Any]]:
+    def context_usage_event(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]],
+        system_prompt: str,
+        *,
+        state: str,
+        scope: str = "agent",
+    ) -> dict[str, Any]:
+        formatted = self._format_messages(messages, system_prompt)
+        estimated_input = self.context_estimator.estimate(
+            json.dumps(
+                {"messages": formatted, "tools": tools},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return self._context_usage_payload(
+            state=state,
+            scope=scope,
+            estimated=True,
+            input_tokens=estimated_input,
+        )
+
+    def _context_usage_payload(
+        self,
+        *,
+        state: str,
+        scope: str,
+        estimated: bool,
+        input_tokens: int,
+        output_tokens: int = 0,
+        cached_tokens: int = 0,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        event: dict[str, Any] = {
+            "type": "context_usage",
+            "state": state,
+            "scope": scope,
+            "estimated": estimated,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "used_tokens": input_tokens + output_tokens,
+            "cached_tokens": cached_tokens,
+            "context_window": self.reported_context_window,
+            "safety_context_window": self.max_context_window,
+        }
+        if request_id:
+            event["request_id"] = request_id
+        return event
+
+    def _format_messages(
+        self, messages: list[Message], system_prompt: str
+    ) -> list[dict[str, Any]]:
         formatted: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         for message in messages:
             if message.role == "tool":
@@ -324,6 +465,17 @@ def _model_cooldown_remaining(key: tuple[str, str, str]) -> float:
         _MODEL_COOLDOWNS.pop(key, None)
         return 0.0
     return max(remaining, 0.0)
+
+
+def _context_output_fragment(event: dict[str, Any]) -> str:
+    event_type = event.get("type")
+    if event_type == "text_delta":
+        return str(event.get("text") or "")
+    if event_type == "thinking_delta":
+        return str(event.get("thinking") or "")
+    if event_type == "tool_call_delta":
+        return json.dumps(event.get("tool_call") or {}, ensure_ascii=False, sort_keys=True)
+    return ""
 
 
 def _map_finish_reason(reason: str) -> str:

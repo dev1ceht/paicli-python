@@ -11,6 +11,7 @@ from enum import Enum
 from typing import Any, Literal
 
 from paicli.cancellation import TaskCanceled
+from paicli.context.telemetry import use_context_scope
 from paicli.llm.base import LlmClient
 from paicli.types import Message
 
@@ -521,17 +522,24 @@ class JsonPlanner:
                 ),
             )
         ]
-        async for event in self.llm_client.chat(messages, [], system_prompt=system_prompt):
-            if event.get("type") == "text_delta":
-                text += str(event.get("text") or "")
-            elif event.get("type") == "thinking_delta":
-                thinking += str(event.get("thinking") or event.get("text") or "")
-            elif event.get("type") == "usage" and event_sink:
-                event_sink({"type": "usage", "usage": dict(event.get("usage") or {})})
-            elif event.get("type") in {"retry", "retry_exhausted"} and event_sink:
-                event_sink(dict(event))
-            elif event.get("type") == "error":
-                raise event["error"]
+        with use_context_scope("planner"):
+            async for event in self.llm_client.chat(messages, [], system_prompt=system_prompt):
+                if event.get("type") == "text_delta":
+                    text += str(event.get("text") or "")
+                elif event.get("type") == "thinking_delta":
+                    thinking += str(event.get("thinking") or event.get("text") or "")
+                elif event.get("type") == "usage" and event_sink:
+                    event_sink({"type": "usage", "usage": dict(event.get("usage") or {})})
+                elif event.get("type") in {
+                    "retry",
+                    "retry_exhausted",
+                    "context_usage",
+                    "context_request_finished",
+                    "context_scope_clear",
+                } and event_sink:
+                    event_sink(dict(event))
+                elif event.get("type") == "error":
+                    raise event["error"]
 
         self.last_raw_plan = text
         self.last_thinking = thinking

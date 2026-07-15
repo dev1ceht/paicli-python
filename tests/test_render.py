@@ -291,6 +291,7 @@ def test_format_cost_formats_yuan():
 
 def test_tool_label_known_tools():
     from paicli.render.rich_renderer import _tool_label
+
     assert "📖 读取" in _tool_label("read_file", {"path": "/tmp/x.py"})
     assert "✏️ 写入" in _tool_label("write_file", {"path": "src/main.py"})
     assert "⚡ 执行命令" in _tool_label("bash", {"command": "ls"})
@@ -300,6 +301,7 @@ def test_tool_label_known_tools():
 
 def test_tool_label_mcp_tools():
     from paicli.render.rich_renderer import _tool_label
+
     result = _tool_label("mcp__github__create_issue", {})
     assert "🔌 MCP github.create_issue" == result
 
@@ -456,17 +458,71 @@ def test_toolbar_shows_context_window_size():
     assert "ctx 8.7k/1.0M (1%)" in plain
 
 
+def test_toolbar_context_percentage_rounds_half_up():
+    toolbar = _bottom_toolbar(
+        "/tmp/project",
+        "test-model",
+        {
+            "input_tokens": 125,
+            "context_ratio": 0.125,
+            "context_window": 1_000,
+            "has_usage": True,
+        },
+    )
+
+    assert "(13%)" in "".join(text for _style, text in toolbar)
+
+
+def test_rich_renderer_toolbar_uses_max_live_context_request():
+    renderer = RichRenderer(context_window=1_000)
+    renderer.handle(
+        {
+            "type": "context_usage",
+            "state": "retained",
+            "estimated": True,
+            "used_tokens": 80,
+            "input_tokens": 80,
+            "output_tokens": 0,
+            "cached_tokens": 0,
+            "context_window": 1_000,
+        }
+    )
+    for request_id, used in [("a", 100), ("b", 200)]:
+        renderer.handle(
+            {
+                "type": "context_usage",
+                "state": "active",
+                "request_id": request_id,
+                "scope": f"task:{request_id}",
+                "estimated": True,
+                "used_tokens": used,
+                "input_tokens": used,
+                "output_tokens": 0,
+                "cached_tokens": 0,
+                "context_window": 1_000,
+            }
+        )
+
+    status = renderer.toolbar_status()
+    toolbar = _bottom_toolbar("/tmp/project", "test-model", status)
+    plain = "".join(text for _style, text in toolbar)
+
+    assert "ctx max ~200/1.0k (20%) · 2 active" in plain
+
+
 def test_diff_rendering_new_file():
     stream = StringIO()
     console = Console(file=stream, color_system=None, width=120)
     renderer = RichRenderer(console=console)
 
-    renderer.handle({
-        "type": "diff",
-        "file_path": "new_file.py",
-        "before": None,
-        "after": "line1\nline2\nline3",
-    })
+    renderer.handle(
+        {
+            "type": "diff",
+            "file_path": "new_file.py",
+            "before": None,
+            "after": "line1\nline2\nline3",
+        }
+    )
 
     output = stream.getvalue()
     assert "new_file.py" in output
@@ -480,12 +536,14 @@ def test_diff_rendering_deleted_file():
     console = Console(file=stream, color_system=None, width=120)
     renderer = RichRenderer(console=console)
 
-    renderer.handle({
-        "type": "diff",
-        "file_path": "old_file.py",
-        "before": "old content\nold line2",
-        "after": None,
-    })
+    renderer.handle(
+        {
+            "type": "diff",
+            "file_path": "old_file.py",
+            "before": "old content\nold line2",
+            "after": None,
+        }
+    )
 
     output = stream.getvalue()
     assert "old_file.py" in output
@@ -498,12 +556,14 @@ def test_diff_rendering_unchanged():
     console = Console(file=stream, color_system=None, width=120)
     renderer = RichRenderer(console=console)
 
-    renderer.handle({
-        "type": "diff",
-        "file_path": "same.py",
-        "before": "same content",
-        "after": "same content",
-    })
+    renderer.handle(
+        {
+            "type": "diff",
+            "file_path": "same.py",
+            "before": "same content",
+            "after": "same content",
+        }
+    )
 
     output = stream.getvalue()
     assert "内容未变" in output
@@ -514,12 +574,14 @@ def test_diff_rendering_modified():
     console = Console(file=stream, color_system=None, width=120)
     renderer = RichRenderer(console=console)
 
-    renderer.handle({
-        "type": "diff",
-        "file_path": "modified.py",
-        "before": "line1\nline2\nline3",
-        "after": "line1\nmodified\nline3",
-    })
+    renderer.handle(
+        {
+            "type": "diff",
+            "file_path": "modified.py",
+            "before": "line1\nline2\nline3",
+            "after": "line1\nmodified\nline3",
+        }
+    )
 
     output = stream.getvalue()
     assert "modified.py" in output

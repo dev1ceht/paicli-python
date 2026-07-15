@@ -142,6 +142,9 @@ PAICLI_API_KEY=your_key_here
 
 ```json
 {
+  "llm": {
+    "context_window": 64000
+  },
   "retry": {
     "enabled": true,
     "default": {
@@ -159,6 +162,9 @@ PAICLI_API_KEY=your_key_here
   }
 }
 ```
+
+`llm.context_window` 是可选的模型上下文上限覆盖值。未配置且模型不在内置映射中时，
+界面显示 `?`，内部使用 128k 安全预算。
 
 计划进度只计算成功完成的节点。节点失败后不再调度新节点；成功进度低于阈值时，
 系统最多生成一份剩余工作计划，并再次进入用户审阅。
@@ -186,6 +192,7 @@ uv run paicli -p "解释这个仓库"
 /help
 /exit
 /clear
+/reset
 /context
 /memory
 /memory list

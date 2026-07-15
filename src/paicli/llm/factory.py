@@ -25,7 +25,7 @@ MODEL_CONTEXT_WINDOWS = {
     "deepseek-reasoner": 1_000_000,
     "deepseek-coder": 128_000,
 }
-DEFAULT_SUPPORTED_CONTEXT_WINDOW = 1_000_000
+UNKNOWN_MODEL_SAFETY_WINDOW = 128_000
 
 
 def create_llm_client(
@@ -38,9 +38,11 @@ def create_llm_client(
     provider = config.provider.lower()
     retry = retry_policy or RetryPolicy()
     audit_path = retry_audit_path or "~/.paicli/audit"
+    reported_context = config.context_window or MODEL_CONTEXT_WINDOWS.get(config.model)
+    context = reported_context or UNKNOWN_MODEL_SAFETY_WINDOW
+    context_known = reported_context is not None
     if provider == "deepseek":
         base_url = config.base_url or DEEPSEEK_BASE_URL
-        context = MODEL_CONTEXT_WINDOWS.get(config.model, DEFAULT_SUPPORTED_CONTEXT_WINDOW)
         return OpenAICompatibleClient(
             provider_name="deepseek",
             model=config.model,
@@ -50,6 +52,7 @@ def create_llm_client(
             temperature=config.temperature,
             timeout=config.timeout,
             max_context_window=context,
+            context_window_known=context_known,
             prompt_cache=True,
             supports_reasoning_content=True,
             retry_policy=retry,
@@ -65,7 +68,8 @@ def create_llm_client(
             max_tokens=config.max_tokens,
             temperature=config.temperature,
             timeout=config.timeout,
-            max_context_window=DEFAULT_SUPPORTED_CONTEXT_WINDOW,
+            max_context_window=context,
+            context_window_known=context_known,
             prompt_cache=False,
             retry_policy=retry,
             retry_audit_path=audit_path,
@@ -80,7 +84,8 @@ def create_llm_client(
             max_tokens=config.max_tokens,
             temperature=config.temperature,
             timeout=config.timeout,
-            max_context_window=DEFAULT_SUPPORTED_CONTEXT_WINDOW,
+            max_context_window=context,
+            context_window_known=context_known,
             prompt_cache=False,
             retry_policy=retry,
             retry_audit_path=audit_path,
@@ -94,7 +99,8 @@ def create_llm_client(
         max_tokens=config.max_tokens,
         temperature=config.temperature,
         timeout=config.timeout,
-        max_context_window=128_000,
+        max_context_window=context,
+        context_window_known=context_known,
         prompt_cache=False,
         retry_policy=retry,
         retry_audit_path=audit_path,

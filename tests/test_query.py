@@ -1,19 +1,429 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from threading import Event
 from typing import Any
 
+import httpx
 import pytest
 
 from paicli.agent import QueryEngine
 from paicli.agent.agent import Agent
 from paicli.cancellation import TaskCanceled
 from paicli.config import LlmConfig, load_config
+from paicli.llm.openai_compatible import OpenAICompatibleClient
 from paicli.retry import RetryPolicy
 from paicli.tools import ToolRegistry, get_builtin_tools
 from paicli.tools.base import Tool, ToolResult
 from paicli.types import Message
+
+
+def test_agent_run_emits_current_context_estimate_before_model_output(tmp_path):
+    body = (
+        "data: "
+        + json.dumps({"choices": [{"delta": {"content": "done"}, "finish_reason": "stop"}]})
+        + "\n\ndata: [DONE]\n\n"
+    ).encode()
+    client = OpenAICompatibleClient(
+        provider_name="test",
+        model="test-model",
+        api_key="key",
+        base_url="https://context.example/v1",
+        max_context_window=128_000,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=body)),
+        retry_audit_path=tmp_path / "audit",
+    )
+    config = load_config(project_root=tmp_path)
+    config.features.memory = False
+    agent = Agent(
+        llm_client=client,
+        tool_registry=ToolRegistry(),
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+    )
+
+    async def run() -> list[dict[str, Any]]:
+        return [event async for event in agent.run("hello")]
+
+    events = asyncio.run(run())
+
+    context_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "context_usage" and event.get("state") == "active"
+    )
+    text_index = next(
+        index for index, event in enumerate(events) if event.get("type") == "text_delta"
+    )
+    context = events[context_index]
+    assert context_index < text_index
+    assert context["scope"] == "agent"
+    assert context["estimated"] is True
+    assert context["used_tokens"] > 0
+    assert context["context_window"] == 128_000
+
+
+def test_agent_run_replaces_context_estimate_with_provider_usage(tmp_path):
+    chunks = [
+        {"choices": [{"delta": {"content": "done"}, "finish_reason": "stop"}]},
+        {
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 5,
+                "prompt_tokens_details": {"cached_tokens": 40},
+            },
+        },
+    ]
+    body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
+    body += "data: [DONE]\n\n"
+    client = OpenAICompatibleClient(
+        provider_name="test",
+        model="test-model",
+        api_key="key",
+        base_url="https://context-usage.example/v1",
+        max_context_window=1_000,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=body.encode())),
+        retry_audit_path=tmp_path / "audit",
+    )
+    config = load_config(project_root=tmp_path)
+    config.features.memory = False
+    agent = Agent(
+        llm_client=client,
+        tool_registry=ToolRegistry(),
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+    )
+
+    async def run() -> list[dict[str, Any]]:
+        return [event async for event in agent.run("hello")]
+
+    events = asyncio.run(run())
+
+    actual = next(
+        event
+        for event in events
+        if event.get("type") == "context_usage" and event.get("estimated") is False
+    )
+    assert actual["input_tokens"] == 120
+    assert actual["output_tokens"] == 5
+    assert actual["cached_tokens"] == 40
+    assert actual["used_tokens"] == 125
+
+
+def test_provider_usage_remains_authoritative_after_later_stream_delta(tmp_path):
+    class UsageBeforeDeltaStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            first = {"choices": [{"delta": {"content": "first"}}]}
+            yield f"data: {json.dumps(first)}\n\n".encode()
+            await asyncio.sleep(0.26)
+            final = {
+                "usage": {"prompt_tokens": 120, "completion_tokens": 5},
+                "choices": [{"delta": {"content": "last"}, "finish_reason": "stop"}],
+            }
+            yield f"data: {json.dumps(final)}\n\ndata: [DONE]\n\n".encode()
+
+    client = OpenAICompatibleClient(
+        provider_name="test",
+        model="test-model",
+        api_key="key",
+        base_url="https://context-authoritative.example/v1",
+        max_context_window=1_000,
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, stream=UsageBeforeDeltaStream())
+        ),
+        retry_audit_path=tmp_path / "audit",
+    )
+    config = load_config(project_root=tmp_path)
+    config.features.memory = False
+    agent = Agent(
+        llm_client=client,
+        tool_registry=ToolRegistry(),
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+    )
+
+    async def run() -> list[dict[str, Any]]:
+        return [event async for event in agent.run("hello")]
+
+    events = asyncio.run(run())
+    finish_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "context_request_finished"
+    )
+    readings = [
+        event
+        for event in events[:finish_index]
+        if event.get("type") == "context_usage" and event.get("state") == "active"
+    ]
+
+    assert readings[-1]["estimated"] is False
+    assert readings[-1]["used_tokens"] == 125
+
+
+def test_same_request_provider_usage_calibrates_the_next_estimate(tmp_path, monkeypatch):
+    monkeypatch.setenv("PAICLI_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    chunks = [
+        {"choices": [{"delta": {"content": "done"}, "finish_reason": "stop"}]},
+        {
+            "choices": [],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 5},
+        },
+    ]
+    body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
+    body += "data: [DONE]\n\n"
+    client = OpenAICompatibleClient(
+        provider_name="test",
+        model="test-model",
+        api_key="key",
+        base_url="https://context-calibration.example/v1",
+        max_context_window=1_000,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=body.encode())),
+        retry_audit_path=tmp_path / "audit",
+    )
+    config = load_config(project_root=tmp_path)
+    config.features.memory = False
+    agent = Agent(
+        llm_client=client,
+        tool_registry=ToolRegistry(),
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+    )
+
+    async def run_once() -> list[dict[str, Any]]:
+        return [event async for event in agent.run("hello")]
+
+    first_events = asyncio.run(run_once())
+    agent.clear_history()
+    second_events = asyncio.run(run_once())
+
+    first_estimate = next(
+        event["input_tokens"]
+        for event in first_events
+        if event.get("type") == "context_usage"
+        and event.get("state") == "active"
+        and event.get("estimated") is True
+    )
+    second_estimate = next(
+        event["input_tokens"]
+        for event in second_events
+        if event.get("type") == "context_usage"
+        and event.get("state") == "active"
+        and event.get("estimated") is True
+    )
+    assert abs(second_estimate - 120) < abs(first_estimate - 120)
+
+
+def test_agent_run_context_grows_during_streaming_output(tmp_path):
+    class DelayedStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            first = {"choices": [{"delta": {"content": "a" * 400}}]}
+            second = {"choices": [{"delta": {"content": "b" * 400}, "finish_reason": "stop"}]}
+            yield f"data: {json.dumps(first)}\n\n".encode()
+            await asyncio.sleep(0.26)
+            yield f"data: {json.dumps(second)}\n\ndata: [DONE]\n\n".encode()
+
+    client = OpenAICompatibleClient(
+        provider_name="test",
+        model="test-model",
+        api_key="key",
+        base_url="https://context-stream.example/v1",
+        max_context_window=128_000,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, stream=DelayedStream())),
+        retry_audit_path=tmp_path / "audit",
+    )
+    config = load_config(project_root=tmp_path)
+    config.features.memory = False
+    agent = Agent(
+        llm_client=client,
+        tool_registry=ToolRegistry(),
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+    )
+
+    async def run() -> list[dict[str, Any]]:
+        return [event async for event in agent.run("hello")]
+
+    events = asyncio.run(run())
+
+    estimates = [
+        event
+        for event in events
+        if event.get("type") == "context_usage"
+        and event.get("state") == "active"
+        and event.get("estimated") is True
+    ]
+    assert len(estimates) >= 2
+    assert estimates[-1]["output_tokens"] > 0
+    assert estimates[-1]["used_tokens"] > estimates[0]["used_tokens"]
+
+
+def test_agent_run_finishes_active_request_and_emits_retained_baseline(tmp_path):
+    body = (
+        "data: "
+        + json.dumps({"choices": [{"delta": {"content": "done"}, "finish_reason": "stop"}]})
+        + "\n\ndata: [DONE]\n\n"
+    ).encode()
+    client = OpenAICompatibleClient(
+        provider_name="test",
+        model="test-model",
+        api_key="key",
+        base_url="https://context-finish.example/v1",
+        max_context_window=128_000,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=body)),
+        retry_audit_path=tmp_path / "audit",
+    )
+    config = load_config(project_root=tmp_path)
+    config.features.memory = False
+    agent = Agent(
+        llm_client=client,
+        tool_registry=ToolRegistry(),
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+    )
+
+    async def run() -> list[dict[str, Any]]:
+        return [event async for event in agent.run("hello")]
+
+    events = asyncio.run(run())
+
+    active = next(event for event in events if event.get("state") == "active")
+    finish_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "context_request_finished"
+        and event.get("request_id") == active["request_id"]
+    )
+    retained_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "context_usage" and event.get("state") == "retained"
+    )
+    assert finish_index < retained_index
+    assert events[retained_index]["estimated"] is True
+    assert events[retained_index]["used_tokens"] > 0
+
+
+def test_failed_agent_request_is_removed_without_committing_context(tmp_path):
+    client = OpenAICompatibleClient(
+        provider_name="test",
+        model="test-model",
+        api_key="key",
+        base_url="https://context-failure.example/v1",
+        max_context_window=128_000,
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(400, json={"error": "bad request"})
+        ),
+        retry_audit_path=tmp_path / "audit",
+    )
+    config = load_config(project_root=tmp_path)
+    config.features.memory = False
+    agent = Agent(
+        llm_client=client,
+        tool_registry=ToolRegistry(),
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+    )
+
+    async def run() -> list[dict[str, Any]]:
+        return [event async for event in agent.run("hello")]
+
+    events = asyncio.run(run())
+
+    active = next(event for event in events if event.get("state") == "active")
+    finished = next(
+        event
+        for event in events
+        if event.get("type") == "context_request_finished"
+        and event.get("request_id") == active["request_id"]
+    )
+    assert finished["outcome"] == "failed"
+    assert not any(event.get("state") == "retained" for event in events)
+    assert agent.history == []
+
+
+def test_cooperative_cancellation_emits_context_scope_cleanup(tmp_path, monkeypatch):
+    monkeypatch.setenv("PAICLI_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+
+    class CancelAfterActiveClient:
+        provider_name = "fake"
+        model_name = "fake"
+        max_context_window = 1_000
+
+        def __init__(self):
+            self.cancel = False
+
+        async def chat(self, messages, tools, *, system_prompt):
+            del messages, tools, system_prompt
+            yield {
+                "type": "context_usage",
+                "state": "active",
+                "request_id": "cancel-request",
+                "scope": "agent",
+                "estimated": True,
+                "used_tokens": 20,
+                "input_tokens": 20,
+                "output_tokens": 0,
+                "cached_tokens": 0,
+                "context_window": 1_000,
+            }
+            self.cancel = True
+            yield {"type": "text_delta", "text": "not committed"}
+
+    client = CancelAfterActiveClient()
+    config = load_config(project_root=tmp_path)
+    config.features.memory = False
+    agent = Agent(
+        llm_client=client,
+        tool_registry=ToolRegistry(),
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+        cancellation_check=lambda: client.cancel,
+    )
+
+    async def run() -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        with pytest.raises(TaskCanceled):
+            async for event in agent.run("hello"):
+                events.append(event)
+        return events
+
+    events = asyncio.run(run())
+
+    assert any(event.get("state") == "active" for event in events)
+    assert {"type": "context_scope_clear", "scope": "agent"} in events
+    assert agent.history == []
+
+
+def test_clear_history_also_resets_context_compaction_state(tmp_path):
+    config = load_config(project_root=tmp_path)
+    agent = Agent(
+        llm_client=FakeClient(),
+        tool_registry=ToolRegistry(),
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+    )
+    agent.history = [Message(role="user", content="old session")]
+    agent.context_manager._current_summary = "old summary"
+    agent.context_manager._last_compaction = object()
+
+    agent.clear_history()
+
+    assert agent.history == []
+    status = agent.context_manager.get_status()
+    assert status["current_summary"] == ""
+    assert status["last_compaction"]["compacted_items"] == 0
 
 
 class FakeClient:
@@ -180,6 +590,116 @@ def test_query_engine_executes_tool_and_replays_result(tmp_path, monkeypatch):
     result = asyncio.run(run())
     assert result.text == "done"
     assert result.turns == 2
+
+
+def test_agent_run_updates_pending_context_after_tool_result(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PAICLI_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    (tmp_path / "note.txt").write_text("hello\n", encoding="utf-8")
+
+    class ContextAwareToolClient(FakeClient):
+        def context_usage_event(self, messages, tools, system_prompt, *, state, scope="agent"):
+            used = (
+                len(system_prompt)
+                + len(json.dumps(tools))
+                + sum(len(str(message.content)) for message in messages)
+            )
+            return {
+                "type": "context_usage",
+                "state": state,
+                "scope": scope,
+                "estimated": True,
+                "input_tokens": used,
+                "output_tokens": 0,
+                "used_tokens": used,
+                "cached_tokens": 0,
+                "context_window": self.max_context_window,
+            }
+
+    config = load_config(project_root=tmp_path)
+    config.features.memory = False
+    registry = ToolRegistry()
+    registry.register_all(get_builtin_tools())
+    agent = Agent(
+        llm_client=ContextAwareToolClient(),
+        tool_registry=registry,
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+    )
+
+    async def run() -> list[dict[str, Any]]:
+        return [event async for event in agent.run("read note")]
+
+    events = asyncio.run(run())
+
+    tool_result_index = next(
+        index for index, event in enumerate(events) if event.get("type") == "tool_result"
+    )
+    pending_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "context_usage" and event.get("state") == "pending"
+    )
+    assert tool_result_index < pending_index
+    assert events[pending_index]["scope"] == "agent"
+    assert events[pending_index]["used_tokens"] > 0
+
+
+def test_failed_follow_up_request_clears_tool_result_pending_context(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PAICLI_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    (tmp_path / "note.txt").write_text("hello\n", encoding="utf-8")
+
+    class ToolThenFailureClient(FakeClient):
+        async def chat(self, messages, tools, *, system_prompt):
+            if self.calls == 0:
+                async for event in super().chat(messages, tools, system_prompt=system_prompt):
+                    yield event
+                return
+            raise OSError("follow-up failed")
+            yield  # pragma: no cover
+
+        def context_usage_event(self, messages, tools, system_prompt, *, state, scope="agent"):
+            return {
+                "type": "context_usage",
+                "state": state,
+                "scope": scope,
+                "estimated": True,
+                "input_tokens": 25,
+                "output_tokens": 0,
+                "used_tokens": 25,
+                "cached_tokens": 0,
+                "context_window": 1_000,
+            }
+
+    config = load_config(project_root=tmp_path)
+    config.features.memory = False
+    registry = ToolRegistry()
+    registry.register_all(get_builtin_tools())
+    agent = Agent(
+        llm_client=ToolThenFailureClient(),
+        tool_registry=registry,
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+    )
+
+    async def run() -> list[dict[str, Any]]:
+        return [event async for event in agent.run("read note")]
+
+    events = asyncio.run(run())
+
+    pending_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "context_usage" and event.get("state") == "pending"
+    )
+    clear_index = next(
+        index for index, event in enumerate(events) if event.get("type") == "context_pending_clear"
+    )
+    assert pending_index < clear_index
+    assert not any(event.get("state") == "retained" for event in events)
 
 
 def test_background_query_stops_at_a_cancellation_boundary(tmp_path, monkeypatch):
