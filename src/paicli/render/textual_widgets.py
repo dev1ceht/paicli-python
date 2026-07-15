@@ -124,7 +124,7 @@ class InfoBlock(Static):
 
 
 class StartupBanner(Vertical):
-    """Adaptive session introduction that recedes after the first submission."""
+    """Adaptive session introduction that remains visible during the session."""
 
     DEFAULT_CSS = """
     StartupBanner {
@@ -134,9 +134,6 @@ class StartupBanner(Vertical):
         padding: 0 1;
         background: #0d1117;
         border-left: solid #60d8ff;
-    }
-    StartupBanner .banner-receded {
-        display: none;
     }
     StartupBanner .banner-compact {
         display: none;
@@ -167,15 +164,6 @@ class StartupBanner(Vertical):
     StartupBanner .banner-workspace {
         color: #8b949e;
     }
-    StartupBanner.receded {
-        height: 1;
-        margin: 0;
-        padding: 0 1;
-        border: none;
-    }
-    StartupBanner.receded .banner-main {
-        display: none;
-    }
     StartupBanner.compact {
         height: 3;
     }
@@ -184,14 +172,6 @@ class StartupBanner(Vertical):
     }
     StartupBanner.compact .banner-compact {
         display: block;
-    }
-    StartupBanner.receded .banner-receded {
-        display: block;
-        height: 1;
-        color: #8b949e;
-    }
-    StartupBanner.receded .banner-compact {
-        display: none;
     }
     """
 
@@ -216,7 +196,6 @@ class StartupBanner(Vertical):
         self._skills = skills
         self._mcp_servers = mcp_servers
         self._cwd = cwd
-        self._receded = False
         self._compact = False
 
     def _expanded_text(self) -> str:
@@ -226,14 +205,6 @@ class StartupBanner(Vertical):
             f"Tools: {self._tools} · Skills: {self._skills} · "
             f"MCP: {self._mcp_servers} servers\n"
             f"{self._cwd} · /help commands"
-        )
-
-    def _receded_renderable(self) -> Text:
-        return Text.assemble(
-            ("PAICLI", "bold #f0f6fc"),
-            (f"  v{self._version}  ", "#8b949e"),
-            (self._model, "#f0f6fc"),
-            (f"  {self._cwd}", "#8b949e"),
         )
 
     def _compact_text(self) -> str:
@@ -246,15 +217,9 @@ class StartupBanner(Vertical):
 
     @property
     def plain_text(self) -> str:
-        if self._receded:
-            return f"PAICLI v{self._version}  {self._model}  {self._cwd}"
         if self._compact:
             return self._compact_text()
         return self._expanded_text()
-
-    @property
-    def is_receded(self) -> bool:
-        return self._receded
 
     @property
     def is_compact(self) -> bool:
@@ -266,14 +231,7 @@ class StartupBanner(Vertical):
         if compact == self._compact:
             return
         self._compact = compact
-        self.set_class(compact and not self._receded, "compact")
-
-    def recede(self) -> None:
-        """Reduce the startup summary after the conversation begins."""
-        if not self._receded:
-            self._receded = True
-            self.remove_class("compact")
-            self.add_class("receded")
+        self.set_class(compact, "compact")
 
     def update_hitl(self, hitl: str) -> None:
         """Refresh the HITL summary without changing the banner's position."""
@@ -287,11 +245,9 @@ class StartupBanner(Vertical):
         self._provider = provider
         self.query_one("#banner-model", Static).update(Text(model, style="#f0f6fc"))
         self.query_one("#banner-provider", Static).update(Text(provider, style="#60d8ff"))
-        self.query_one(".banner-receded", Static).update(self._receded_renderable())
         self.query_one(".banner-compact", Static).update(self._compact_text())
 
     def compose(self) -> ComposeResult:
-        yield Static(self._receded_renderable(), classes="banner-receded")
         yield Static(self._compact_text(), classes="banner-compact")
         with Vertical(classes="banner-main"):
             yield Static(
