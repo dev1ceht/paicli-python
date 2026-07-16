@@ -12,12 +12,52 @@ from paicli.agent import QueryEngine
 from paicli.agent.agent import Agent
 from paicli.cancellation import TaskCanceled
 from paicli.config import LlmConfig, load_config
+from paicli.context import ContextManager
 from paicli.context.telemetry import use_context_scope
 from paicli.llm.openai_compatible import OpenAICompatibleClient
 from paicli.retry import RetryPolicy
 from paicli.tools import ToolRegistry, get_builtin_tools
 from paicli.tools.base import Tool, ToolResult
 from paicli.types import Message
+
+
+def test_query_engine_uses_injected_context_manager_factory(tmp_path, monkeypatch):
+    monkeypatch.setenv("PAICLI_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    body = (
+        "data: "
+        + json.dumps({"choices": [{"delta": {"content": "done"}, "finish_reason": "stop"}]})
+        + "\n\ndata: [DONE]\n\n"
+    ).encode()
+    client = OpenAICompatibleClient(
+        provider_name="test",
+        model="test-model",
+        api_key="key",
+        base_url="https://factory.example/v1",
+        max_context_window=128_000,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=body)),
+        retry_audit_path=tmp_path / "audit",
+    )
+    config = load_config(project_root=tmp_path)
+    config.features.memory = False
+    created: list[ContextManager] = []
+
+    def factory(*, config, llm_client, cwd):
+        manager = ContextManager(config=config, llm_client=llm_client, cwd=cwd)
+        created.append(manager)
+        return manager
+
+    engine = QueryEngine(
+        llm_client=client,
+        tool_registry=ToolRegistry(),
+        config=config,
+        cwd=str(tmp_path),
+        context_manager_factory=factory,
+    )
+
+    result = asyncio.run(engine.ask_complete_async("hello"))
+
+    assert result.text == "done"
+    assert len(created) == 1
 
 
 def test_prepared_outbound_request_freezes_exact_payload_and_usage_numerator():

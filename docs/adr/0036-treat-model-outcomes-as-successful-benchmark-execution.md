@@ -1,0 +1,3 @@
+# Treat model outcomes as successful benchmark execution
+
+The SWE-bench CLI will return zero whenever a stage produces a complete, valid artifact, even if predictions are empty, Agent attempts fail, official outcomes are unresolved, or the optimized variant does not improve; those are benchmark observations rather than runner failures. Invalid arguments, data, repositories, identities, usage, or incomplete infrastructure results return one, and user interruption returns 130. This separates experiment validity from model quality at the cost of requiring callers to inspect structured results rather than infer model success from the process code.
