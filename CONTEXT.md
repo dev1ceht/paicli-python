@@ -120,9 +120,25 @@ _Avoid_: compression works, token savings alone, scripted cost win
 A context-management evaluation in which a scripted model replays fixed tool calls while PaiCLI executes them in an isolated fixture copy. Its token measurements are estimated proxies, not provider billing telemetry.
 _Avoid_: pure event replay, real-cost evaluation
 
+**Scripted benchmark client**:
+A deterministic model substitute that emits predefined production-format Agent responses and tool calls to verify benchmark infrastructure without measuring model capability.
+_Avoid_: mock Agent, coding model, live benchmark
+
+**Live coding benchmark**:
+A coding benchmark executed with a configured external model service to measure the end-to-end coding behavior of that PaiCLI and model combination.
+_Avoid_: scripted benchmark, framework test, model-only evaluation
+
 **Coding benchmark task**:
 An isolated repository-level coding problem with a stated goal and an independent correctness check.
 _Avoid_: unit test, fixture, prompt
+
+**Benchmark task prompt**:
+The versioned user message sent verbatim through the production Agent path for a coding benchmark task, without benchmark-specific wrapper instructions.
+_Avoid_: system prompt, task metadata, benchmark preamble
+
+**Benchmark manifest**:
+The strictly validated, versioned definition of a benchmark suite and its tasks, containing safe references to fixtures and withheld acceptance material rather than embedded repository contents.
+_Avoid_: task fixture, run artifact, JSONL dataset
 
 **Benchmark fixture**:
 The version-controlled starting repository for a coding benchmark task, copied into an isolated workspace for each attempt so the source remains unchanged.
@@ -133,16 +149,108 @@ A task test available inside the Agent workspace to support diagnosis and iterat
 _Avoid_: acceptance test, verifier, quality gate
 
 **Acceptance verifier**:
-The authoritative correctness check executed outside the Agent workspace against the Agent's resulting change, using validation material the Agent could neither inspect nor modify during the attempt.
+The authoritative correctness check executed outside the Agent workspace against the Agent's resulting change, using preloaded validation material whose integrity is independent of the attempt.
 _Avoid_: public test, self-verification, Agent test run
+
+**Withheld acceptance material**:
+Version-controlled verifier inputs deliberately omitted from the Agent workspace and preloaded before the attempt; without filesystem isolation they are withheld by layout but not guaranteed confidential from arbitrary shell access.
+_Avoid_: secret test, public benchmark test, encrypted fixture
+
+**Acceptance integrity**:
+The guarantee that final verification uses the fingerprinted acceptance material preloaded before an attempt, unaffected by files or tests the Agent later changes.
+_Avoid_: test confidentiality, fixture immutability, patch validation
+
+**Acceptance confidentiality**:
+The guarantee that an Agent cannot observe withheld acceptance material; the baseline local smoke suite does not provide it because arbitrary shell execution is not filesystem-isolated.
+_Avoid_: acceptance integrity, hidden-by-layout, path guard
+
+**Coding benchmark correctness**:
+The pass-or-fail outcome determined exclusively by the acceptance verifier for a completed coding benchmark attempt.
+_Avoid_: composite score, Agent confidence, public-test result
+
+**Benchmark telemetry**:
+Non-authoritative measurements attached to an attempt, such as context consumption, Agent turns, elapsed time, patch size, and execution errors; telemetry supports comparison but cannot compensate for incorrectness.
+_Avoid_: benchmark score, correctness, quality grade
+
+**Benchmark token usage**:
+Provider-reported input, output, and total token usage for a live attempt, kept distinct from estimated context measurements and synthetic scripted-client data.
+_Avoid_: estimated cost, context size, model price
+
+**Benchmark execution status**:
+The outcome of running an attempt through PaiCLI: `completed`, `agent_error`, or `benchmark_error`; it identifies whether execution finished or which boundary prevented a fair result.
+_Avoid_: correctness, test result, pass status
+
+**Benchmark verification status**:
+The acceptance verifier outcome `passed`, `failed`, or `not_run`, recorded independently from benchmark execution status.
+_Avoid_: execution status, Agent result, public-test status
 
 **Coding benchmark attempt**:
 One execution of PaiCLI against a coding benchmark task, producing a workspace change, an Agent response, execution evidence, and a verification outcome.
 _Avoid_: test run, chat session, evaluation task
 
+**Benchmark patch**:
+The complete net change from a task fixture's recorded baseline to the Agent workspace's final file tree, independent of the Agent's staging or commit behavior.
+_Avoid_: working-tree diff, commit, verifier patch
+
+**Benchmark repetition**:
+An independent coding benchmark attempt for the same task and recorded configuration, starting from a fresh workspace and Agent session so observed variation is not inherited state.
+_Avoid_: retry, resumed attempt, verifier rerun
+
+**Benchmark tool profile**:
+The named, recorded subset of production PaiCLI tools available to every attempt in a comparable benchmark run.
+_Avoid_: tool registry, permission mode, Agent capability
+
+**Network-tool-free coding profile**:
+The baseline benchmark tool profile containing workspace-scoped file operations plus shell commands launched from the task workspace, while excluding dedicated web, browser, MCP, long-term memory, and snapshot restoration tools. Shell commands are neither filesystem- nor network-isolated, so this profile is not an execution sandbox.
+_Avoid_: offline profile, hermetic environment, sandbox
+
+**Unsandboxed benchmark acknowledgement**:
+The explicit live-run confirmation that Agent shell commands and verifier execution use the current user's host permissions; it records informed acceptance but provides no isolation.
+_Avoid_: sandbox enablement, permission grant, unattended mode
+
+**Benchmark resource budget**:
+The recorded Agent turn, tool-call, elapsed-time, and token limits shared by every task in a comparable benchmark run; changing the budget creates a different benchmark configuration.
+_Avoid_: task timeout, usage telemetry, per-task allowance
+
 **Local verification benchmark**:
 A coding benchmark whose task repository and correctness check run entirely in a controlled local environment, used as the first end-to-end gate for the shared coding-evaluation protocol.
 _Avoid_: unit-test suite, scripted context-cost evaluation, official benchmark
+
+**Local smoke suite**:
+The versioned seven-task local verification benchmark, comprising five PaiCLI long-session scenarios and two adapted FirstCoder local-pytest tasks, that exercises end-to-end coding evaluation across representative small repository changes; it validates integration, not broad coding mastery.
+_Avoid_: capability leaderboard, context-cost evaluation, regression unit tests
+
+**Benchmark suite identity**:
+The combination of a suite's versioned name and content fingerprint; results are directly comparable only when both values match.
+_Avoid_: display name, runner version, Git branch
+
+**Benchmark runtime identity**:
+The recorded PaiCLI version, source revision, dirty state, and relevant source-content fingerprint that identify the implementation exercised by a benchmark run.
+_Avoid_: model identity, suite identity, run ID
+
+**Benchmark configuration identity**:
+The secret-free fingerprint of model settings, resource budget, and benchmark tool profile used for a run.
+_Avoid_: API credentials, runtime identity, task manifest
+
+**Benchmark environment identity**:
+The recorded operating system, architecture, Python version, and relevant dependency versions of the environment hosting a benchmark run.
+_Avoid_: runtime identity, model configuration, task workspace
+
+**Low-variance benchmark sampling**:
+The baseline live-benchmark sampling profile that requests model temperature zero to reduce response variation without claiming deterministic model behavior.
+_Avoid_: deterministic model, fixed seed, production sampling default
+
+**Benchmark replicate**:
+A run whose suite, runtime, benchmark configuration, and environment identities match another run, allowing their attempts to be aggregated as repeated samples.
+_Avoid_: rerun, historical result, controlled comparison
+
+**Controlled benchmark comparison**:
+A comparison using the same suite identity in which one declared dimension, such as PaiCLI runtime or model, changes while all non-target dimensions remain fixed and recorded.
+_Avoid_: result aggregation, side-by-side report, arbitrary comparison
+
+**Benchmark run artifact**:
+A redacted, reconstructable record of one benchmark run containing structured results and per-attempt evidence, stored outside version control without retained workspaces by default.
+_Avoid_: benchmark definition, source fixture, session archive
 
 **Production-path benchmark execution**:
 A coding benchmark attempt that uses the same Agent orchestration and safety boundaries as normal PaiCLI use, while allowing benchmark-specific configuration and a controlled model client.
