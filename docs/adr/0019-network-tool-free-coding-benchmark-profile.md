@@ -1,0 +1,3 @@
+# Use a network-tool-free profile for coding benchmarks
+
+The baseline coding benchmark will run the production Agent with workspace-scoped file operations and shell commands launched from the task workspace, while excluding dedicated web, browser, MCP, long-term memory, and snapshot restoration tools. Shell execution is retained for realistic local testing but is neither filesystem- nor network-isolated, so every artifact must record both limitations, live runs must require explicit unsandboxed-execution acknowledgement, and the profile must not be described as offline or hermetic; true isolation remains a separate prerequisite for untrusted tasks or public leaderboard claims.

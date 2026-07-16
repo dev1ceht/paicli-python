@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "suite_id": "local-smoke-v1",
+  "verifier": {
+    "kind": "pytest",
+    "timeout_seconds": 120
+  },
+  "tasks": [
+    {
+      "id": "multi-file-refactor",
+      "prompt": "Rename getUserName to get_user_name across the package and public tests. Preserve existing behavior, update every reference, and verify the change.",
+      "fixture_repo": "fixtures/multi-file-refactor",
+      "acceptance": "acceptance/multi-file-refactor",
+      "provenance": {"project": "PaiCLI-Python", "revision": "bdcf0ce", "task_id": "multi-file-refactor"}
+    },
+    {
+      "id": "debug-and-fix",
+      "prompt": "Use error.log to fix process so it sums every value in the input list. Preserve sensible behavior for empty and single-value lists and verify the fix.",
+      "fixture_repo": "fixtures/debug-and-fix",
+      "acceptance": "acceptance/debug-and-fix",
+      "provenance": {"project": "PaiCLI-Python", "revision": "bdcf0ce", "task_id": "debug-and-fix"}
+    },
+    {
+      "id": "health-endpoint",
+      "prompt": "Add a /health endpoint to the lightweight app so get('/health') returns ({'status': 'ok'}, 200). Preserve the existing index endpoint and add a focused public test.",
+      "fixture_repo": "fixtures/health-endpoint",
+      "acceptance": "acceptance/health-endpoint",
+      "provenance": {"project": "PaiCLI-Python", "revision": "bdcf0ce", "task_id": "add-endpoint-with-test"}
+    },
+    {
+      "id": "config-migration",
+      "prompt": "Migrate every service configuration from schema_version 1 to schema_version 2 without changing each service name. Verify that no service is missed.",
+      "fixture_repo": "fixtures/config-migration",
+      "acceptance": "acceptance/config-migration",
+      "provenance": {"project": "PaiCLI-Python", "revision": "bdcf0ce", "task_id": "config-migration"}
+    },
+    {
+      "id": "dependency-upgrade",
+      "prompt": "Pin requests to version 2.31, set session.trust_env to False, and remove unsafe request defaults from every call site: never disable TLS verification and always use a finite positive timeout. Verify the change without installing dependencies.",
+      "fixture_repo": "fixtures/dependency-upgrade",
+      "acceptance": "acceptance/dependency-upgrade",
+      "provenance": {"project": "PaiCLI-Python", "revision": "bdcf0ce", "task_id": "dependency-upgrade"}
+    },
+    {
+      "id": "string-normalize",
+      "prompt": "Fix src/text_tools.py. normalize_username should trim leading and trailing whitespace, lowercase the username, collapse each internal whitespace run to one dash, and raise ValueError for blank input. Keep the public function name unchanged.",
+      "fixture_repo": "fixtures/string-normalize",
+      "acceptance": "acceptance/string-normalize",
+      "provenance": {"project": "FirstCoder", "revision": "0067930", "task_id": "string_normalize"}
+    },
+    {
+      "id": "invoice-totals",
+      "prompt": "Fix src/invoice.py. invoice_total should multiply price by quantity, default missing quantity to 1, reject negative quantities with ValueError, apply tax_rate, and return a float rounded to two decimal places.",
+      "fixture_repo": "fixtures/invoice-totals",
+      "acceptance": "acceptance/invoice-totals",
+      "provenance": {"project": "FirstCoder", "revision": "0067930", "task_id": "invoice_totals"}
+    }
+  ]
+}
