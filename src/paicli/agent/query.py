@@ -195,8 +195,26 @@ async def query(
                 yield {
                     "type": "context_reduced",
                     "before_ratio": context_result.pressure_before.pressure_ratio,
-                    "after_ratio": context_result.pressure_after.pressure_ratio,
+                    "after_ratio": (
+                        context_result.pressure_after.pressure_ratio
+                        if context_result.pressure_after
+                        else None
+                    ),
                     "actions": list(context_result.reductions),
+                }
+            if context_result.auxiliary_usage:
+                auxiliary_input = int(context_result.auxiliary_usage.get("input_tokens") or 0)
+                auxiliary_output = int(context_result.auxiliary_usage.get("output_tokens") or 0)
+                usage_input += auxiliary_input
+                usage_output += auxiliary_output
+                yield {
+                    "type": "usage",
+                    "usage": {
+                        "input_tokens": auxiliary_input,
+                        "output_tokens": auxiliary_output,
+                        "total_tokens": auxiliary_input + auxiliary_output,
+                    },
+                    "purpose": "context_summary",
                 }
         else:
             final_system_prompt = system_prompt

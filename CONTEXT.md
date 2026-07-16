@@ -176,6 +176,10 @@ _Avoid_: benchmark score, correctness, quality grade
 Provider-reported input, output, and total token usage for a live attempt, kept distinct from estimated context measurements and synthetic scripted-client data.
 _Avoid_: estimated cost, context size, model price
 
+**Benchmark input-token cost**:
+The provider-reported input tokens consumed by all model calls attributable to a scheduled live attempt, including context-summary calls; suite averages include resolved and unresolved attempts rather than only successful tasks.
+_Avoid_: estimated context, successful-task cost, main-loop usage only
+
 **Benchmark execution status**:
 The outcome of running an attempt through PaiCLI: `completed`, `agent_error`, or `benchmark_error`; it identifies whether execution finished or which boundary prevented a fair result.
 _Avoid_: correctness, test result, pass status
@@ -252,13 +256,65 @@ _Avoid_: result aggregation, side-by-side report, arbitrary comparison
 A redacted, reconstructable record of one benchmark run containing structured results and per-attempt evidence, stored outside version control without retained workspaces by default.
 _Avoid_: benchmark definition, source fixture, session archive
 
+**Formal benchmark run**:
+An immutable benchmark run intended to support an external comparison or resume claim, executed from a clean runtime and finalizable only when every scheduled attempt and required official outcome is complete and valid.
+_Avoid_: development run, partial result, selected attempts
+
 **Production-path benchmark execution**:
 A coding benchmark attempt that uses the same Agent orchestration and safety boundaries as normal PaiCLI use, while allowing benchmark-specific configuration and a controlled model client.
 _Avoid_: benchmark Agent, test-only loop, simulated Agent
 
+**SWE-bench prediction generation**:
+The PaiCLI-owned benchmark stage that runs the production Agent against fixed SWE-bench instances and emits official-format model patches plus separate generation telemetry; it does not determine whether an issue is resolved.
+_Avoid_: SWE-bench evaluation, official scoring, harness run
+
+**SWE-bench repository preparation**:
+The pre-generation stage that materializes and verifies one clean repository workspace at the declared base commit for each selected instance, without calling a model or exposing reference fixes.
+_Avoid_: prediction generation, harness environment setup, task execution
+
+**SWE-bench repository cache**:
+A reusable local copy of an upstream repository's Git history from which preparation creates independent instance workspaces; it contains no Agent changes or benchmark outcomes.
+_Avoid_: instance workspace, benchmark artifact, source checkout
+
+**Fixed SWE-bench instance subset**:
+A versioned, fingerprinted selection of SWE-bench instances used as the unchanged task population for smoke, development, or controlled-comparison runs; its results are subset evidence rather than a full-suite score.
+_Avoid_: SWE-bench Lite score, sampled run, selected attempts
+
+**SWE-bench capability subset**:
+The fixed 30-instance SWE-bench Lite subset selected independently of PaiCLI outcomes to measure repository-level coding correctness across upstream projects.
+_Avoid_: official Lite score, context-stress suite, successful-task set
+
+**SWE-bench context-stress subset**:
+The fixed 10-instance SWE-bench Lite subset selected before execution for workflows expected to create substantial task-relevant context, used to compare context-reduction variants rather than estimate general SWE-bench performance.
+_Avoid_: capability score, random sample, full-suite result
+
+**Context-stress profile**:
+A versioned benchmark-only configuration that gives full-history and optimized context variants the same explicit input budget on the context-stress subset; `stress-32k-v1` is the initial profile, and any formal budget change creates a different immutable profile identity.
+_Avoid_: production context budget, model context window, natural long-context workload
+
+**SWE-bench task projection**:
+The four generation inputs—instance identity, upstream repository, base commit, and problem statement—read from a SWE-bench source record while every other field is ignored and excluded from Agent inputs and run artifacts. Projection limits ordinary data flow but does not guarantee reference-data confidentiality during unsandboxed execution.
+_Avoid_: sanitized dataset, complete instance record, hidden task data
+
+**Official SWE-bench evaluation**:
+The user-operated external benchmark stage in which the official Docker harness applies previously generated model patches and determines each instance's resolved outcome; PaiCLI does not launch this stage.
+_Avoid_: prediction generation, Agent self-test, PaiCLI verification
+
+**Consolidated SWE-bench report**:
+A PaiCLI-produced read-only join of generation telemetry and user-supplied official harness outcomes by instance identity; it preserves the official resolved decision and does not rerun or reinterpret the harness.
+_Avoid_: official harness report, PaiCLI score, benchmark evaluation
+
+**Complete SWE-bench outcome set**:
+A user-supplied official evaluation result containing exactly one resolved or not-resolved outcome for every scheduled instance and no others; only a complete set can produce a final pass@1 report.
+_Avoid_: partial harness report, successful instances, available results
+
 **Context-reduction variant**:
 One controlled context-handling policy used for every run of the same benchmark task: full history, deterministic compaction, or LLM-handoff compaction.
 _Avoid_: experiment mode, model variant
+
+**Full-history benchmark baseline**:
+The context-reduction variant that preserves outbound conversation and tool-result history without reduction while retaining the same Agent runtime, task inputs, model, tools, and request budget as the optimized variant.
+_Avoid_: old PaiCLI version, larger-window control, production mode
 
 **Synthetic pressure history**:
 Benchmark-only conversation history added before a scripted task to cross the context-pressure threshold. It is controlled test input, not evidence that a production task has the same history.

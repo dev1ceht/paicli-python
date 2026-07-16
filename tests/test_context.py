@@ -465,6 +465,7 @@ class TestContextManagerBuildTurnContext:
         assert llm.calls == 1
         assert result.compacted
         assert "history_summary" in result.reductions
+        assert result.auxiliary_usage == {"input_tokens": 10, "output_tokens": 5}
         assert old_marker not in "\n".join(str(message.content) for message in result.messages)
         assert "Summarized old context" in str(result.messages[0].content)
 

@@ -1,0 +1,5 @@
+# Use a controlled 32K profile for context-stress comparisons
+
+PaiCLI will compare full-history and optimized context variants on `context-stress-10` under the same explicitly named `stress-32k-v1` effective input budget, while `capability-30` retains the current production budget. The smaller controlled budget makes context-governance behavior observable without attributing the result to the current production configuration; reports and external claims must label it as a 32K stress experiment, accepting that it demonstrates constrained-context effectiveness rather than natural savings under PaiCLI's approximately 200K effective production budget. If the profile proves unusable, a larger budget will receive a new profile name and configuration identity rather than changing or aggregating with the 32K results.
+
+Input and output-reserve budgets are configurable implementation parameters rather than hard-coded constants. Formal runs must load an immutable named profile whose exact values are fingerprinted and cannot be overridden; ad hoc overrides are identified as custom configurations and cannot be aggregated with the named profile.

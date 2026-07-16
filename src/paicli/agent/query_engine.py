@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 
 from paicli.agent.agent import Agent
 from paicli.cancellation import CancellationCheck
 from paicli.config import PaiCliConfig
+from paicli.context import ContextManager
 from paicli.llm.base import LlmClient
 from paicli.prompt import PromptAssembler
 from paicli.tools.registry import ToolRegistry
@@ -21,6 +23,7 @@ class QueryEngine:
         cwd: str,
         approval_callback=None,
         cancellation_check: CancellationCheck | None = None,
+        context_manager_factory: Callable[..., ContextManager] | None = None,
     ):
         self.llm_client = llm_client
         self.tool_registry = tool_registry
@@ -28,6 +31,7 @@ class QueryEngine:
         self.cwd = cwd
         self.approval_callback = approval_callback
         self.cancellation_check = cancellation_check
+        self.context_manager_factory = context_manager_factory
         self.system_prompt = PromptAssembler(
             config=config,
             cwd=cwd,
@@ -53,6 +57,7 @@ class QueryEngine:
             config=self.config,
             approval_callback=self.approval_callback,
             cancellation_check=self.cancellation_check,
+            context_manager_factory=self.context_manager_factory,
         )
         agent.history = list(history or [])
         async for event in agent.run(

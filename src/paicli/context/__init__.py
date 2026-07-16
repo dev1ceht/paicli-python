@@ -66,6 +66,7 @@ class ContextBuildResult:
     reductions: list[str] = field(default_factory=list)
     compacted: bool = False
     pressure_tier: str | None = None
+    auxiliary_usage: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -234,6 +235,11 @@ class ContextManager:
             )
 
         self._last_pressure = pressure
+        auxiliary_usage = (
+            dict(self._last_compaction.llm_usage)
+            if compacted and self._last_compaction is not None
+            else {}
+        )
         return ContextBuildResult(
             system_prompt=sections.render(),
             messages=output_messages,
@@ -243,6 +249,7 @@ class ContextManager:
             reductions=reductions,
             compacted=compacted,
             pressure_tier=pressure.tier.value,
+            auxiliary_usage=auxiliary_usage,
         )
 
     def _calculate_budget(self) -> Budget:

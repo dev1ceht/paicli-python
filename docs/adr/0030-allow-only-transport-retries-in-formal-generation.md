@@ -1,0 +1,3 @@
+# Allow only transport retries in formal prediction generation
+
+Formal SWE-bench generation may use a fixed, fingerprinted retry policy inside the same model request for transient transport failures such as timeouts, rate limits, or retryable server errors, but it will not regenerate an entire task after an Agent error, empty patch, context-limit failure, or poor outcome. Exhausted request retries count as an Agent failure in the fixed pass@1 denominator, while a runner failure before the first model call invalidates the whole affected formal run rather than permitting selective task retention; this preserves a one-patch-per-task pass@1 interpretation at the cost of treating some persistent provider failures as task failures.

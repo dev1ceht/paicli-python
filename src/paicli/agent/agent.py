@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from typing import Any
 
@@ -31,6 +31,7 @@ class Agent:
         approval_callback=None,
         max_turns: int | None = None,
         cancellation_check: CancellationCheck | None = None,
+        context_manager_factory: Callable[..., ContextManager] | None = None,
     ):
         self.llm_client = llm_client
         self.tool_registry = tool_registry
@@ -44,11 +45,8 @@ class Agent:
         self.session_allowed_tools: set[str] = set()
 
         # 初始化上下文管理器
-        self.context_manager = ContextManager(
-            config=config,
-            llm_client=llm_client,
-            cwd=cwd,
-        )
+        manager_factory = context_manager_factory or ContextManager
+        self.context_manager = manager_factory(config=config, llm_client=llm_client, cwd=cwd)
 
     async def run(
         self,
