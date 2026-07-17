@@ -1,0 +1,43 @@
+{
+  "artifact_schema_version": 1,
+  "dataset_fingerprint": "51f5112b9be08207f113b8e6cb012e50e3d085663d5233ebef6f9c9c855e9259",
+  "instance_ids": [
+    "mwaskom__seaborn-3010",
+    "django__django-16139",
+    "sphinx-doc__sphinx-8435",
+    "astropy__astropy-7746",
+    "pallets__flask-4992",
+    "sympy__sympy-20154",
+    "pydata__xarray-4248",
+    "pytest-dev__pytest-8365",
+    "pylint-dev__pylint-7080",
+    "psf__requests-1963",
+    "scikit-learn__scikit-learn-25500",
+    "matplotlib__matplotlib-24149",
+    "mwaskom__seaborn-3407",
+    "django__django-15213",
+    "sphinx-doc__sphinx-8627",
+    "astropy__astropy-12907",
+    "pallets__flask-4045",
+    "sympy__sympy-15308",
+    "pydata__xarray-5131",
+    "pytest-dev__pytest-7490",
+    "pylint-dev__pylint-7114",
+    "psf__requests-2148",
+    "scikit-learn__scikit-learn-12471",
+    "matplotlib__matplotlib-26020",
+    "mwaskom__seaborn-2848",
+    "django__django-11848",
+    "sphinx-doc__sphinx-7738",
+    "astropy__astropy-14182",
+    "pallets__flask-5063",
+    "sympy__sympy-13437"
+  ],
+  "selection_fingerprint": "957f775d37fe6337721f01be3094e1fd6ca4898ad6f59506ab5642733c646d2f",
+  "selection_id": "capability-30",
+  "source": {
+    "kind": "huggingface",
+    "path": null,
+    "revision": "69611d31007e1c6731db8bd5b5c3f2d33f5bab6e"
+  }
+}
