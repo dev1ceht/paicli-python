@@ -1,0 +1,23 @@
+{
+  "artifact_schema_version": 1,
+  "dataset_fingerprint": "51f5112b9be08207f113b8e6cb012e50e3d085663d5233ebef6f9c9c855e9259",
+  "instance_ids": [
+    "sphinx-doc__sphinx-7738",
+    "psf__requests-1963",
+    "django__django-16139",
+    "pylint-dev__pylint-7080",
+    "scikit-learn__scikit-learn-12471",
+    "pallets__flask-5063",
+    "pydata__xarray-4248",
+    "mwaskom__seaborn-3407",
+    "matplotlib__matplotlib-26020",
+    "sympy__sympy-13437"
+  ],
+  "selection_fingerprint": "911bcc4260e63c55761de07b3e7888fe76becee143b8d6132bfa7a7affb7f751",
+  "selection_id": "context-stress-10",
+  "source": {
+    "kind": "huggingface",
+    "path": null,
+    "revision": "69611d31007e1c6731db8bd5b5c3f2d33f5bab6e"
+  }
+}
