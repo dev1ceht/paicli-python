@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
+import socket
 import subprocess
 from pathlib import Path
 
@@ -21,6 +23,7 @@ from paicli.evaluation.swebench import (
     import_swebench_harness_results,
     load_context_stress_profile,
     load_swebench_instances,
+    load_swebench_selection,
     materialize_swebench_workspace,
     prepare_swebench_repositories,
     run_swebench_generation,
@@ -29,6 +32,14 @@ from paicli.evaluation.swebench import (
 from paicli.llm.base import PreparedOutboundRequest
 from paicli.prompt import PromptSections
 from paicli.types import Message
+
+_FORMAL_INSTANCE_IDS = (
+    "sphinx-doc__sphinx-7738",
+    "psf__requests-1963",
+    "django__django-16139",
+    "pylint-dev__pylint-7080",
+    "scikit-learn__scikit-learn-12471",
+)
 
 
 class _ScriptedWriteClient:
@@ -54,8 +65,11 @@ class _ScriptedWriteClient:
                     "index": 0,
                     "id": "write_value",
                     "function": {
-                        "name": "write_file",
-                        "arguments": '{"path":"module.py","content":"VALUE = 2\\n"}',
+                        "name": "edit_file",
+                        "arguments": (
+                            '{"path":"module.py","old":"VALUE = 1",'
+                            '"new":"VALUE = 2"}'
+                        ),
                     },
                 },
             }
@@ -65,6 +79,56 @@ class _ScriptedWriteClient:
         yield {"type": "text_delta", "text": "done"}
         yield {"type": "usage", "usage": {"input_tokens": 13, "output_tokens": 5}}
         yield {"type": "message_end", "stop_reason": "end_turn"}
+
+
+class _ScriptedCreateClient:
+    provider_name = "scripted"
+    model_name = "scripted-create"
+    max_context_window = 36_864
+
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.calls = 0
+
+    def prepare_request(self, messages, tools, *, system_prompt):
+        del messages, tools, system_prompt
+        return PreparedOutboundRequest(b"{}", estimated_input_tokens=10)
+
+    async def chat(self, messages, tools, *, system_prompt):
+        del messages, tools, system_prompt
+        self.calls += 1
+        if self.calls == 1:
+            arguments = json.dumps({"path": "created.py", "content": self.content})
+            yield {
+                "type": "tool_call_delta",
+                "tool_call": {
+                    "index": 0,
+                    "id": "create_file",
+                    "function": {"name": "write_file", "arguments": arguments},
+                },
+            }
+            yield {"type": "usage", "usage": {"input_tokens": 11, "output_tokens": 7}}
+            yield {"type": "message_end", "stop_reason": "tool_use"}
+            return
+        yield {"type": "text_delta", "text": "done"}
+        yield {"type": "usage", "usage": {"input_tokens": 13, "output_tokens": 5}}
+        yield {"type": "message_end", "stop_reason": "end_turn"}
+
+
+class _InterruptingClient:
+    provider_name = "scripted"
+    model_name = "scripted-interrupt"
+    max_context_window = 36_864
+
+    def prepare_request(self, messages, tools, *, system_prompt):
+        del messages, tools, system_prompt
+        return PreparedOutboundRequest(b"{}", estimated_input_tokens=10)
+
+    async def chat(self, messages, tools, *, system_prompt):
+        del messages, tools, system_prompt
+        if False:
+            yield {}
+        raise KeyboardInterrupt("simulated process interruption")
 
 
 def test_load_swebench_instances_projects_generation_fields(tmp_path: Path) -> None:
@@ -92,6 +156,59 @@ def test_load_swebench_instances_projects_generation_fields(tmp_path: Path) -> N
             problem_statement="Fix sympification.",
         ),
     )
+
+
+def test_load_swebench_selection_supports_versioned_derived_manifest(
+    tmp_path: Path,
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    records = [
+        {
+            "instance_id": instance_id,
+            "repo": "example/repo",
+            "base_commit": f"commit-{index}",
+            "problem_statement": f"problem {index}",
+        }
+        for index, instance_id in enumerate(("task-1", "task-2", "task-3"), start=1)
+    ]
+    dataset_fingerprint = hashlib.sha256(
+        json.dumps(
+            records,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    (snapshot / "dataset.json").write_text(json.dumps(records), encoding="utf-8")
+    (snapshot / "metadata.json").write_text(
+        json.dumps(
+            {
+                "dataset_fingerprint": dataset_fingerprint,
+                "selections": {"source-3": [record["instance_id"] for record in records]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifests = tmp_path / "manifests"
+    manifests.mkdir()
+    (manifests / "derived-2-v1.json").write_text(
+        json.dumps(
+            {
+                "dataset_fingerprint": dataset_fingerprint,
+                "instance_ids": ["task-1", "task-3"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    selected = load_swebench_selection(
+        snapshot,
+        selection="derived-2-v1",
+        manifest_root=manifests,
+    )
+
+    assert [instance.instance_id for instance in selected] == ["task-1", "task-3"]
 
 
 def test_select_repository_balanced_instances_takes_one_per_repo_first() -> None:
@@ -185,6 +302,53 @@ def test_prepare_repositories_reuses_mirror_and_materializes_clean_workspace(
     assert workspace.base_commit == commit
     assert _git(workspace.path, "status", "--porcelain").stdout == ""
     assert _git(workspace.path, "rev-parse", "HEAD").stdout.strip() == commit
+
+
+def test_prepare_repositories_does_not_fetch_when_cached_commit_exists(
+    tmp_path: Path,
+) -> None:
+    upstream = tmp_path / "upstream-cached"
+    upstream.mkdir()
+    _git(upstream, "init", "-q")
+    (upstream / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(upstream, "add", ".")
+    _git(
+        upstream,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-q",
+        "-m",
+        "base",
+    )
+    commit = _git(upstream, "rev-parse", "HEAD").stdout.strip()
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    mirror = cache_root / "example__repo.git"
+    subprocess.run(
+        ["git", "clone", "--mirror", str(upstream), str(mirror)],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", str(tmp_path / "missing-upstream")],
+        cwd=mirror,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    instance = SweBenchInstance("example__repo-1", "example/repo", commit, "Change it")
+
+    prepared = prepare_swebench_repositories(
+        (instance,),
+        cache_root=cache_root,
+        allow_network=True,
+    )
+
+    assert prepared[0].base_commit == commit
 
 
 def test_full_history_context_manager_preserves_messages_and_enforces_budget(
@@ -287,6 +451,234 @@ def test_generation_runs_both_variants_through_production_agent(tmp_path: Path) 
         )
         assert prediction["instance_id"] == instance.instance_id
         assert "VALUE = 2" in prediction["model_patch"]
+    assert not (tmp_path / "experiment" / "workspaces").exists()
+    assert not (tmp_path / "experiment" / "_work").exists()
+
+
+def test_generation_allows_password_identifier_in_patch_and_records_status(
+    tmp_path: Path,
+) -> None:
+    instance, cache_root = _generation_fixture(tmp_path)
+    profile = ContextStressProfile("stress-test", 32768, 4096, "f" * 64)
+
+    result = run_swebench_generation(
+        (instance,),
+        cache_root=cache_root,
+        output_dir=tmp_path / "experiment",
+        context_profile=profile,
+        client_factory=lambda _instance, _variant, _config: _ScriptedCreateClient(
+            "password = ReadOnlyPasswordHashField()\n"
+        ),
+        formal=False,
+    )
+
+    assert {attempt["patch_status"] for attempt in result["attempts"]} == {"non_empty"}
+    assert {attempt["termination_reason"] for attempt in result["attempts"]} == {
+        "natural_completion"
+    }
+    assert {attempt["state"] for attempt in result["attempts"]} == {"completed"}
+
+
+def test_generation_blocks_high_confidence_bearer_credential_in_added_lines(
+    tmp_path: Path,
+) -> None:
+    instance, cache_root = _generation_fixture(tmp_path)
+    profile = ContextStressProfile("stress-test", 32768, 4096, "f" * 64)
+
+    result = run_swebench_generation(
+        (instance,),
+        cache_root=cache_root,
+        output_dir=tmp_path / "experiment",
+        context_profile=profile,
+        client_factory=lambda _instance, _variant, _config: _ScriptedCreateClient(
+            'AUTHORIZATION = "Bearer abcdefghijklmnop"\n'
+        ),
+        formal=False,
+    )
+
+    assert {attempt["patch_status"] for attempt in result["attempts"]} == {
+        "credential_blocked"
+    }
+    assert {attempt["termination_reason"] for attempt in result["attempts"]} == {
+        "credential_blocked"
+    }
+    assert {attempt["credential_category"] for attempt in result["attempts"]} == {"bearer"}
+    for variant in ("full-history", "optimized"):
+        prediction = json.loads(
+            (tmp_path / "experiment" / variant / "predictions.jsonl").read_text(encoding="utf-8")
+        )
+        assert prediction["model_patch"] == ""
+
+
+def test_generation_resumes_frozen_artifacts_without_resampling_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    instance, cache_root = _generation_fixture(tmp_path)
+    profile = ContextStressProfile("stress-test", 32768, 4096, "f" * 64)
+    original_apply_check = swebench_module._local_apply_check
+
+    def fail_apply_check(*_args, **_kwargs):
+        raise RuntimeError("simulated apply-check interruption")
+
+    monkeypatch.setattr(swebench_module, "_local_apply_check", fail_apply_check)
+    with pytest.raises(RuntimeError, match="simulated apply-check interruption"):
+        run_swebench_generation(
+            (instance,),
+            cache_root=cache_root,
+            output_dir=tmp_path / "experiment",
+            context_profile=profile,
+            client_factory=lambda _instance, _variant, _config: _ScriptedWriteClient(),
+            formal=False,
+        )
+
+    metadata_path = (
+        tmp_path
+        / "experiment"
+        / "full-history"
+        / "attempts"
+        / instance.instance_id
+        / "metadata.json"
+    )
+    assert json.loads(metadata_path.read_text(encoding="utf-8"))["state"] == "generation_frozen"
+
+    monkeypatch.setattr(swebench_module, "_local_apply_check", original_apply_check)
+    sampled_variants: list[str] = []
+
+    def client_factory(_instance, variant, _config):
+        sampled_variants.append(variant)
+        return _ScriptedWriteClient()
+
+    result = run_swebench_generation(
+        (instance,),
+        cache_root=cache_root,
+        output_dir=tmp_path / "experiment",
+        context_profile=profile,
+        client_factory=client_factory,
+        formal=False,
+    )
+
+    assert sampled_variants == ["optimized"]
+    assert len(result["attempts"]) == 2
+    assert {attempt["state"] for attempt in result["attempts"]} == {"completed"}
+
+
+def test_generation_rejects_concurrent_process_for_same_experiment(tmp_path: Path) -> None:
+    instance, cache_root = _generation_fixture(tmp_path)
+    profile = ContextStressProfile("stress-test", 32768, 4096, "f" * 64)
+    experiment = tmp_path / "experiment"
+    experiment.mkdir()
+    (experiment / ".generation.lock").write_text(
+        json.dumps({"pid": os.getpid(), "hostname": socket.gethostname()}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="already active"):
+        run_swebench_generation(
+            (instance,),
+            cache_root=cache_root,
+            output_dir=experiment,
+            context_profile=profile,
+            client_factory=lambda _instance, _variant, _config: pytest.fail(
+                "model must not run while another process owns the experiment"
+            ),
+            formal=False,
+        )
+
+
+def test_generation_does_not_steal_a_fresh_lock_being_initialized(tmp_path: Path) -> None:
+    instance, cache_root = _generation_fixture(tmp_path)
+    profile = ContextStressProfile("stress-test", 32768, 4096, "f" * 64)
+    experiment = tmp_path / "experiment"
+    experiment.mkdir()
+    (experiment / ".generation.lock").write_text("", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="being initialized"):
+        run_swebench_generation(
+            (instance,),
+            cache_root=cache_root,
+            output_dir=experiment,
+            context_profile=profile,
+            client_factory=lambda _instance, _variant, _config: pytest.fail(
+                "model must not run while lock creation is in progress"
+            ),
+            formal=False,
+        )
+
+
+def test_generation_terminalizes_stale_model_running_without_resampling(
+    tmp_path: Path,
+) -> None:
+    instance, cache_root = _generation_fixture(tmp_path)
+    profile = ContextStressProfile("stress-test", 32768, 4096, "f" * 64)
+    with pytest.raises(KeyboardInterrupt, match="simulated process interruption"):
+        run_swebench_generation(
+            (instance,),
+            cache_root=cache_root,
+            output_dir=tmp_path / "experiment",
+            context_profile=profile,
+            client_factory=lambda _instance, _variant, _config: _InterruptingClient(),
+            formal=False,
+        )
+
+    sampled_variants: list[str] = []
+
+    def client_factory(_instance, variant, _config):
+        sampled_variants.append(variant)
+        return _ScriptedWriteClient()
+
+    result = run_swebench_generation(
+        (instance,),
+        cache_root=cache_root,
+        output_dir=tmp_path / "experiment",
+        context_profile=profile,
+        client_factory=client_factory,
+        formal=False,
+    )
+
+    assert sampled_variants == ["optimized"]
+    attempt_index = {attempt["variant"]: attempt for attempt in result["attempts"]}
+    assert attempt_index["full-history"]["state"] == "agent_error"
+    assert attempt_index["full-history"]["termination_reason"] == "interrupted"
+    assert attempt_index["full-history"]["patch_status"] == "empty"
+    assert attempt_index["optimized"]["state"] == "completed"
+
+
+def test_generation_recovers_terminal_metadata_missing_from_experiment_manifest(
+    tmp_path: Path,
+) -> None:
+    instance, cache_root = _generation_fixture(tmp_path)
+    profile = ContextStressProfile("stress-test", 32768, 4096, "f" * 64)
+    run_swebench_generation(
+        (instance,),
+        cache_root=cache_root,
+        output_dir=tmp_path / "experiment",
+        context_profile=profile,
+        client_factory=lambda _instance, _variant, _config: _ScriptedWriteClient(),
+        formal=False,
+    )
+    manifest_path = tmp_path / "experiment" / "experiment.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["attempts"] = [
+        attempt for attempt in manifest["attempts"] if attempt["variant"] != "full-history"
+    ]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    resumed = run_swebench_generation(
+        (instance,),
+        cache_root=cache_root,
+        output_dir=tmp_path / "experiment",
+        context_profile=profile,
+        client_factory=lambda _instance, _variant, _config: pytest.fail(
+            "terminal metadata must be adopted without resampling"
+        ),
+        formal=False,
+    )
+
+    assert {attempt["variant"] for attempt in resumed["attempts"]} == {
+        "full-history",
+        "optimized",
+    }
 
 
 def test_harness_import_requires_exact_complete_instance_set(tmp_path: Path) -> None:
@@ -328,13 +720,43 @@ def test_harness_import_requires_exact_complete_instance_set(tmp_path: Path) -> 
         )
 
 
+def test_formal_harness_import_rejects_legacy_experiment_schema(tmp_path: Path) -> None:
+    experiment = tmp_path / "legacy-experiment"
+    experiment.mkdir()
+    (experiment / "experiment.json").write_text(
+        json.dumps(
+            {
+                "artifact_schema_version": 1,
+                "formal": True,
+                "instance_ids": [f"task-{index}" for index in range(1, 6)],
+                "dataset_identity": {"selection_id": "context-stress-5-v1"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    prediction = experiment / "full-history" / "predictions.jsonl"
+    prediction.parent.mkdir()
+    prediction.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="artifact-v2"):
+        import_swebench_harness_results(
+            experiment,
+            variant="full-history",
+            harness_results_dir=tmp_path / "harness",
+            harness_revision="swebench@abc123",
+        )
+
+
 def test_compare_uses_fixed_denominator_and_provider_input_usage(tmp_path: Path) -> None:
     experiment = tmp_path / "experiment"
     experiment.mkdir()
     attempts = []
-    for variant, usages in (("full-history", (100, 100)), ("optimized", (70, 70))):
+    for variant, usages in (
+        ("full-history", (100, 100, 100, 100, 100)),
+        ("optimized", (70, 70, 70, 70, 70)),
+    ):
         for index, input_tokens in enumerate(usages, start=1):
-            instance_id = f"task-{index}"
+            instance_id = _FORMAL_INSTANCE_IDS[index - 1]
             patch_path = f"{variant}/attempts/{instance_id}/patch.diff"
             attempt = {
                 "instance_id": instance_id,
@@ -354,14 +776,24 @@ def test_compare_uses_fixed_denominator_and_provider_input_usage(tmp_path: Path)
     (experiment / "experiment.json").write_text(
         json.dumps(
             {
+                "artifact_schema_version": 2,
                 "formal": True,
-                "instance_ids": ["task-1", "task-2"],
+                "instance_ids": list(_FORMAL_INSTANCE_IDS),
                 "attempts": attempts,
                 "configuration_identity": {"model": "example/model"},
-                "context_profile": {"profile_id": "stress-32k-v1"},
+                "context_profile": {
+                    "profile_id": "stress-32k-v1",
+                    "input_budget_tokens": 32768,
+                    "output_reserve_tokens": 4096,
+                },
                 "dataset_identity": {
-                    "dataset_fingerprint": "a" * 64,
-                    "selection_id": "context-stress-10",
+                    "dataset_fingerprint": (
+                        "51f5112b9be08207f113b8e6cb012e50e3d085663d5233ebef6f9c9c855e9259"
+                    ),
+                    "selection_id": "context-stress-5-v1",
+                    "selection_fingerprint": (
+                        "0209b7efb2774f5ac3fd0c4ec29fff43ee3ef1f23241ee5db0d15480dfa3fcba"
+                    ),
                     "snapshot_dir": str(tmp_path / "snapshot"),
                 },
             }
@@ -371,7 +803,13 @@ def test_compare_uses_fixed_denominator_and_provider_input_usage(tmp_path: Path)
     for variant in ("full-history", "optimized"):
         prediction = experiment / variant / "predictions.jsonl"
         prediction.parent.mkdir(exist_ok=True)
-        prediction.write_text('{"instance_id":"task-1","model_patch":"patch"}\n', encoding="utf-8")
+        prediction.write_text(
+            "".join(
+                json.dumps({"instance_id": instance_id, "model_patch": "patch"}) + "\n"
+                for instance_id in _FORMAL_INSTANCE_IDS
+            ),
+            encoding="utf-8",
+        )
     (experiment / "harness-request.json").write_text(
         json.dumps(
             {
@@ -389,8 +827,20 @@ def test_compare_uses_fixed_denominator_and_provider_input_usage(tmp_path: Path)
         encoding="utf-8",
     )
     for variant, outcomes in (
-        ("full-history", {"task-1": True, "task-2": False}),
-        ("optimized", {"task-1": True, "task-2": True}),
+        (
+            "full-history",
+            {
+                instance_id: index <= 3
+                for index, instance_id in enumerate(_FORMAL_INSTANCE_IDS, start=1)
+            },
+        ),
+        (
+            "optimized",
+            {
+                instance_id: index <= 4
+                for index, instance_id in enumerate(_FORMAL_INSTANCE_IDS, start=1)
+            },
+        ),
     ):
         harness = tmp_path / swebench_module._expected_harness_run_id(experiment, variant)
         for instance_id, resolved in outcomes.items():
@@ -408,12 +858,15 @@ def test_compare_uses_fixed_denominator_and_provider_input_usage(tmp_path: Path)
 
     comparison = compare_swebench_experiment(experiment)
 
-    assert comparison["variants"]["full-history"]["pass_at_1"] == 0.5
-    assert comparison["variants"]["optimized"]["pass_at_1"] == 1.0
+    assert comparison["variants"]["full-history"]["pass_at_1"] == 0.6
+    assert comparison["variants"]["optimized"]["pass_at_1"] == 0.8
     assert comparison["input_token_reduction"] == pytest.approx(0.3)
     assert comparison["claim_eligible"] is True
-    assert "从 50.0% 提升至 100.0%" in comparison["suggested_resume_statement"]
-    assert len(comparison["paired_results"]) == 2
+    assert "从 60.0% 提升至 80.0%" in comparison["suggested_resume_statement"]
+    assert comparison["claim_scope"] == (
+        "fixed five-task SWE-bench Lite context-pressure subset"
+    )
+    assert len(comparison["paired_results"]) == 5
     assert (experiment / "report.md").exists()
 
 
@@ -468,4 +921,36 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
         check=True,
         text=True,
         capture_output=True,
+    )
+
+
+def _generation_fixture(tmp_path: Path) -> tuple[SweBenchInstance, Path]:
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    _git(upstream, "init", "-q")
+    (upstream / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(upstream, "add", ".")
+    _git(
+        upstream,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-q",
+        "-m",
+        "base",
+    )
+    commit = _git(upstream, "rev-parse", "HEAD").stdout.strip()
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    subprocess.run(
+        ["git", "clone", "--mirror", str(upstream), str(cache_root / "example__repo.git")],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return (
+        SweBenchInstance("example__repo-1", "example/repo", commit, "Create requested file"),
+        cache_root,
     )

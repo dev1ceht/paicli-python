@@ -92,8 +92,13 @@ def _add_snapshot_selection_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--snapshot-dir", type=Path, required=True)
     parser.add_argument(
         "--selection",
-        choices=("capability-30", "context-stress-10"),
-        default="context-stress-10",
+        choices=(
+            "capability-30",
+            "context-stress-10",
+            "context-stress-5-v1",
+            "flask-pilot-1-v1",
+        ),
+        default="context-stress-5-v1",
     )
 
 
@@ -149,6 +154,8 @@ def _dispatch(args: argparse.Namespace) -> object:
             "instance_ids": [item.instance_id for item in prepared],
         }
     if args.command == "generate":
+        if args.selection == "flask-pilot-1-v1" and not args.development:
+            raise ValueError("flask-pilot-1-v1 requires --development")
         instances = load_swebench_selection(args.snapshot_dir, selection=args.selection)
         profile = load_context_stress_profile(args.context_profile)
         metadata = json.loads(
@@ -162,7 +169,11 @@ def _dispatch(args: argparse.Namespace) -> object:
             dataset_identity={
                 "dataset_fingerprint": str(metadata["dataset_fingerprint"]),
                 "selection_id": args.selection,
-                "selection_fingerprint": str(metadata["selection_fingerprints"][args.selection]),
+                "selection_fingerprint": _selection_fingerprint(
+                    args.snapshot_dir,
+                    args.selection,
+                    metadata,
+                ),
                 "snapshot_dir": str(args.snapshot_dir.resolve()),
             },
             formal=not args.development,
@@ -179,6 +190,28 @@ def _dispatch(args: argparse.Namespace) -> object:
     if args.command == "compare":
         return compare_swebench_experiment(args.experiment_dir)
     raise ValueError(f"unsupported SWE-bench command: {args.command}")
+
+
+def _selection_fingerprint(
+    snapshot_dir: Path,
+    selection: str,
+    metadata: dict[str, object],
+) -> str:
+    fingerprints = metadata.get("selection_fingerprints")
+    if isinstance(fingerprints, dict) and selection in fingerprints:
+        return str(fingerprints[selection])
+    manifest = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "benchmarks"
+            / "swebench-lite-v1"
+            / "selections"
+            / f"{selection}.json"
+        ).read_text(encoding="utf-8")
+    )
+    if manifest.get("dataset_fingerprint") != metadata.get("dataset_fingerprint"):
+        raise ValueError(f"selection manifest does not match snapshot: {snapshot_dir}")
+    return str(manifest["selection_fingerprint"])
 
 
 if __name__ == "__main__":

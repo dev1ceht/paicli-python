@@ -32,10 +32,11 @@ from paicli.tools import ToolRegistry, get_builtin_tools
 
 ClientFactory = Callable[["LocalSmokeTask", int, PaiCliConfig], Any]
 
-TOOL_PROFILE_NAME = "network-tool-free-coding-v1"
+TOOL_PROFILE_NAME = "network-tool-free-coding-v2"
 TOOL_PROFILE = frozenset(
     {
-        "bash",
+        "apply_patch",
+        "edit_file",
         "execute_command",
         "glob",
         "glob_files",

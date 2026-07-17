@@ -1,0 +1,17 @@
+{
+  "artifact_schema_version": 2,
+  "dataset_fingerprint": "51f5112b9be08207f113b8e6cb012e50e3d085663d5233ebef6f9c9c855e9259",
+  "instance_ids": [
+    "pallets__flask-5063"
+  ],
+  "selection_fingerprint": "4935e803492e70c6a8534a126c96d105c635601d5d37de82a170b78e9044df3d",
+  "selection_id": "flask-pilot-1-v1",
+  "selection_seed": "fixed-development-pilot-v1",
+  "source_selection_id": "context-stress-10",
+  "source": {
+    "kind": "huggingface",
+    "path": null,
+    "revision": "69611d31007e1c6731db8bd5b5c3f2d33f5bab6e"
+  },
+  "purpose": "real-model development pilot excluded from the formal five-task claim"
+}
