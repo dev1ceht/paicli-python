@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "profile_id": "network-tool-free-coding-v2",
+  "enabled": [
+    "apply_patch",
+    "edit_file",
+    "execute_command",
+    "glob",
+    "glob_files",
+    "grep",
+    "grep_code",
+    "list_dir",
+    "read_file",
+    "search_code",
+    "write_file"
+  ],
+  "filesystem_isolation": false,
+  "network_isolation": false,
+  "command_runtime": {
+    "windows": "Windows PowerShell 5.1",
+    "posix": "/bin/sh"
+  }
+}

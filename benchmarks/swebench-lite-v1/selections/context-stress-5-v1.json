@@ -1,0 +1,21 @@
+{
+  "artifact_schema_version": 2,
+  "dataset_fingerprint": "51f5112b9be08207f113b8e6cb012e50e3d085663d5233ebef6f9c9c855e9259",
+  "instance_ids": [
+    "sphinx-doc__sphinx-7738",
+    "psf__requests-1963",
+    "django__django-16139",
+    "pylint-dev__pylint-7080",
+    "scikit-learn__scikit-learn-12471"
+  ],
+  "selection_fingerprint": "0209b7efb2774f5ac3fd0c4ec29fff43ee3ef1f23241ee5db0d15480dfa3fcba",
+  "selection_id": "context-stress-5-v1",
+  "selection_seed": "ordered-prefix-of-paicli-context-stress-10-v1",
+  "source_selection_id": "context-stress-10",
+  "source": {
+    "kind": "huggingface",
+    "path": null,
+    "revision": "69611d31007e1c6731db8bd5b5c3f2d33f5bab6e"
+  },
+  "claim_scope": "fixed five-task SWE-bench Lite context-pressure subset"
+}

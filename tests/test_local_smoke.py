@@ -41,7 +41,10 @@ class _ScriptedWriteClient:
                     "id": "write_value",
                     "function": {
                         "name": "write_file",
-                        "arguments": '{"path":"module.py","content":"VALUE = 2\\n"}',
+                        "arguments": (
+                            '{"path":"module.py","content":"VALUE = 2\\n",'
+                            '"overwrite":true}'
+                        ),
                     },
                 },
             }
@@ -173,7 +176,9 @@ class _ReferenceSolutionClient:
                     "id": f"reference_write_{self.calls}",
                     "function": {
                         "name": "write_file",
-                        "arguments": json.dumps({"path": path, "content": content}),
+                        "arguments": json.dumps(
+                            {"path": path, "content": content, "overwrite": True}
+                        ),
                     },
                 },
             }
@@ -509,7 +514,7 @@ def test_local_smoke_runs_production_agent_and_verifies_in_isolation(tmp_path: P
     assert attempt["context_reductions"] == 0
     assert attempt["tool_errors"] == 0
     assert result["configuration_identity"]["temperature"] == 0.0
-    assert result["configuration_identity"]["tool_profile"] == ("network-tool-free-coding-v1")
+    assert result["configuration_identity"]["tool_profile"] == ("network-tool-free-coding-v2")
     assert len(result["suite"]["fingerprint"]) == 64
     assert len(result["runtime_identity"]["fingerprint"]) == 64
     assert len(result["configuration_identity"]["fingerprint"]) == 64

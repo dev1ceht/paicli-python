@@ -295,16 +295,18 @@ def test_tool_label_known_tools():
 
     assert "📖 读取" in _tool_label("read_file", {"path": "/tmp/x.py"})
     assert "✏️ 写入" in _tool_label("write_file", {"path": "src/main.py"})
+    assert "✏️ 编辑" in _tool_label("edit_file", {"path": "src/main.py"})
+    assert "🩹 应用补丁" in _tool_label("apply_patch", {"patch": "*** Begin Patch"})
     assert "⚡ 执行命令" in _tool_label("bash", {"command": "ls"})
     assert "🌐 联网搜索" in _tool_label("web_search", {"query": "python"})
-    assert "🔧 unknown_tool" == _tool_label("unknown_tool", {})
+    assert _tool_label("unknown_tool", {}) == "🔧 unknown_tool"
 
 
 def test_tool_label_mcp_tools():
     from paicli.render.rich_renderer import _tool_label
 
     result = _tool_label("mcp__github__create_issue", {})
-    assert "🔌 MCP github.create_issue" == result
+    assert result == "🔌 MCP github.create_issue"
 
 
 def test_banner_workspace_panel_shows_model_and_hitl():

@@ -26,6 +26,8 @@ TOOL_LABELS: dict[str, tuple[str, str]] = {
     # (emoji_label, key_param_name)
     "read_file": ("\U0001f4d6 \u8bfb\u53d6", "path"),
     "write_file": ("\u270f\ufe0f \u5199\u5165", "path"),
+    "edit_file": ("\u270f\ufe0f \u7f16\u8f91", "path"),
+    "apply_patch": ("\U0001fa79 \u5e94\u7528\u8865\u4e01", "patch"),
     "list_dir": ("\U0001f4c2 \u5217\u51fa\u76ee\u5f55", "path"),
     "execute_command": ("\u26a1 \u6267\u884c\u547d\u4ee4", "command"),
     "bash": ("\u26a1 \u6267\u884c\u547d\u4ee4", "command"),

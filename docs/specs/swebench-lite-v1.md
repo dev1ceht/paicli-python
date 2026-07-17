@@ -26,6 +26,7 @@ fetch-dataset or import-dataset
   -> fingerprinted local SWE-bench Lite snapshot
   -> deterministic capability-30 selection
   -> deterministic context-stress-10 selection
+  -> versioned context-stress-5-v1 formal subset
   -> prepare reusable bare repository mirrors
   -> generate one counterbalanced full-history/optimized experiment
   -> two official-format predictions files
@@ -52,6 +53,8 @@ benchmarks/swebench-lite-v1/
   selections/
     capability-30.json
     context-stress-10.json
+    context-stress-5-v1.json
+    flask-pilot-1-v1.json
   profiles/
     stress-32k-v1.json
     swe-lite-agent-v1.json
@@ -77,15 +80,17 @@ Other official fields may exist in the source JSON but are ignored, are not sent
 
 `capability-30` is selected from a pinned SWE-bench Lite snapshot before model execution. Instances are grouped by upstream repository, ordered within each group by a stable hash of the published seed `paicli-capability-30-v1` and instance identity, and taken in repository-balanced rounds until 30 are fixed.
 
-`context-stress-10` is deterministically derived from `capability-30` using the independent seed `paicli-context-stress-10-v1` and the same repository-round rule. Neither set may use gold patches, test answers, PaiCLI outcomes, token usage, compression observations, or post-run replacement. Context pressure comes from the named budget profile, not result-based task selection.
+`context-stress-10` is deterministically derived from `capability-30` using the independent seed `paicli-context-stress-10-v1` and the same repository-round rule. `context-stress-5-v1` freezes the first five ordered instances from that already-selected population. Neither set may use gold patches, test answers, PaiCLI outcomes, token usage, compression observations, or post-run replacement. Context pressure comes from the named budget profile, not result-based task selection.
 
-The first formal comparison uses only `context-stress-10`. Results must be described as evidence from that fixed subset, not as a full SWE-bench Lite score.
+The first formal comparison uses only `context-stress-5-v1`. Results must be described as evidence from that fixed five-task SWE-bench Lite context-pressure subset under the named 32K profile, not as a full SWE-bench Lite score. `flask-pilot-1-v1` is a one-task real-model development pilot excluded from the formal task set and claim.
 
 ## Repository preparation
 
 `prepare` maintains one bare Git mirror per validated `owner/name` upstream repository. It uses existing mirrors by default; clone or fetch requires explicit network authorization. Remote URLs are derived from the validated repository identity rather than accepted as arbitrary dataset input.
 
-Preparation verifies that every selected `base_commit` exists. Prediction generation performs no source acquisition. Each instance, context variant, and repetition receives an independent ordinary clone from the mirror, checked out detached at the exact base commit. Before an Agent starts, the runner verifies the actual HEAD and an empty `git status --porcelain`.
+Preparation verifies that every selected `base_commit` exists. With network authorization it fetches an existing mirror only when the required base commit is absent. Prediction generation performs no source acquisition. Each instance, context variant, and repetition receives an independent ordinary clone from the mirror, checked out detached at the exact base commit. Before any Agent starts, the runner preflights all selected commits and clean checkouts.
+
+On Windows, every Git subprocess uses command-local `core.longpaths=true`; global Git configuration is never mutated. Generation and apply-check use short hashed temporary checkout paths so repository filenames do not exceed the host path limit.
 
 The cache contains Git history only. Agent modifications, indexes, sessions, audits, tool-result storage, snapshots, and workspaces are never shared between variants. Workspaces are deleted after patch and artifact collection by default; development runs may explicitly retain them.
 
@@ -157,7 +162,7 @@ Both variants use the same production `QueryEngine` and Agent loop. A narrow con
 
 The Agent user message is the original `problem_statement` verbatim. Instance ID, repository, base commit, benchmark labels, gold data, and benchmark wrapper instructions do not enter the prompt.
 
-Both variants use the existing `network-tool-free-coding-v1` profile: workspace file operations and shell execution are available, while dedicated web, browser, MCP, skills, long-term memory, and snapshot restoration are excluded. Generation does not install repository dependencies and does not acquire source code or packages. The Agent may run local tests in the unmanaged host environment, but those results are non-authoritative. Artifacts record:
+Both variants use `network-tool-free-coding-v2`: `read_file`, safe new-file `write_file`, exact-block `edit_file`, structured `apply_patch`, search/list tools, and one platform-explicit `execute_command`. Existing files require `write_file(overwrite=true)` or a dedicated editing tool. Windows commands run through non-interactive Windows PowerShell 5.1, not Bash; POSIX commands run through `/bin/sh`. Dedicated web, browser, MCP, skills, long-term memory, and snapshot restoration are excluded. Generation does not install repository dependencies and does not acquire source code or packages. The Agent may run local tests in the unmanaged host environment, but those results are non-authoritative. Artifacts record:
 
 ```json
 {
@@ -170,7 +175,7 @@ Both variants use the existing `network-tool-free-coding-v1` profile: workspace 
 
 ## Generation scheduling and lifecycle
 
-The first experiment uses one repetition: 10 fixed tasks, two variants, and 20 scheduled attempts. Generation is serial and counterbalanced by fixed task position:
+The first claim-eligible experiment uses one repetition: 5 fixed tasks, two variants, and 10 scheduled attempts. Generation is serial and counterbalanced by fixed task position:
 
 ```text
 task 0: full-history, optimized
@@ -181,7 +186,7 @@ task 2: full-history, optimized
 
 Every attempt receives a fresh model client, Agent session, tool storage, and workspace. Provider retry behavior is a fixed, fingerprinted transport policy inside the same model request. Whole-task regeneration after an Agent error, empty patch, context-limit failure, or poor result is prohibited.
 
-Formal output directories are immutable. Attempts are atomically journaled from `not_started` to `running` to a terminal generation status. Resume may continue only attempts that were never started. A stranded `running` attempt may already have called the model and makes the formal experiment invalid rather than eligible for selective regeneration. Completed attempts are never overwritten.
+Attempts are journaled as `not_started -> model_running -> generation_frozen -> completed|agent_error`. The frozen boundary atomically persists patch, response, safe events, provider usage, and hashes before local apply-check. Resume skips terminal attempts, completes apply-check for `generation_frozen` without another model call, and terminalizes stale `model_running` as `interrupted` with an empty patch. It never resamples an interrupted task. An experiment lock rejects concurrent active generation. The earlier `experiment-001` remains diagnostic and is not migrated.
 
 ## Patch and predictions
 
@@ -197,7 +202,7 @@ Each variant emits one official-format row per scheduled instance:
 }
 ```
 
-Empty or failed Agent changes still receive a row with an empty patch so the fixed denominator cannot shrink. A local clean-base apply check is diagnostic only; the official harness owns patch-application and resolved outcomes. If credential detection finds a configured secret or recognized credential pattern, PaiCLI omits the unsafe patch artifact, emits an empty prediction, and records an Agent failure.
+Empty or failed Agent changes still receive a row with an empty patch so the fixed denominator cannot shrink. A local clean-base apply check is diagnostic only; the official harness owns patch-application and resolved outcomes. Credential rejection scans only added patch lines for the configured API key or high-confidence bearer, `sk-`, or private-key patterns. Broad redaction remains active for logs and events, but ordinary code identifiers such as `password = ReadOnlyPasswordHashField(...)` do not block a patch. A rejected patch records only its credential category, never its value, emits an empty prediction, and records `patch_status=credential_blocked`.
 
 ## Artifacts
 
@@ -247,11 +252,11 @@ An official resolved outcome is a pass. Official not-resolved, Agent error, cont
 With one generated patch per task:
 
 ```text
-pass@1 = official resolved instances / 10 scheduled instances
+pass@1 = official resolved instances / 5 scheduled instances
 
 average provider input tokens per task =
   provider-reported input tokens from every attributable model call
-  / 10 scheduled instances
+  / 5 scheduled instances
 
 input-token reduction =
   (baseline average - optimized average) / baseline average
@@ -302,4 +307,4 @@ After automated verification:
 4. Validate the official harness environment separately with the official gold prediction.
 5. Run the two generated prediction files manually through the same official harness revision.
 6. Import both official run directories and verify the consolidated report.
-7. Only then create a clean formal `context-stress-10` experiment and run its 20 serial attempts.
+7. Only then create a clean formal `context-stress-5-v1` experiment and run its 10 serial attempts.

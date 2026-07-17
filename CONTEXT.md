@@ -285,8 +285,20 @@ The fixed 30-instance SWE-bench Lite subset selected independently of PaiCLI out
 _Avoid_: official Lite score, context-stress suite, successful-task set
 
 **SWE-bench context-stress subset**:
-The fixed 10-instance SWE-bench Lite subset selected before execution for workflows expected to create substantial task-relevant context, used to compare context-reduction variants rather than estimate general SWE-bench performance.
+The fixed 5-instance `context-stress-5-v1` SWE-bench Lite subset selected before execution for the first formal context comparison; it is subset evidence under a named pressure profile, not a full-suite score. The earlier 10-instance manifest remains its frozen source population.
 _Avoid_: capability score, random sample, full-suite result
+
+**Frozen generation attempt**:
+An attempt whose model response, provider usage, patch, and safe event evidence have been atomically persisted and hashed, allowing deterministic post-generation checks to resume without another model sample.
+_Avoid_: completed attempt, model checkpoint, retryable model call
+
+**Patch status**:
+The generation-artifact classification `non_empty`, `empty`, or `credential_blocked`, recorded separately from Agent execution state and official resolved outcome.
+_Avoid_: pass/fail, termination reason, apply-check result
+
+**Termination reason**:
+The reason an Agent loop ended, such as natural completion, a declared resource guard, context-limit failure, interruption, or credential blocking; it is independent from patch presence and official harness correctness.
+_Avoid_: attempt state, patch status, official outcome
 
 **Context-stress profile**:
 A versioned benchmark-only configuration that gives full-history and optimized context variants the same explicit input budget on the context-stress subset; `stress-32k-v1` is the initial profile, and any formal budget change creates a different immutable profile identity.

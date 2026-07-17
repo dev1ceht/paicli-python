@@ -15,7 +15,9 @@ from paicli.tools.base import Tool, ToolContext, ToolResult
 from paicli.tools.executor import ToolExecutor
 
 
-def test_bash_cannot_read_textual_terminal_input(tmp_path, monkeypatch):
+def test_execute_command_uses_windows_powershell_without_terminal_input(
+    tmp_path, monkeypatch
+):
     config = load_config(project_root=tmp_path)
     config.policy.hitl_mode = "never"
     registry = ToolRegistry()
@@ -29,14 +31,18 @@ def test_bash_cannot_read_textual_terminal_input(tmp_path, monkeypatch):
         async def communicate(self):
             return b"ok", b""
 
-    async def create_process(_command, **options):
+    captured_args = ()
+
+    async def create_process(*args, **options):
+        nonlocal captured_args
+        captured_args = args
         captured_options.update(options)
         return FakeProcess()
 
-    monkeypatch.setattr(asyncio, "create_subprocess_shell", create_process)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
 
     async def run():
-        tool = registry.get("bash")
+        tool = registry.get("execute_command")
         assert tool
         return await tool.execute({"command": "date"}, context)
 
@@ -44,22 +50,37 @@ def test_bash_cannot_read_textual_terminal_input(tmp_path, monkeypatch):
 
     assert result.content == "ok"
     assert captured_options["stdin"] is asyncio.subprocess.DEVNULL
+    execute_tool = registry.get("execute_command")
+    assert execute_tool
+    if sys.platform == "win32":
+        assert captured_args == (
+            "powershell.exe",
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "date",
+        )
+        assert "Windows PowerShell 5.1" in execute_tool.description
+        assert registry.get("bash") is None
+    else:
+        assert captured_args == ("/bin/sh", "-lc", "date")
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows shell encoding regression")
-def test_bash_decodes_windows_shell_output_without_replacement_characters(tmp_path):
+def test_execute_command_decodes_windows_output_without_replacement_characters(tmp_path):
     config = load_config(project_root=tmp_path)
     config.policy.hitl_mode = "never"
     registry = ToolRegistry()
     registry.register_all(get_builtin_tools())
     context = ToolContext(cwd=str(tmp_path), config=config)
     command = (
-        f'"{sys.executable}" -c "import sys;'
+        f'& "{sys.executable}" -c "import sys;'
         "sys.stdout.buffer.write(bytes.fromhex('b5b1c7b0c8d5c6da'))\""
     )
 
     async def run():
-        tool = registry.get("bash")
+        tool = registry.get("execute_command")
         assert tool
         return await tool.execute({"command": command}, context)
 
@@ -92,6 +113,195 @@ def test_read_write_file_tool(tmp_path, monkeypatch):
     assert not write_result.is_error
     assert "1: hello" in read_result.content
     assert "2: world" in read_result.content
+
+
+def test_write_file_refuses_to_overwrite_existing_file_without_explicit_opt_in(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    target = tmp_path / "module.py"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    config = load_config(project_root=tmp_path)
+    config.policy.hitl_mode = "never"
+    registry = ToolRegistry()
+    registry.register_all(get_builtin_tools())
+    context = ToolContext(cwd=str(tmp_path), config=config)
+
+    async def run():
+        tool = registry.get("write_file")
+        assert tool
+        return await tool.execute(
+            {"path": "module.py", "content": "VALUE = 2\n"},
+            context,
+        )
+
+    result = asyncio.run(run())
+
+    assert result.is_error
+    assert "overwrite=true" in result.content
+    assert target.read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+def test_write_file_overwrites_existing_file_with_explicit_opt_in(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    target = tmp_path / "module.py"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    config = load_config(project_root=tmp_path)
+    config.policy.hitl_mode = "never"
+    registry = ToolRegistry()
+    registry.register_all(get_builtin_tools())
+    context = ToolContext(cwd=str(tmp_path), config=config)
+
+    async def run():
+        tool = registry.get("write_file")
+        assert tool
+        return await tool.execute(
+            {"path": "module.py", "content": "VALUE = 2\n", "overwrite": True},
+            context,
+        )
+
+    result = asyncio.run(run())
+
+    assert not result.is_error
+    assert target.read_text(encoding="utf-8") == "VALUE = 2\n"
+
+
+def test_edit_file_replaces_one_unique_text_block(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    target = tmp_path / "module.py"
+    target.write_text("before\nVALUE = 1\nafter\n", encoding="utf-8")
+    config = load_config(project_root=tmp_path)
+    config.policy.hitl_mode = "never"
+    registry = ToolRegistry()
+    registry.register_all(get_builtin_tools())
+    context = ToolContext(cwd=str(tmp_path), config=config)
+
+    async def run():
+        tool = registry.get("edit_file")
+        assert tool
+        return await tool.execute(
+            {"path": "module.py", "old": "VALUE = 1", "new": "VALUE = 2"},
+            context,
+        )
+
+    result = asyncio.run(run())
+
+    assert not result.is_error
+    assert target.read_text(encoding="utf-8") == "before\nVALUE = 2\nafter\n"
+
+
+def test_edit_file_rejects_an_ambiguous_text_block(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    target = tmp_path / "module.py"
+    target.write_text("same\nsame\n", encoding="utf-8")
+    config = load_config(project_root=tmp_path)
+    config.policy.hitl_mode = "never"
+    registry = ToolRegistry()
+    registry.register_all(get_builtin_tools())
+    context = ToolContext(cwd=str(tmp_path), config=config)
+
+    async def run():
+        tool = registry.get("edit_file")
+        assert tool
+        return await tool.execute(
+            {"path": "module.py", "old": "same", "new": "changed"},
+            context,
+        )
+
+    result = asyncio.run(run())
+
+    assert result.is_error
+    assert "matched 2 times" in result.content
+    assert target.read_text(encoding="utf-8") == "same\nsame\n"
+
+
+def test_apply_patch_updates_existing_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    target = tmp_path / "module.py"
+    target.write_text("before\nVALUE = 1\nafter\n", encoding="utf-8")
+    config = load_config(project_root=tmp_path)
+    config.policy.hitl_mode = "never"
+    registry = ToolRegistry()
+    registry.register_all(get_builtin_tools())
+    context = ToolContext(cwd=str(tmp_path), config=config)
+    patch = """*** Begin Patch
+*** Update File: module.py
+@@
+-VALUE = 1
++VALUE = 2
+*** End Patch"""
+
+    async def run():
+        tool = registry.get("apply_patch")
+        assert tool
+        return await tool.execute({"patch": patch}, context)
+
+    result = asyncio.run(run())
+
+    assert not result.is_error
+    assert target.read_text(encoding="utf-8") == "before\nVALUE = 2\nafter\n"
+
+
+def test_apply_patch_adds_moves_and_deletes_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "old.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "obsolete.py").write_text("obsolete\n", encoding="utf-8")
+    config = load_config(project_root=tmp_path)
+    config.policy.hitl_mode = "never"
+    registry = ToolRegistry()
+    registry.register_all(get_builtin_tools())
+    context = ToolContext(cwd=str(tmp_path), config=config)
+    patch = """*** Begin Patch
+*** Add File: created.py
++CREATED = True
+*** Update File: old.py
+*** Move to: moved.py
+@@
+-VALUE = 1
++VALUE = 2
+*** Delete File: obsolete.py
+*** End Patch"""
+
+    async def run():
+        tool = registry.get("apply_patch")
+        assert tool
+        return await tool.execute({"patch": patch}, context)
+
+    result = asyncio.run(run())
+
+    assert not result.is_error
+    assert (tmp_path / "created.py").read_text(encoding="utf-8") == "CREATED = True\n"
+    assert (tmp_path / "moved.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert not (tmp_path / "old.py").exists()
+    assert not (tmp_path / "obsolete.py").exists()
+
+
+def test_apply_patch_dry_run_validates_without_changing_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    target = tmp_path / "module.py"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    config = load_config(project_root=tmp_path)
+    config.policy.hitl_mode = "never"
+    registry = ToolRegistry()
+    registry.register_all(get_builtin_tools())
+    context = ToolContext(cwd=str(tmp_path), config=config)
+    patch = """*** Begin Patch
+*** Update File: module.py
+@@
+-VALUE = 1
++VALUE = 2
+*** End Patch"""
+
+    async def run():
+        tool = registry.get("apply_patch")
+        assert tool
+        return await tool.execute({"patch": patch, "dry_run": True}, context)
+
+    result = asyncio.run(run())
+
+    assert not result.is_error
+    assert result.content.startswith("Validated patch")
+    assert target.read_text(encoding="utf-8") == "VALUE = 1\n"
 
 
 def test_tool_registry_unregisters_prefix():

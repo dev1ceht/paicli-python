@@ -24,11 +24,15 @@ def test_scripted_context_cost_runner_executes_isolated_fixture_and_writes_artif
                 "step_budget": 4,
                 "scripted_outputs": [
                     {"type": "tool", "name": "read_file", "arguments": {"path": "message.txt"}},
-                    {
-                        "type": "tool",
-                        "name": "write_file",
-                        "arguments": {"path": "message.txt", "content": "after\n"},
-                    },
+                        {
+                            "type": "tool",
+                            "name": "write_file",
+                            "arguments": {
+                                "path": "message.txt",
+                                "content": "after\n",
+                                "overwrite": True,
+                            },
+                        },
                     {"type": "final", "text": "Updated and verified message.txt."},
                 ],
                 "llm_handoff": {

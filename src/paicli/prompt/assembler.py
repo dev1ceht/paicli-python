@@ -86,6 +86,7 @@ class PromptAssembler:
         approval = _approval_resource(self.config.policy.hitl_mode)
         prefix = [
             _resource("base.md"),
+            _resource("coding.md"),
             _resource("personalities/calm.md"),
             _resource("modes/agent.md"),
             _resource(f"approvals/{approval}.md"),

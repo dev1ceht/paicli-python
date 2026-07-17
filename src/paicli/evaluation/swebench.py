@@ -12,6 +12,8 @@ import os
 import platform
 import re
 import shutil
+import socket
+import stat
 import subprocess
 import tempfile
 import time
@@ -36,7 +38,8 @@ _CAPABILITY_SEED = "paicli-capability-30-v1"
 _STRESS_SEED = "paicli-context-stress-10-v1"
 _TOOL_PROFILE = frozenset(
     {
-        "bash",
+        "apply_patch",
+        "edit_file",
         "execute_command",
         "glob",
         "glob_files",
@@ -307,16 +310,28 @@ def fetch_swebench_dataset(
 def load_swebench_selection(
     snapshot_dir: str | Path,
     *,
-    selection: str = "context-stress-10",
+    selection: str = "context-stress-5-v1",
+    manifest_root: str | Path | None = None,
 ) -> tuple[SweBenchInstance, ...]:
     """Load a frozen selection while returning only generation-safe fields."""
 
     root = Path(snapshot_dir).resolve()
     metadata = _read_json_object(root / "metadata.json")
     selections = metadata.get("selections")
-    if not isinstance(selections, dict) or selection not in selections:
-        raise ValueError(f"unknown SWE-bench snapshot selection: {selection}")
-    selected_value = selections[selection]
+    if not isinstance(selections, dict):
+        raise ValueError("SWE-bench snapshot is missing selections")
+    if selection in selections:
+        selected_value = selections[selection]
+    else:
+        manifest_dir = (
+            Path(manifest_root).resolve()
+            if manifest_root is not None
+            else _runtime_root() / "benchmarks" / "swebench-lite-v1" / "selections"
+        )
+        manifest = _read_json_object(manifest_dir / f"{selection}.json")
+        if manifest.get("dataset_fingerprint") != metadata.get("dataset_fingerprint"):
+            raise ValueError(f"selection manifest dataset does not match snapshot: {selection}")
+        selected_value = manifest.get("instance_ids")
     selected_ids = _instance_id_set(selected_value, f"selection {selection}")
     instances = load_swebench_instances(root / "dataset.json")
     indexed = {item.instance_id: item for item in instances}
@@ -442,7 +457,6 @@ def prepare_swebench_repositories(
     root = Path(cache_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     prepared: list[PreparedRepository] = []
-    refreshed: set[str] = set()
     for instance in instances:
         mirror = root / f"{instance.repo.replace('/', '__')}.git"
         if not mirror.exists():
@@ -455,15 +469,23 @@ def prepare_swebench_repositories(
                 f"https://github.com/{instance.repo}.git",
                 str(mirror),
             )
-        if instance.repo not in refreshed and allow_network:
+        try:
+            commit = _run_git(
+                mirror,
+                "rev-parse",
+                "--verify",
+                f"{instance.base_commit}^{{commit}}",
+            ).stdout.strip()
+        except subprocess.CalledProcessError:
+            if not allow_network:
+                raise
             _run_git(mirror, "fetch", "--prune")
-            refreshed.add(instance.repo)
-        commit = _run_git(
-            mirror,
-            "rev-parse",
-            "--verify",
-            f"{instance.base_commit}^{{commit}}",
-        ).stdout.strip()
+            commit = _run_git(
+                mirror,
+                "rev-parse",
+                "--verify",
+                f"{instance.base_commit}^{{commit}}",
+            ).stdout.strip()
         prepared.append(
             PreparedRepository(
                 instance_id=instance.instance_id,
@@ -539,7 +561,7 @@ def run_swebench_generation(
         raise ValueError("swebench-lite-v1 formal runs require qwen/qwen3.6-flash")
     factory = client_factory or _live_generation_client
     expected: dict[str, Any] = {
-        "artifact_schema_version": 1,
+        "artifact_schema_version": 2,
         "formal": formal,
         "runtime_identity": runtime,
         "dataset_identity": dataset_identity
@@ -562,12 +584,48 @@ def run_swebench_generation(
         },
         "attempts": [],
     }
-    if target.exists():
+    target.mkdir(parents=True, exist_ok=True)
+    with _experiment_lock(target):
+        return _run_locked_generation(
+            instances,
+            cache_root=Path(cache_root).resolve(),
+            target=target,
+            context_profile=context_profile,
+            factory=factory,
+            base_config=base_config,
+            expected=expected,
+            keep_workspaces=keep_workspaces,
+            usage_source="synthetic" if client_factory is not None else "provider_reported",
+        )
+
+
+def _run_locked_generation(
+    instances: tuple[SweBenchInstance, ...],
+    *,
+    cache_root: Path,
+    target: Path,
+    context_profile: ContextStressProfile,
+    factory: Callable[[SweBenchInstance, str, PaiCliConfig], Any],
+    base_config: PaiCliConfig,
+    expected: dict[str, Any],
+    keep_workspaces: bool,
+    usage_source: str,
+) -> dict[str, Any]:
+    manifest_path = target / "experiment.json"
+    if manifest_path.exists():
         payload = _load_resumable_experiment(target, expected)
     else:
-        target.mkdir(parents=True)
         payload = expected
-        _atomic_write_json(target / "experiment.json", payload)
+        _atomic_write_json(manifest_path, payload)
+    _recover_generation_attempts(
+        payload,
+        instances=instances,
+        cache_root=cache_root,
+        experiment_dir=target,
+        base_config=base_config,
+    )
+    _atomic_write_json(target / "experiment.json", payload)
+    _preflight_generation_workspaces(instances, cache_root=cache_root, experiment_dir=target)
     attempts = payload["attempts"]
     completed_keys = {(item["variant"], item["instance_id"]) for item in attempts}
 
@@ -581,12 +639,12 @@ def run_swebench_generation(
             attempt = _run_generation_attempt(
                 instance,
                 variant=variant,
-                cache_root=Path(cache_root).resolve(),
+                cache_root=cache_root,
                 experiment_dir=target,
                 base_config=base_config,
                 context_profile=context_profile,
                 client_factory=factory,
-                usage_source="synthetic" if client_factory is not None else "provider_reported",
+                usage_source=usage_source,
                 keep_workspace=keep_workspaces,
             )
             attempts.append(attempt)
@@ -627,10 +685,10 @@ def _validate_formal_generation_identity(
     context_profile: ContextStressProfile,
     dataset_identity: dict[str, str],
 ) -> None:
-    if len(instances) != 10:
-        raise ValueError("formal context-stress-10 generation requires exactly 10 tasks")
-    if dataset_identity.get("selection_id") != "context-stress-10":
-        raise ValueError("formal generation requires the context-stress-10 selection")
+    if len(instances) != 5:
+        raise ValueError("formal context-stress-5-v1 generation requires exactly 5 tasks")
+    if dataset_identity.get("selection_id") != "context-stress-5-v1":
+        raise ValueError("formal generation requires the context-stress-5-v1 selection")
     dataset_fingerprint = dataset_identity.get("dataset_fingerprint", "")
     if not re.fullmatch(r"[0-9a-f]{64}", dataset_fingerprint):
         raise ValueError("formal generation requires a SHA-256 dataset fingerprint")
@@ -644,10 +702,7 @@ def _validate_formal_generation_identity(
     metadata = _read_json_object(snapshot_dir / "metadata.json")
     if metadata.get("dataset_fingerprint") != dataset_fingerprint:
         raise ValueError("formal snapshot metadata fingerprint does not match experiment")
-    selections = metadata.get("selections")
     expected_ids = [instance.instance_id for instance in instances]
-    if not isinstance(selections, dict) or selections.get("context-stress-10") != expected_ids:
-        raise ValueError("formal snapshot context-stress-10 IDs do not match scheduled tasks")
     raw_records = _decode_records((snapshot_dir / "dataset.json").read_text(encoding="utf-8"))
     snapshot_fingerprint = hashlib.sha256(
         json.dumps(
@@ -659,7 +714,7 @@ def _validate_formal_generation_identity(
     ).hexdigest()
     if snapshot_fingerprint != dataset_fingerprint:
         raise ValueError("formal snapshot content fingerprint does not match metadata")
-    snapshot_instances = load_swebench_selection(snapshot_dir, selection="context-stress-10")
+    snapshot_instances = load_swebench_selection(snapshot_dir, selection="context-stress-5-v1")
     if snapshot_instances != instances:
         raise ValueError("formal scheduled task contents differ from the frozen snapshot")
     fixed_manifest = _read_json_object(
@@ -667,7 +722,7 @@ def _validate_formal_generation_identity(
         / "benchmarks"
         / "swebench-lite-v1"
         / "selections"
-        / "context-stress-10.json"
+        / "context-stress-5-v1.json"
     )
     if (
         fixed_manifest.get("dataset_fingerprint") != dataset_fingerprint
@@ -701,8 +756,6 @@ def _load_resumable_experiment(target: Path, expected: dict[str, Any]) -> dict[s
     terminal_rows: dict[tuple[str, str], dict[str, Any]] = {}
     for metadata_path in target.glob("*/attempts/*/metadata.json"):
         metadata = _read_json_object(metadata_path)
-        if metadata.get("state") == "running":
-            raise ValueError(f"cannot resume stranded running attempt: {metadata_path}")
         metadata_variant = metadata.get("variant")
         metadata_instance = metadata.get("instance_id")
         if metadata.get("state") in {"completed", "agent_error"}:
@@ -736,10 +789,15 @@ def _load_resumable_experiment(target: Path, expected: dict[str, Any]) -> dict[s
             raise ValueError(f"cannot resume divergent terminal attempt metadata: {key}")
         _load_attempt_patch(target, item)
         seen.add(key)
+    for key in sorted(set(terminal_rows) - seen):
+        metadata = terminal_rows[key]
+        if key[0] not in _GENERATION_VARIANTS or key[1] not in expected_ids:
+            raise ValueError(f"cannot resume unexpected terminal attempt metadata: {key}")
+        _load_attempt_patch(target, metadata)
+        attempts.append(metadata)
+        seen.add(key)
     if set(terminal_rows) != seen:
-        raise ValueError(
-            "cannot resume: terminal attempt metadata and experiment manifest disagree"
-        )
+        raise ValueError("cannot resume: experiment references missing terminal metadata")
     return payload
 
 
@@ -761,6 +819,10 @@ def import_swebench_harness_results(
         raise ValueError("formal harness imports require an exact harness revision")
     root = Path(experiment_dir).resolve()
     experiment = _read_json_object(root / "experiment.json")
+    if formal and not _has_formal_five_task_identity(experiment):
+        raise ValueError(
+            "formal harness import requires an artifact-v2 context-stress-5-v1 experiment"
+        )
     expected = _instance_id_set(experiment.get("instance_ids"), "experiment")
     reports_root = Path(harness_results_dir).resolve()
     if not reports_root.is_dir():
@@ -942,7 +1004,10 @@ def compare_swebench_experiment(experiment_dir: str | Path) -> dict[str, Any]:
     pass_improved = optimized["pass_at_1"] > baseline["pass_at_1"]
     tokens_improved = reduction is not None and reduction > 0
     claim_eligible = bool(
-        experiment.get("formal") and pass_improved and tokens_improved and all_usage_complete
+        _has_formal_five_task_identity(experiment)
+        and pass_improved
+        and tokens_improved
+        and all_usage_complete
     )
     statement = None
     if claim_eligible:
@@ -961,6 +1026,8 @@ def compare_swebench_experiment(experiment_dir: str | Path) -> dict[str, Any]:
                 "official_resolved": variants[variant]["official_outcomes"][instance_id],
                 "resolved": variants[variant]["effective_outcomes"][instance_id],
                 "state": attempt.get("state"),
+                "termination_reason": attempt.get("termination_reason"),
+                "patch_status": attempt.get("patch_status"),
                 "input_tokens": usage.get("input_tokens") if isinstance(usage, dict) else None,
             }
         paired_results.append(row)
@@ -971,6 +1038,12 @@ def compare_swebench_experiment(experiment_dir: str | Path) -> dict[str, Any]:
         "pass_at_1_change_points": (optimized["pass_at_1"] - baseline["pass_at_1"]) * 100,
         "input_token_reduction": reduction,
         "provider_usage_complete": all_usage_complete,
+        "claim_scope": (
+            "fixed five-task SWE-bench Lite context-pressure subset"
+            if experiment.get("dataset_identity", {}).get("selection_id")
+            == "context-stress-5-v1"
+            else "fixed SWE-bench Lite subset"
+        ),
         "paired_results": paired_results,
         "claim_eligible": claim_eligible,
         "suggested_resume_statement": statement,
@@ -978,6 +1051,187 @@ def compare_swebench_experiment(experiment_dir: str | Path) -> dict[str, Any]:
     _atomic_write_json(root / "comparison.json", payload)
     _atomic_write_text(root / "report.md", _render_comparison_report(payload))
     return payload
+
+
+def _has_formal_five_task_identity(experiment: dict[str, Any]) -> bool:
+    dataset_identity = experiment.get("dataset_identity")
+    instance_ids = experiment.get("instance_ids")
+    context_profile = experiment.get("context_profile")
+    try:
+        manifest = _read_json_object(
+            _runtime_root()
+            / "benchmarks"
+            / "swebench-lite-v1"
+            / "selections"
+            / "context-stress-5-v1.json"
+        )
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    return bool(
+        experiment.get("artifact_schema_version") == 2
+        and experiment.get("formal")
+        and isinstance(dataset_identity, dict)
+        and dataset_identity.get("selection_id") == "context-stress-5-v1"
+        and dataset_identity.get("dataset_fingerprint") == manifest.get("dataset_fingerprint")
+        and dataset_identity.get("selection_fingerprint")
+        == manifest.get("selection_fingerprint")
+        and isinstance(instance_ids, list)
+        and instance_ids == manifest.get("instance_ids")
+        and isinstance(context_profile, dict)
+        and context_profile.get("profile_id") == "stress-32k-v1"
+        and context_profile.get("input_budget_tokens") == 32_768
+        and context_profile.get("output_reserve_tokens") == 4_096
+    )
+
+
+def _recover_generation_attempts(
+    payload: dict[str, Any],
+    *,
+    instances: tuple[SweBenchInstance, ...],
+    cache_root: Path,
+    experiment_dir: Path,
+    base_config: PaiCliConfig,
+) -> None:
+    attempts = payload.get("attempts")
+    if not isinstance(attempts, list):
+        raise ValueError("cannot resume: experiment attempts must be an array")
+    completed = {
+        (str(item.get("variant")), str(item.get("instance_id")))
+        for item in attempts
+        if isinstance(item, dict)
+    }
+    instance_index = {instance.instance_id: instance for instance in instances}
+    for metadata_path in experiment_dir.glob("*/attempts/*/metadata.json"):
+        metadata = _read_json_object(metadata_path)
+        state = metadata.get("state")
+        if state not in {"model_running", "generation_frozen"}:
+            continue
+        variant = metadata.get("variant")
+        instance_id = metadata.get("instance_id")
+        if (
+            not isinstance(variant, str)
+            or variant not in _GENERATION_VARIANTS
+            or not isinstance(instance_id, str)
+            or instance_id not in instance_index
+        ):
+            raise ValueError(f"cannot recover invalid attempt metadata: {metadata_path}")
+        key = (variant, instance_id)
+        if key in completed:
+            raise ValueError(f"cannot recover duplicate attempt: {key}")
+        attempt_dir = metadata_path.parent
+        if state == "generation_frozen":
+            row = _finish_frozen_generation(
+                instance_index[instance_id],
+                variant=variant,
+                cache_root=cache_root,
+                experiment_dir=experiment_dir,
+                attempt_dir=attempt_dir,
+            )
+        else:
+            row = _terminalize_interrupted_generation(
+                instance_index[instance_id],
+                variant=variant,
+                experiment_dir=experiment_dir,
+                attempt_dir=attempt_dir,
+                base_config=base_config,
+            )
+        attempts.append(row)
+        completed.add(key)
+        _remove_tree(
+            _short_workspace_path(
+                experiment_dir,
+                purpose="model",
+                instance_id=instance_id,
+                variant=variant,
+            )
+        )
+    _remove_empty_workspace_root(experiment_dir)
+
+
+def _finish_frozen_generation(
+    instance: SweBenchInstance,
+    *,
+    variant: str,
+    cache_root: Path,
+    experiment_dir: Path,
+    attempt_dir: Path,
+) -> dict[str, Any]:
+    frozen = _read_json_object(attempt_dir / "generation-frozen.json")
+    if frozen != _read_json_object(attempt_dir / "metadata.json"):
+        raise ValueError(f"frozen generation metadata diverged: {variant}/{instance.instance_id}")
+    hashes = frozen.get("artifact_sha256")
+    if not isinstance(hashes, dict):
+        raise ValueError(f"frozen generation is missing artifact hashes: {attempt_dir}")
+    for name in ("patch.diff", "response.txt", "events.jsonl"):
+        expected_hash = hashes.get(name)
+        path = attempt_dir / name
+        if (
+            not isinstance(expected_hash, str)
+            or not path.is_file()
+            or hashlib.sha256(path.read_bytes()).hexdigest() != expected_hash
+        ):
+            raise ValueError(f"frozen generation artifact changed: {path}")
+    patch = (attempt_dir / "patch.diff").read_text(encoding="utf-8")
+    apply_check = _local_apply_check(
+        instance,
+        cache_root,
+        patch,
+        _short_workspace_path(
+            experiment_dir,
+            purpose="apply",
+            instance_id=instance.instance_id,
+            variant=variant,
+        ),
+    )
+    _atomic_write_text(attempt_dir / "local-apply-check.log", apply_check["output"])
+    row = {
+        **frozen,
+        "state": "agent_error" if frozen.get("error") else "completed",
+        "local_apply_check": apply_check["ok"],
+    }
+    _atomic_write_json(attempt_dir / "metadata.json", row)
+    return row
+
+
+def _terminalize_interrupted_generation(
+    instance: SweBenchInstance,
+    *,
+    variant: str,
+    experiment_dir: Path,
+    attempt_dir: Path,
+    base_config: PaiCliConfig,
+) -> dict[str, Any]:
+    _atomic_write_text(attempt_dir / "patch.diff", "")
+    _atomic_write_text(attempt_dir / "response.txt", "")
+    _atomic_write_jsonl(attempt_dir / "events.jsonl", [])
+    _atomic_write_jsonl(attempt_dir / "context-events.jsonl", [])
+    _atomic_write_text(
+        attempt_dir / "local-apply-check.log",
+        "interrupted before generation froze\n",
+    )
+    row = {
+        "instance_id": instance.instance_id,
+        "variant": variant,
+        "state": "agent_error",
+        "error": "Generation process was interrupted before artifacts were frozen",
+        "error_category": "interrupted",
+        "termination_reason": "interrupted",
+        "patch_status": "empty",
+        "credential_category": None,
+        "model": base_config.llm.model,
+        "provider": base_config.llm.provider,
+        "elapsed_seconds": 0.0,
+        "turns": 0,
+        "actual_usage": None,
+        "usage_source": None,
+        "context_reductions": 0,
+        "local_apply_check": None,
+        "patch_bytes": 0,
+        "patch_sha256": hashlib.sha256(b"").hexdigest(),
+        "patch_path": str((attempt_dir / "patch.diff").relative_to(experiment_dir)),
+    }
+    _atomic_write_json(attempt_dir / "metadata.json", row)
+    return row
 
 
 def _run_generation_attempt(
@@ -993,11 +1247,16 @@ def _run_generation_attempt(
     keep_workspace: bool,
 ) -> dict[str, Any]:
     attempt_dir = experiment_dir / variant / "attempts" / instance.instance_id
-    run_dir = experiment_dir / "workspaces" / instance.instance_id / variant
+    run_dir = _short_workspace_path(
+        experiment_dir,
+        purpose="model",
+        instance_id=instance.instance_id,
+        variant=variant,
+    )
     attempt_dir.mkdir(parents=True, exist_ok=True)
     _atomic_write_json(
         attempt_dir / "metadata.json",
-        {"instance_id": instance.instance_id, "variant": variant, "state": "running"},
+        {"instance_id": instance.instance_id, "variant": variant, "state": "model_running"},
     )
     workspace = materialize_swebench_workspace(
         instance,
@@ -1027,7 +1286,8 @@ def _run_generation_attempt(
     patch = _collect_final_tree_patch(workspace)
     model_patch = patch
     status = "completed" if agent_result["error"] is None else "agent_error"
-    if _contains_sensitive_text(patch, secrets):
+    credential_category = _patch_credential_category(patch, secrets)
+    if credential_category:
         patch = ""
         model_patch = ""
         status = "agent_error"
@@ -1037,6 +1297,14 @@ def _run_generation_attempt(
         error_category = "context_limit_exceeded"
     elif agent_result["error"] and "credential" in agent_result["error"].lower():
         error_category = "credential_detected"
+    patch_status = (
+        "credential_blocked"
+        if credential_category
+        else ("non_empty" if patch else "empty")
+    )
+    termination_reason = (
+        "credential_blocked" if credential_category else agent_result["termination_reason"]
+    )
     _atomic_write_text(attempt_dir / "patch.diff", patch)
     _atomic_write_text(attempt_dir / "response.txt", agent_result["response"])
     _atomic_write_jsonl(attempt_dir / "events.jsonl", agent_result["events"])
@@ -1048,14 +1316,15 @@ def _run_generation_attempt(
             if str(event.get("type", "")).startswith("context")
         ],
     )
-    apply_check = _local_apply_check(instance, cache_root, patch, attempt_dir / "apply-check")
-    _atomic_write_text(attempt_dir / "local-apply-check.log", apply_check["output"])
-    row = {
+    frozen_row = {
         "instance_id": instance.instance_id,
         "variant": variant,
-        "state": status,
+        "state": "generation_frozen",
         "error": agent_result["error"],
         "error_category": error_category,
+        "termination_reason": termination_reason,
+        "patch_status": patch_status,
+        "credential_category": credential_category,
         "model": getattr(client, "model_name", config.llm.model),
         "provider": getattr(client, "provider_name", config.llm.provider),
         "elapsed_seconds": round(time.monotonic() - started, 6),
@@ -1063,14 +1332,38 @@ def _run_generation_attempt(
         "actual_usage": agent_result["actual_usage"],
         "usage_source": usage_source if agent_result["actual_usage"] else None,
         "context_reductions": agent_result["context_reductions"],
-        "local_apply_check": apply_check["ok"],
         "patch_bytes": len(patch.encode("utf-8")),
         "patch_sha256": hashlib.sha256(model_patch.encode("utf-8")).hexdigest(),
         "patch_path": str((attempt_dir / "patch.diff").relative_to(experiment_dir)),
+        "artifact_sha256": {
+            name: hashlib.sha256((attempt_dir / name).read_bytes()).hexdigest()
+            for name in ("patch.diff", "response.txt", "events.jsonl")
+        },
+    }
+    _atomic_write_json(attempt_dir / "generation-frozen.json", frozen_row)
+    _atomic_write_json(attempt_dir / "metadata.json", frozen_row)
+    apply_check = _local_apply_check(
+        instance,
+        cache_root,
+        patch,
+        _short_workspace_path(
+            experiment_dir,
+            purpose="apply",
+            instance_id=instance.instance_id,
+            variant=variant,
+        ),
+    )
+    _atomic_write_text(attempt_dir / "local-apply-check.log", apply_check["output"])
+    row = {
+        **frozen_row,
+        "state": status,
+        "elapsed_seconds": round(time.monotonic() - started, 6),
+        "local_apply_check": apply_check["ok"],
     }
     _atomic_write_json(attempt_dir / "metadata.json", row)
     if not keep_workspace:
-        shutil.rmtree(run_dir, ignore_errors=True)
+        _remove_tree(run_dir)
+        _remove_empty_workspace_root(experiment_dir)
     return row
 
 
@@ -1101,6 +1394,7 @@ async def _execute_generation_agent(
     reductions = 0
     turns = 0
     error: str | None = None
+    termination_reason = "natural_completion"
     with _temporary_environment(
         {
             "PAICLI_SNAPSHOT_DIR": str(snapshot_dir),
@@ -1121,14 +1415,32 @@ async def _execute_generation_agent(
                     reductions += 1
                 elif event_type == "done":
                     turns = int(event.get("total_turns") or 0)
+                    if (
+                        turns >= config.agent.max_turns
+                        and termination_reason == "natural_completion"
+                    ):
+                        termination_reason = "max_turns"
+                elif event_type == "guarded_finalization":
+                    termination_reason = _termination_reason_from_guard(
+                        str(event.get("reason") or "")
+                    )
                 elif event_type == "error":
                     value = event.get("error")
                     error = f"{type(value).__name__}: {value}"
+                    if isinstance(value, ContextWindowExceededError):
+                        termination_reason = "context_limit_exceeded"
+                    else:
+                        termination_reason = "interrupted"
                 safe = _safe_event(event, secrets=secrets)
                 if safe is not None:
                     events.append(safe)
         except Exception as exc:  # noqa: BLE001 - model boundary becomes attempt evidence
             error = _redact_sensitive_text(f"{type(exc).__name__}: {exc}", secrets)
+            termination_reason = (
+                "context_limit_exceeded"
+                if isinstance(exc, ContextWindowExceededError)
+                else "interrupted"
+            )
     return {
         "response": response,
         "events": events,
@@ -1144,6 +1456,7 @@ async def _execute_generation_agent(
         "context_reductions": reductions,
         "turns": turns,
         "error": error,
+        "termination_reason": termination_reason,
     }
 
 
@@ -1190,7 +1503,7 @@ def _generation_configuration_identity(config: PaiCliConfig) -> dict[str, Any]:
             "max_elapsed_seconds": config.agent.max_elapsed_seconds,
             "max_total_tokens": config.agent.max_total_tokens,
         },
-        "tool_profile_id": "network-tool-free-coding-v1",
+        "tool_profile_id": "network-tool-free-coding-v2",
         "tools": sorted(_TOOL_PROFILE),
         "retry_policy": {
             "llm": {
@@ -1272,23 +1585,82 @@ def _local_apply_check(
     patch: str,
     destination: Path,
 ) -> dict[str, Any]:
+    _remove_tree(destination)
     if not patch:
         return {"ok": True, "output": "empty patch\n"}
-    workspace = materialize_swebench_workspace(
-        instance,
-        cache_root=cache_root,
-        destination=destination,
-    )
-    process = subprocess.run(
-        ["git", "apply", "--check", "--binary", "-"],
-        cwd=workspace.path,
-        input=patch,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    shutil.rmtree(workspace.path, ignore_errors=True)
+    try:
+        workspace = materialize_swebench_workspace(
+            instance,
+            cache_root=cache_root,
+            destination=destination,
+        )
+        process = subprocess.run(
+            _git_command("apply", "--check", "--binary", "-"),
+            cwd=workspace.path,
+            input=patch,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    finally:
+        _remove_tree(destination)
     return {"ok": process.returncode == 0, "output": process.stdout + process.stderr}
+
+
+def _preflight_generation_workspaces(
+    instances: tuple[SweBenchInstance, ...],
+    *,
+    cache_root: Path,
+    experiment_dir: Path,
+) -> None:
+    for instance in instances:
+        destination = _short_workspace_path(
+            experiment_dir,
+            purpose="preflight",
+            instance_id=instance.instance_id,
+        )
+        _remove_tree(destination)
+        try:
+            materialize_swebench_workspace(
+                instance,
+                cache_root=cache_root,
+                destination=destination,
+            )
+        finally:
+            _remove_tree(destination)
+    _remove_empty_workspace_root(experiment_dir)
+
+
+def _short_workspace_path(
+    experiment_dir: Path,
+    *,
+    purpose: str,
+    instance_id: str,
+    variant: str = "",
+) -> Path:
+    digest = hashlib.sha256(f"{purpose}\0{instance_id}\0{variant}".encode()).hexdigest()[:12]
+    return experiment_dir / "_work" / f"{purpose[0]}-{digest}"
+
+
+def _remove_empty_workspace_root(experiment_dir: Path) -> None:
+    root = experiment_dir / "_work"
+    with contextlib.suppress(OSError):
+        root.rmdir()
+
+
+def _remove_tree(path: Path) -> None:
+    if not path.exists():
+        return
+
+    def make_writable_and_retry(
+        function: Callable[[str], object],
+        failed_path: str,
+        _error: object,
+    ) -> None:
+        os.chmod(failed_path, stat.S_IWRITE)
+        function(failed_path)
+
+    shutil.rmtree(path, onerror=make_writable_and_retry)
 
 
 def _run_git_env(
@@ -1297,7 +1669,7 @@ def _run_git_env(
     *args: str,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", *args],
+        _git_command(*args),
         cwd=cwd,
         env=env,
         check=True,
@@ -1476,6 +1848,65 @@ def _environment_identity() -> dict[str, str]:
 
 
 @contextlib.contextmanager
+def _experiment_lock(experiment_dir: Path):
+    lock_path = experiment_dir / ".generation.lock"
+    owner = {
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "created_at_unix_ns": time.time_ns(),
+    }
+    while True:
+        try:
+            with lock_path.open("x", encoding="utf-8") as handle:
+                json.dump(owner, handle, sort_keys=True)
+            break
+        except FileExistsError:
+            try:
+                existing = _read_json_object(lock_path)
+            except (OSError, ValueError, json.JSONDecodeError):
+                existing = {}
+            if not existing:
+                with contextlib.suppress(OSError):
+                    if time.time() - lock_path.stat().st_mtime < 30:
+                        raise RuntimeError(
+                            "SWE-bench generation lock is currently being initialized"
+                        ) from None
+            existing_pid = existing.get("pid")
+            existing_host = existing.get("hostname")
+            if (
+                isinstance(existing_pid, int)
+                and existing_pid > 0
+                and isinstance(existing_host, str)
+                and (
+                    existing_host != socket.gethostname()
+                    or _process_is_running(existing_pid)
+                )
+            ):
+                raise RuntimeError(
+                    "SWE-bench generation is already active for this experiment "
+                    f"(pid={existing_pid}, host={existing_host})"
+                ) from None
+            with contextlib.suppress(FileNotFoundError):
+                lock_path.unlink()
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError, ValueError, json.JSONDecodeError):
+            if _read_json_object(lock_path) == owner:
+                lock_path.unlink()
+
+
+def _process_is_running(pid: int) -> bool:
+    if pid == os.getpid():
+        return True
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+@contextlib.contextmanager
 def _temporary_environment(values: dict[str, str]):
     previous = {key: os.environ.get(key) for key in values}
     os.environ.update(values)
@@ -1521,8 +1952,32 @@ def _sanitize_event_value(value: Any, *, secrets: set[str]) -> Any:
     return _redact_sensitive_text(str(value), secrets)[:2000]
 
 
-def _contains_sensitive_text(value: str, secrets: set[str]) -> bool:
-    return _redact_sensitive_text(value, secrets) != value
+def _patch_credential_category(patch: str, secrets: set[str]) -> str | None:
+    added_text = "\n".join(
+        line[1:]
+        for line in patch.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    )
+    if not added_text:
+        return None
+    if any(secret and secret in added_text for secret in secrets):
+        return "configured_api_key"
+    if re.search(r"(?i)\bbearer\s+[A-Za-z0-9._~+\-/=]{8,}", added_text):
+        return "bearer"
+    if re.search(r"\bsk-[A-Za-z0-9_-]{8,}\b", added_text):
+        return "sk_key"
+    if re.search(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", added_text):
+        return "private_key"
+    return None
+
+
+def _termination_reason_from_guard(reason: str) -> str:
+    return {
+        "token limit reached": "max_total_tokens",
+        "tool call limit reached": "max_tool_calls",
+        "elapsed time limit reached": "max_elapsed",
+        "repeated-call stagnation detected": "repeated_call_stagnation",
+    }.get(reason, "interrupted")
 
 
 def _redact_sensitive_text(value: str, secrets: set[str]) -> str:
@@ -1685,12 +2140,20 @@ def _render_comparison_report(payload: dict[str, Any]) -> str:
 
 def _run_git(cwd: Path | None, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", *args],
+        _git_command(*args),
         cwd=cwd,
         check=True,
         text=True,
         capture_output=True,
     )
+
+
+def _git_command(*args: str) -> list[str]:
+    command = ["git"]
+    if os.name == "nt":
+        command.extend(("-c", "core.longpaths=true"))
+    command.extend(args)
+    return command
 
 
 def _selection_digest(seed: str, instance_id: str) -> str:

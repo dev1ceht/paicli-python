@@ -19,6 +19,7 @@ from paicli.rag import CodeIndex
 from paicli.skill import SkillRegistry
 from paicli.snapshot import SnapshotService
 from paicli.tools.base import Tool, ToolContext, ToolResult, object_schema
+from paicli.tools.structured_patch import apply_structured_patch
 from paicli.web import fetch_url, search_web
 
 
@@ -40,17 +41,72 @@ def get_builtin_tools() -> list[Tool]:
         ),
         Tool(
             name="write_file",
-            description="Write a UTF-8 text file inside the current workspace.",
+            description=(
+                "Create a UTF-8 text file inside the current workspace. Existing files are "
+                "rejected unless overwrite=true; prefer edit_file or apply_patch for changes."
+            ),
             parameters=object_schema(
                 {
                     "path": {"type": "string", "description": "Path to write"},
                     "content": {"type": "string", "description": "File content"},
                     "append": {"type": "boolean", "description": "Append instead of overwrite"},
+                    "overwrite": {
+                        "type": "boolean",
+                        "description": "Explicitly replace an existing file",
+                    },
                 },
                 ["path", "content"],
             ),
             required_keys=["path", "content"],
             handler=write_file,
+            is_read_only=False,
+            is_concurrency_safe=False,
+            danger_level="medium",
+            requires_approval=True,
+        ),
+        Tool(
+            name="edit_file",
+            description=(
+                "Replace an exact UTF-8 text block in one existing workspace file. "
+                "The old text must match exactly once unless replace_all=true."
+            ),
+            parameters=object_schema(
+                {
+                    "path": {"type": "string", "description": "Existing file to edit"},
+                    "old": {"type": "string", "description": "Exact text to replace"},
+                    "new": {"type": "string", "description": "Replacement text"},
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "Replace every exact match",
+                    },
+                },
+                ["path", "old", "new"],
+            ),
+            required_keys=["path", "old", "new"],
+            handler=edit_file,
+            is_read_only=False,
+            is_concurrency_safe=False,
+            danger_level="medium",
+            requires_approval=True,
+        ),
+        Tool(
+            name="apply_patch",
+            description=(
+                "Apply a structured *** Begin Patch change to add, update, delete, or "
+                "move UTF-8 workspace files. Prefer this for multi-file changes."
+            ),
+            parameters=object_schema(
+                {
+                    "patch": {"type": "string", "description": "Structured patch text"},
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "Validate without changing files",
+                    },
+                },
+                ["patch"],
+            ),
+            required_keys=["patch"],
+            handler=apply_patch,
             is_read_only=False,
             is_concurrency_safe=False,
             danger_level="medium",
@@ -123,31 +179,8 @@ def get_builtin_tools() -> list[Tool]:
             handler=grep,
         ),
         Tool(
-            name="bash",
-            description=(
-                "Execute a non-interactive shell command in the current workspace. "
-                "Commands cannot read terminal input."
-            ),
-            parameters=object_schema(
-                {
-                    "command": {"type": "string", "description": "Shell command"},
-                    "timeout": {"type": "number", "description": "Timeout seconds"},
-                },
-                ["command"],
-            ),
-            required_keys=["command"],
-            handler=bash,
-            is_read_only=False,
-            is_concurrency_safe=False,
-            danger_level="high",
-            requires_approval=True,
-        ),
-        Tool(
             name="execute_command",
-            description=(
-                "Alias of bash. Execute a non-interactive shell command in the current "
-                "workspace. Commands cannot read terminal input."
-            ),
+            description=_command_tool_description(),
             parameters=object_schema(
                 {
                     "command": {"type": "string", "description": "Shell command"},
@@ -156,7 +189,7 @@ def get_builtin_tools() -> list[Tool]:
                 ["command"],
             ),
             required_keys=["command"],
-            handler=bash,
+            handler=execute_command,
             is_read_only=False,
             is_concurrency_safe=False,
             danger_level="high",
@@ -309,6 +342,11 @@ async def write_file(payload: dict[str, Any], context: ToolContext) -> ToolResul
     content = str(payload["content"])
     if len(content.encode("utf-8")) > 5 * 1024 * 1024:
         return ToolResult("write_file rejected: content exceeds 5MB", is_error=True)
+    if path.exists() and not payload.get("append") and not payload.get("overwrite"):
+        return ToolResult(
+            "write_file rejected: file exists; use edit_file/apply_patch or set overwrite=true",
+            is_error=True,
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if payload.get("append") else "w"
     with path.open(mode, encoding="utf-8") as handle:
@@ -319,6 +357,47 @@ async def write_file(payload: dict[str, Any], context: ToolContext) -> ToolResul
     if diagnostics:
         suffix = "\n\nDiagnostics:\n" + "\n".join(diagnostics)
     return ToolResult(f"Wrote {rel}{suffix}", display_summary=f"Wrote {rel}")
+
+
+async def edit_file(payload: dict[str, Any], context: ToolContext) -> ToolResult:
+    path = _resolve_path(context, str(payload["path"]))
+    if not path.is_file():
+        return ToolResult(f"edit_file rejected: file does not exist: {path}", is_error=True)
+    old = str(payload["old"])
+    if not old:
+        return ToolResult("edit_file rejected: old text cannot be empty", is_error=True)
+    text = path.read_text(encoding="utf-8")
+    count = text.count(old)
+    if count == 0:
+        return ToolResult("edit_file rejected: old text was not found", is_error=True)
+    if count > 1 and not payload.get("replace_all"):
+        return ToolResult(
+            f"edit_file rejected: old text matched {count} times; "
+            "provide more context or set replace_all=true",
+            is_error=True,
+        )
+    new = str(payload["new"])
+    updated = text.replace(old, new) if payload.get("replace_all") else text.replace(old, new, 1)
+    path.write_text(updated, encoding="utf-8")
+    rel = path.relative_to(context.cwd)
+    return ToolResult(
+        f"Edited {rel}",
+        display_summary=f"Edited {rel}",
+    )
+
+
+async def apply_patch(payload: dict[str, Any], context: ToolContext) -> ToolResult:
+    try:
+        outcome = apply_structured_patch(
+            str(payload["patch"]),
+            resolve_path=lambda value: _resolve_path(context, value),
+            dry_run=bool(payload.get("dry_run")),
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        return ToolResult(f"apply_patch rejected: {exc}", is_error=True)
+    changed = ", ".join(str(item) for item in outcome["changed_files"])
+    action = "Validated" if outcome["dry_run"] else "Applied"
+    return ToolResult(f"{action} patch: {changed}", display_summary=f"{action} patch")
 
 
 async def list_dir(payload: dict[str, Any], context: ToolContext) -> ToolResult:
@@ -380,7 +459,7 @@ async def grep(payload: dict[str, Any], context: ToolContext) -> ToolResult:
     return ToolResult("\n".join(matches) or "(no matches)")
 
 
-async def bash(payload: dict[str, Any], context: ToolContext) -> ToolResult:
+async def execute_command(payload: dict[str, Any], context: ToolContext) -> ToolResult:
     command = str(payload["command"])
     CommandGuard(context.config.policy.command_blacklist).validate(command)
     timeout = float(payload.get("timeout") or context.config.tools.timeout)
@@ -389,8 +468,20 @@ async def bash(payload: dict[str, Any], context: ToolContext) -> ToolResult:
         process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         process_options["start_new_session"] = True
-    proc = await asyncio.create_subprocess_shell(
-        command,
+    shell_args = (
+        (
+            "powershell.exe",
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            command,
+        )
+        if os.name == "nt"
+        else ("/bin/sh", "-lc", command)
+    )
+    proc = await asyncio.create_subprocess_exec(
+        *shell_args,
         cwd=context.cwd,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
@@ -413,6 +504,19 @@ async def bash(payload: dict[str, Any], context: ToolContext) -> ToolResult:
     return ToolResult(
         output or f"(exit {proc.returncode}, no output)",
         is_error=proc.returncode != 0,
+    )
+
+
+def _command_tool_description() -> str:
+    if os.name == "nt":
+        return (
+            "Execute a non-interactive Windows PowerShell 5.1 command in the current "
+            "workspace using powershell.exe. Do not use Bash-only syntax such as &&, "
+            "sed, or head. Commands cannot read terminal input."
+        )
+    return (
+        "Execute a non-interactive POSIX shell command in the current workspace using "
+        "/bin/sh. Commands cannot read terminal input."
     )
 
 

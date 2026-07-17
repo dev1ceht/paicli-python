@@ -496,7 +496,9 @@ def _extract_files_modified(delta_items: list[DeltaItem]) -> list[str]:
     """提取修改的文件"""
     files = []
     for item in delta_items:
-        if item.role == "assistant" and "write_file" in item.content:
+        if item.role == "assistant" and any(
+            name in item.content for name in ("write_file", "edit_file", "apply_patch")
+        ):
             match = re.search(r'"path"\s*:\s*"([^"]+)"', item.content)
             if match:
                 files.append(match.group(1))
