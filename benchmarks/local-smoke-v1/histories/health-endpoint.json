@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "task_id": "health-endpoint",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Inspect the fixture and record the public behavior before editing."
+    },
+    {
+      "role": "assistant",
+      "content": "Initial inspection for health-endpoint: The fixture contains a small route table and a get function. The index route must remain unchanged while a focused health route is added. No implementation change has been made yet."
+    }
+  ]
+}

@@ -221,8 +221,20 @@ A coding benchmark whose task repository and correctness check run entirely in a
 _Avoid_: unit-test suite, scripted context-cost evaluation, official benchmark
 
 **Local smoke suite**:
-The versioned seven-task local verification benchmark, comprising five PaiCLI long-session scenarios and two adapted FirstCoder local-pytest tasks, that exercises end-to-end coding evaluation across representative small repository changes; it validates integration, not broad coding mastery.
-_Avoid_: capability leaderboard, context-cost evaluation, regression unit tests
+The versioned `local-smoke-v2` seven-task local verification benchmark, comprising five PaiCLI long-session scenarios and two adapted FirstCoder local-pytest tasks, that exercises end-to-end coding evaluation and paired context pressure across representative small repository changes; it validates integration and comparative behavior, not broad coding mastery.
+_Avoid_: capability leaderboard, official SWE-bench score, regression unit tests
+
+**Frozen pressure history**:
+A committed, fingerprinted sequence of task-relevant prior messages attached to a local-smoke task to reproduce normal, medium, or high context pressure without exposing withheld acceptance material.
+_Avoid_: prompt padding, acceptance fixture, live session transcript
+
+**Full-history benchmark variant**:
+The control arm of a paired context-management evaluation that retains the same frozen pressure history and production Agent path while disabling context reduction through a benchmark-only context manager.
+_Avoid_: old PaiCLI version, truncated baseline, different task prompt
+
+**Optimized-context benchmark variant**:
+The treatment arm of a paired context-management evaluation that processes the same frozen pressure history through PaiCLI's production `ContextManager` and its unchanged pressure thresholds.
+_Avoid_: rewritten task, synthetic compression, benchmark-only reducer
 
 **Benchmark suite identity**:
 The combination of a suite's versioned name and content fingerprint; results are directly comparable only when both values match.
