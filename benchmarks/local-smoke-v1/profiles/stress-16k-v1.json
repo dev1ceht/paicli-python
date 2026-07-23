@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "profile_id": "stress-16k-v1",
+  "input_budget_tokens": 16384,
+  "output_reserve_tokens": 4096
+}

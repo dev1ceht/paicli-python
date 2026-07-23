@@ -50,6 +50,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Retain per-attempt workspaces for debugging.",
     )
+    parser.add_argument(
+        "--compare-contexts",
+        action="store_true",
+        help="Run counterbalanced full-history and optimized context variants.",
+    )
+    parser.add_argument(
+        "--context-profile",
+        type=Path,
+        help="Path to the fixed context-budget profile used by a context comparison.",
+    )
     try:
         args = parser.parse_args(argv)
     except ValueError as exc:
@@ -64,6 +74,8 @@ def main(argv: list[str] | None = None) -> int:
             allow_unsandboxed=args.allow_unsandboxed,
             require_clean_runtime=args.require_clean_runtime,
             keep_workspaces=args.keep_workspaces,
+            compare_contexts=args.compare_contexts,
+            context_profile=args.context_profile,
         )
     except KeyboardInterrupt:
         print("benchmark interrupted", file=sys.stderr)

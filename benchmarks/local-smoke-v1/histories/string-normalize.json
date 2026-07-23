@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "task_id": "string-normalize",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Inspect the fixture and record the public behavior before editing."
+    },
+    {
+      "role": "assistant",
+      "content": "Initial inspection for string-normalize: The public function lives in src/text_tools.py. Whitespace normalization, case conversion, dashes, and blank-input behavior are observable. No implementation change has been made yet."
+    }
+  ]
+}
