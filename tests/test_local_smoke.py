@@ -1242,8 +1242,8 @@ def test_local_smoke_shell_cannot_read_host_secret_environment(
     attempt = result["attempts"][0]
     patch = (tmp_path / "artifacts" / attempt["patch_path"]).read_text(encoding="utf-8")
     assert secret not in patch
-    assert patch == ""
-    assert "shell_command_outside_profile" in attempt["policy_violations"]
+    assert "+missing" in patch
+    assert attempt["policy_violations"] == []
     assert os.environ["PAICLI_BENCHMARK_TEST_API_KEY"] == secret
 
 
@@ -1306,7 +1306,7 @@ def test_local_smoke_allows_read_only_verification_commands(tmp_path: Path):
     assert result["attempts"][0]["policy_violations"] == []
 
 
-def test_local_smoke_rejects_outside_profile_command_before_execution(tmp_path: Path):
+def test_local_smoke_allows_local_python_one_liners(tmp_path: Path):
     from paicli.evaluation.local_smoke import run_local_smoke
 
     output = tmp_path / "artifacts"
@@ -1320,9 +1320,9 @@ def test_local_smoke_rejects_outside_profile_command_before_execution(tmp_path: 
     )
 
     attempt = result["attempts"][0]
-    assert "shell_command_outside_profile" in attempt["policy_violations"]
+    assert attempt["policy_violations"] == []
     workspace = Path(attempt["workspace_path"])
-    assert not (workspace / "forbidden.txt").exists()
+    assert (workspace / "forbidden.txt").read_text(encoding="utf-8") == "ran"
 
 
 def test_local_smoke_continues_after_agent_error_and_cleans_workspaces(tmp_path: Path):
