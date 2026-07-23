@@ -71,6 +71,18 @@ LOCAL_SMOKE_V2_TASK_IDS = frozenset(
     }
 )
 STRESS_16K_V1_FINGERPRINT = "ef1debf743bcc27e7d3d1f99d2d9698cf13b2610ac550b7308970bb09e8469a0"
+NETWORK_OR_INSTALL_PATTERN = re.compile(
+    r"(?i)(?:"
+    r"\bpip(?:3)?\s+install\b|"
+    r"\bpython(?:3)?\s+-m\s+pip\s+install\b|"
+    r"\buv\s+(?:add|sync|pip\s+install)\b|"
+    r"\bnpm\s+(?:install|ci)\b|"
+    r"\b(?:curl|wget|invoke-webrequest|iwr|ssh|scp|nc|ncat|telnet)\b|"
+    r"\bgit\s+(?:clone|fetch|pull|push)\b|"
+    r"\b(?:urllib\.request|requests\.(?:get|post|put|patch|delete)|"
+    r"httpx\.(?:get|post|put|patch|delete)|socket\.create_connection)\b"
+    r")"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -942,11 +954,11 @@ def _benchmark_tool_registry() -> ToolRegistry:
 
             async def restricted_command(payload, context, *, handler=original_handler):
                 command = str(payload.get("command") or "")
-                if not _benchmark_command_allowed(command):
+                violation = _benchmark_command_policy_violation(command)
+                if violation is not None:
                     return ToolResult(
                         content=(
-                            "Command rejected by the local-smoke read-only/verification "
-                            "shell profile."
+                            f"Command rejected by local-smoke policy before execution: {violation}."
                         ),
                         is_error=True,
                         error_kind="benchmark_policy",
@@ -956,8 +968,9 @@ def _benchmark_tool_registry() -> ToolRegistry:
             tool = replace(
                 tool,
                 description=(
-                    f"{tool.description} Local-smoke permits only one read-only or "
-                    "verification command with no chaining."
+                    f"{tool.description} Local-smoke permits local commands, including "
+                    "Python one-liners, but rejects acceptance access, network activity, "
+                    "and dependency installation before execution."
                 ),
                 handler=restricted_command,
             )
@@ -1086,18 +1099,6 @@ def _configured_secrets(config: PaiCliConfig) -> set[str]:
 
 def _benchmark_policy_violations(events: list[dict[str, Any]]) -> list[str]:
     violations: list[str] = []
-    network_or_install = re.compile(
-        r"(?i)(?:"
-        r"\bpip(?:3)?\s+install\b|"
-        r"\bpython(?:3)?\s+-m\s+pip\s+install\b|"
-        r"\buv\s+(?:add|sync|pip\s+install)\b|"
-        r"\bnpm\s+(?:install|ci)\b|"
-        r"\b(?:curl|wget|invoke-webrequest|iwr|ssh|scp|nc|ncat|telnet)\b|"
-        r"\bgit\s+(?:clone|fetch|pull|push)\b|"
-        r"\b(?:urllib\.request|requests\.(?:get|post|put|patch|delete)|"
-        r"httpx\.(?:get|post|put|patch|delete)|socket\.create_connection)\b"
-        r")"
-    )
     for event in events:
         if event.get("type") != "tool_call":
             continue
@@ -1105,41 +1106,22 @@ def _benchmark_policy_violations(events: list[dict[str, Any]]) -> list[str]:
         normalized = value.replace("\\\\", "/").replace("\\", "/").lower()
         if "acceptance/" in normalized and "acceptance_access" not in violations:
             violations.append("acceptance_access")
-        if (
-            event.get("name") == "execute_command"
-            and network_or_install.search(str((event.get("input") or {}).get("command") or ""))
-            and "network_or_dependency_install" not in violations
-        ):
-            violations.append("network_or_dependency_install")
-        if (
-            event.get("name") == "execute_command"
-            and not _benchmark_command_allowed(str((event.get("input") or {}).get("command") or ""))
-            and "shell_command_outside_profile" not in violations
-        ):
-            violations.append("shell_command_outside_profile")
+        if event.get("name") == "execute_command":
+            violation = _benchmark_command_policy_violation(
+                str((event.get("input") or {}).get("command") or "")
+            )
+            if violation is not None and violation not in violations:
+                violations.append(violation)
     return violations
 
 
-def _benchmark_command_allowed(command: str) -> bool:
-    normalized = command.strip()
-    if not normalized or re.search(r"[\r\n;&|`]|\$\(", normalized):
-        return False
-    if re.search(
-        r"(?i)(?:^|\s)(?:--pre(?:=|\s)|--hostname-bin\b|--ext-diff\b|--textconv\b)",
-        normalized,
-    ):
-        return False
-    allowed = re.compile(
-        r"(?i)^(?:"
-        r"python(?:3)?\s+-m\s+(?:pytest|unittest|compileall)\b|"
-        r"pytest\b|"
-        r"git\s+(?:status|diff|grep|show|log|rev-parse)\b|"
-        r"rg\b|"
-        r"(?:get-content|get-childitem|select-string|test-path)\b|"
-        r"(?:dir|ls|pwd|type|findstr)\b"
-        r")"
-    )
-    return bool(allowed.match(normalized))
+def _benchmark_command_policy_violation(command: str) -> str | None:
+    normalized = command.replace("\\\\", "/").replace("\\", "/")
+    if "acceptance/" in normalized.lower():
+        return "acceptance_access"
+    if NETWORK_OR_INSTALL_PATTERN.search(command):
+        return "network_or_dependency_install"
+    return None
 
 
 def _contains_sensitive_text(value: str, secrets: set[str]) -> bool:

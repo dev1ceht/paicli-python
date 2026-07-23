@@ -63,11 +63,11 @@ comparison suite, not a broad coding-capability leaderboard.
 - A forbidden acceptance-path access, dependency installation, or network command is a
   policy violation. Verification is skipped and the attempt is recorded as
   `agent_error`.
-- Shell execution is restricted by the runner to a recorded read-only/verification
-  allowlist (pytest/unittest/compileall, read-only Git inspection, ripgrep, and basic
-  file inspection). Chaining, arbitrary interpreters, network-capable Git operations,
-  and commands outside this profile are policy violations. Workspace edits remain
-  available through PaiCLI's file tools.
+- Local shell commands, scripts, command chaining, and Python one-liners are allowed so
+  the Agent can inspect and verify its implementation normally. Before subprocess
+  launch, the runner still rejects commands that reference acceptance material, use
+  recognized network clients or network-capable Git operations, or install/synchronize
+  dependencies. Workspace edits also remain available through PaiCLI's file tools.
 - Results record suite, runtime, configuration, and environment identities. Replicates require all four identities to match; controlled comparisons vary one declared dimension while holding the others fixed.
 - Generated files live under ignored `artifacts/`. `results.json` is the machine-readable source of truth and `report.md` is derived from it. Each attempt also records metadata, patch, final response, redacted/truncated events, and verifier output.
 - Writes are atomic. Workspaces are removed by default and may be retained explicitly for debugging. API keys, raw HTTP requests, and private reasoning are never stored. If the Agent writes a configured credential or a recognized credential pattern into its final tree, the attempt becomes `agent_error`, verification is skipped, and the unsafe patch artifact is omitted.
