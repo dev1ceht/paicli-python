@@ -857,6 +857,16 @@ def test_formal_context_claim_rejects_wrong_profile_or_unpaired_rows():
     assert unpaired["claim_eligible"] is False
     assert unpaired["pairing_complete"] is False
 
+    policy_violation = [dict(attempt) for attempt in attempts]
+    policy_violation[0]["policy_violations"] = ["network_or_dependency_install"]
+    unsafe = build_local_context_comparison(
+        policy_violation,
+        output_reserve_tokens=4_096,
+        **common,
+    )
+    assert unsafe["policy_clean"] is False
+    assert unsafe["claim_eligible"] is False
+
 
 def test_context_comparison_resume_never_resamples_terminal_attempts(tmp_path: Path):
     from paicli.evaluation.local_smoke import run_local_smoke

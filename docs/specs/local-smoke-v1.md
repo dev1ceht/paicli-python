@@ -101,6 +101,8 @@ The formal claim is eligible only when all of these conditions hold:
 - both variants contain exactly 21 terminal attempts;
 - every attempt has provider-reported input usage and no benchmark
   infrastructure failure;
+- no attempt records an acceptance-access, network, or dependency-install policy
+  violation;
 - optimized pass@1 is strictly higher and average provider input tokens are
   strictly lower than full history;
 - at least four of five pressure tasks record reduction, and at least two of

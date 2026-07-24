@@ -1293,6 +1293,7 @@ def build_local_context_comparison(
     infrastructure_complete = not any(
         row.get("execution_status") == "benchmark_error" for row in attempts
     )
+    policy_clean = not any(row.get("policy_violations") for row in attempts)
     expected_keys = {
         (task_id, repetition, variant)
         for task_id in (expected_task_ids or ())
@@ -1334,6 +1335,7 @@ def build_local_context_comparison(
         and baseline["usage_complete"]
         and optimized["usage_complete"]
         and infrastructure_complete
+        and policy_clean
         and optimized["empirical_pass_at_1"] > baseline["empirical_pass_at_1"]
         and reduction is not None
         and reduction > 0
@@ -1362,6 +1364,7 @@ def build_local_context_comparison(
         "input_token_reduction": reduction,
         "pressure_coverage": pressure_coverage,
         "infrastructure_complete": infrastructure_complete,
+        "policy_clean": policy_clean,
         "pairing_complete": pairing_complete,
         "paired_attempts": [
             {
