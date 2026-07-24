@@ -1,3 +1,0 @@
-# Counterbalance context-variant generation order
-
-A formal single-repetition context experiment will use one serial generation command that binds both variants to the same experiment identity and alternates their deterministic execution order by fixed task position: full-history first for one instance, optimized first for the next. Each attempt still receives an independent workspace, Agent session, and model client, and the command emits separate official prediction files for manual harness runs. This reduces time-of-run and host-load bias without introducing concurrency, at the cost of coupling both variant generations into one immutable formal experiment.

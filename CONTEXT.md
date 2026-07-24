@@ -222,7 +222,7 @@ _Avoid_: unit-test suite, scripted context-cost evaluation, official benchmark
 
 **Local smoke suite**:
 The versioned `local-smoke-v2` seven-task local verification benchmark, comprising five PaiCLI long-session scenarios and two adapted FirstCoder local-pytest tasks, that exercises end-to-end coding evaluation and paired context pressure across representative small repository changes; it validates integration and comparative behavior, not broad coding mastery.
-_Avoid_: capability leaderboard, official SWE-bench score, regression unit tests
+_Avoid_: capability leaderboard, official benchmark score, regression unit tests
 
 **Frozen pressure history**:
 A committed, fingerprinted sequence of task-relevant prior messages attached to a local-smoke task to reproduce normal, medium, or high context pressure without exposing withheld acceptance material.
@@ -276,30 +276,6 @@ _Avoid_: development run, partial result, selected attempts
 A coding benchmark attempt that uses the same Agent orchestration and safety boundaries as normal PaiCLI use, while allowing benchmark-specific configuration and a controlled model client.
 _Avoid_: benchmark Agent, test-only loop, simulated Agent
 
-**SWE-bench prediction generation**:
-The PaiCLI-owned benchmark stage that runs the production Agent against fixed SWE-bench instances and emits official-format model patches plus separate generation telemetry; it does not determine whether an issue is resolved.
-_Avoid_: SWE-bench evaluation, official scoring, harness run
-
-**SWE-bench repository preparation**:
-The pre-generation stage that materializes and verifies one clean repository workspace at the declared base commit for each selected instance, without calling a model or exposing reference fixes.
-_Avoid_: prediction generation, harness environment setup, task execution
-
-**SWE-bench repository cache**:
-A reusable local copy of an upstream repository's Git history from which preparation creates independent instance workspaces; it contains no Agent changes or benchmark outcomes.
-_Avoid_: instance workspace, benchmark artifact, source checkout
-
-**Fixed SWE-bench instance subset**:
-A versioned, fingerprinted selection of SWE-bench instances used as the unchanged task population for smoke, development, or controlled-comparison runs; its results are subset evidence rather than a full-suite score.
-_Avoid_: SWE-bench Lite score, sampled run, selected attempts
-
-**SWE-bench capability subset**:
-The fixed 30-instance SWE-bench Lite subset selected independently of PaiCLI outcomes to measure repository-level coding correctness across upstream projects.
-_Avoid_: official Lite score, context-stress suite, successful-task set
-
-**SWE-bench context-stress subset**:
-The fixed 5-instance `context-stress-5-v1` SWE-bench Lite subset selected before execution for the first formal context comparison; it is subset evidence under a named pressure profile, not a full-suite score. The earlier 10-instance manifest remains its frozen source population.
-_Avoid_: capability score, random sample, full-suite result
-
 **Frozen generation attempt**:
 An attempt whose model response, provider usage, patch, and safe event evidence have been atomically persisted and hashed, allowing deterministic post-generation checks to resume without another model sample.
 _Avoid_: completed attempt, model checkpoint, retryable model call
@@ -313,24 +289,8 @@ The reason an Agent loop ended, such as natural completion, a declared resource 
 _Avoid_: attempt state, patch status, official outcome
 
 **Context-stress profile**:
-A versioned benchmark-only configuration that gives full-history and optimized context variants the same explicit input budget on the context-stress subset; `stress-32k-v1` is the initial profile, and any formal budget change creates a different immutable profile identity.
+A versioned evaluation-only configuration that gives full-history and optimized context variants the same explicit input budget; any budget change creates a different immutable profile identity.
 _Avoid_: production context budget, model context window, natural long-context workload
-
-**SWE-bench task projection**:
-The four generation inputs—instance identity, upstream repository, base commit, and problem statement—read from a SWE-bench source record while every other field is ignored and excluded from Agent inputs and run artifacts. Projection limits ordinary data flow but does not guarantee reference-data confidentiality during unsandboxed execution.
-_Avoid_: sanitized dataset, complete instance record, hidden task data
-
-**Official SWE-bench evaluation**:
-The user-operated external benchmark stage in which the official Docker harness applies previously generated model patches and determines each instance's resolved outcome; PaiCLI does not launch this stage.
-_Avoid_: prediction generation, Agent self-test, PaiCLI verification
-
-**Consolidated SWE-bench report**:
-A PaiCLI-produced read-only join of generation telemetry and user-supplied official harness outcomes by instance identity; it preserves the official resolved decision and does not rerun or reinterpret the harness.
-_Avoid_: official harness report, PaiCLI score, benchmark evaluation
-
-**Complete SWE-bench outcome set**:
-A user-supplied official evaluation result containing exactly one resolved or not-resolved outcome for every scheduled instance and no others; only a complete set can produce a final pass@1 report.
-_Avoid_: partial harness report, successful instances, available results
 
 **Context-reduction variant**:
 One controlled context-handling policy used for every run of the same benchmark task: full history, deterministic compaction, or LLM-handoff compaction.

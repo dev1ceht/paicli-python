@@ -1,3 +1,0 @@
-# Make formal prediction-generation runs immutable
-
-A formal SWE-bench run will atomically journal each scheduled attempt from not-started to running to a terminal generation status, reject output-directory reuse, and never overwrite or regenerate a completed attempt. Resume may continue only attempts that were never started; a stranded running attempt means a model call may already have occurred, so the run remains invalid for final pass@1 rather than selectively resampling that task. This preserves one generated patch per task and auditable interruption semantics at the cost of restarting a formal variant after a mid-attempt process failure.

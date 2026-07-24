@@ -1,3 +1,0 @@
-# Require complete official outcomes for pass@1
-
-SWE-bench pass@1 will be the official resolved count divided by the entire fixed scheduled instance set: Agent errors, exhausted context budgets, empty patches, and other completed-generation failures count as unresolved, while Docker or harness infrastructure failures leave the report incomplete and must be retried against the same frozen prediction. The report importer will reject missing, duplicate, or extra instance outcomes and will not permit task replacement, preventing infrastructure failures or selective reporting from shrinking the denominator at the cost of requiring manual harness retries before a final headline metric is available.
