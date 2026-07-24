@@ -1,5 +1,0 @@
-# Select the SWE-bench capability subset before model execution
-
-PaiCLI's `capability-30` suite will be selected from a pinned SWE-bench Lite revision by grouping instances by upstream repository, ordering each group by a stable hash of a published seed and instance identity, and taking instances in repository-balanced rounds until 30 are fixed and fingerprinted. Selection will not use gold patches, test answers, PaiCLI outcomes, model token usage, or post-run replacement; this reduces repository dominance and outcome cherry-picking, while accepting that the subset is controlled cross-repository evidence rather than a statistically random or full-suite score.
-
-The `context-stress-10` suite will be deterministically derived from `capability-30` with a separate published seed and the same repository-round selection rule. Its membership will remain fixed across context-budget profiles and will not be changed after observing token usage, pressure, compression, or resolved outcomes; the named profile, rather than result-based task selection, supplies the controlled context pressure.

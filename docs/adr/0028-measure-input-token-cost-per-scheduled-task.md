@@ -1,5 +1,0 @@
-# Measure provider input-token cost per scheduled task
-
-The context comparison's primary cost metric will be provider-reported input tokens from every model call attributable to each scheduled attempt, including any model-assisted context-summary calls, averaged over the entire fixed task set regardless of resolved outcome. Estimated usage will remain separate, and output, total, per-resolved-task, and common-success paired costs may be reported as secondary diagnostics; this avoids hiding failed tasks or externalizing the optimized strategy's summary cost, while accepting that early failures can lower an attempt's observed consumption.
-
-The comparison will report pass@1 as resolved instances divided by scheduled instances, pass improvement in percentage points, and input-token reduction as `(baseline average - optimized average) / baseline average`. It may render a suggested resume claim only when both runs have complete official outcomes and provider usage, every non-target identity matches, optimized pass@1 is higher, and optimized average input-token cost is lower; otherwise it reports the observed values without an improvement claim.

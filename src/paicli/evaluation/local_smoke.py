@@ -30,7 +30,7 @@ from paicli import __version__
 from paicli.agent import QueryEngine
 from paicli.config import PaiCliConfig, load_config
 from paicli.context import ContextManager
-from paicli.evaluation.swebench import (
+from paicli.evaluation.context_variants import (
     ContextStressProfile,
     full_history_context_manager_factory,
     load_context_stress_profile,

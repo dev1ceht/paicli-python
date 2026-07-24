@@ -1168,13 +1168,8 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
 ]
-swebench = [
-    { name = "datasets" },
-]
-
 [package.metadata]
 requires-dist = [
-    { name = "datasets", marker = "extra == 'swebench'", specifier = ">=2.19,<5" },
     { name = "dulwich", specifier = ">=0.25,<0.26" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "jsonschema", specifier = ">=4.0,<5" },
@@ -1187,7 +1182,7 @@ requires-dist = [
     { name = "textual", specifier = ">=0.50" },
     { name = "typer", specifier = ">=0.12.3" },
 ]
-provides-extras = ["dev", "swebench"]
+provides-extras = ["dev"]
 
 [[package]]
 name = "pandas"

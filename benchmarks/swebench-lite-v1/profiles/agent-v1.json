@@ -1,8 +1,0 @@
-{
-  "schema_version": 1,
-  "profile_id": "swe-lite-agent-v1",
-  "max_turns": 60,
-  "max_tool_calls": 100,
-  "max_elapsed_seconds": 1800,
-  "max_total_tokens": 300000
-}

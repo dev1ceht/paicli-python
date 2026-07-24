@@ -1,3 +1,0 @@
-# Defer SWE-bench patch application outcomes to the official harness
-
-PaiCLI will serialize the complete final-tree Git diff from each instance's declared base commit as the official `model_patch`, regardless of Agent staging or commit behavior, while excluding benchmark runtime files. A local clean-base apply check may be recorded as diagnostic telemetry but will not erase or reclassify the prediction because the official harness owns its multi-strategy patch-application and resolved outcomes; credential detection remains the safety exception that omits the unsafe patch and emits an empty prediction. This preserves official scoring authority at the cost of allowing some locally suspicious patches to proceed to manual evaluation.

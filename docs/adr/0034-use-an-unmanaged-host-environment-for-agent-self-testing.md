@@ -1,3 +1,0 @@
-# Use an unmanaged host environment for Agent self-testing
-
-The first SWE-bench prediction generator will run PaiCLI and optional repository test commands in the current unmanaged host environment, while repository preparation performs no dependency installation and generation exposes no network acquisition. Local test success or failure is non-authoritative and artifacts will identify the host test environment; only the user-operated official Docker harness determines resolved outcomes. This keeps generation independent from harness and avoids executing historical dependency installers on the host, at the cost of weaker Agent feedback for repositories whose tests cannot run locally and results that cannot be mixed with a future containerized-generation profile.
