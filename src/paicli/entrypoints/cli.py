@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -13,8 +14,16 @@ from rich.console import Console
 
 from paicli import __version__
 from paicli.agent import QueryEngine
+from paicli.benchmark import (
+    DEFAULT_MAX_ELAPSED_SECONDS,
+    DEFAULT_MAX_TOOL_CALLS,
+    DEFAULT_MAX_TOTAL_TOKENS,
+    DEFAULT_MAX_TURNS,
+    BenchmarkOptions,
+    run_benchmark_prompt,
+)
 from paicli.bootstrap import build_tool_registry
-from paicli.config import get_config_paths, load_config
+from paicli.config import get_config_paths, load_benchmark_config, load_config
 from paicli.entrypoints.repl import start_repl
 from paicli.llm import create_llm_client
 from paicli.mcp import load_mcp_server_specs, serve_http, serve_stdio, write_chrome_devtools_config
@@ -52,6 +61,29 @@ def main(
     ] = None,
     plain: Annotated[bool, typer.Option("--plain", help="Use plain text rendering")] = False,
     cwd: Annotated[Path | None, typer.Option("--cwd", help="Working directory")] = None,
+    benchmark: Annotated[
+        bool,
+        typer.Option("--benchmark", help="Run one unattended Harbor benchmark turn"),
+    ] = False,
+    benchmark_log_dir: Annotated[
+        Path | None,
+        typer.Option("--benchmark-log-dir", help="Directory for benchmark diagnostics"),
+    ] = None,
+    max_turns: Annotated[int | None, typer.Option("--max-turns")] = None,
+    max_tool_calls: Annotated[int | None, typer.Option("--max-tool-calls")] = None,
+    max_elapsed_seconds: Annotated[
+        float | None,
+        typer.Option("--max-elapsed-seconds"),
+    ] = None,
+    max_total_tokens: Annotated[int | None, typer.Option("--max-total-tokens")] = None,
+    benchmark_source_identity: Annotated[
+        Path | None,
+        typer.Option("--benchmark-source-identity", hidden=True),
+    ] = None,
+    benchmark_mcp_config: Annotated[
+        Path | None,
+        typer.Option("--benchmark-mcp-config", hidden=True),
+    ] = None,
     version: Annotated[
         bool,
         typer.Option("--version", callback=_version_callback, is_eager=True, help="Show version"),
@@ -61,6 +93,58 @@ def main(
     if ctx.invoked_subcommand is not None:
         return
     root = (cwd or Path.cwd()).resolve()
+    benchmark_only_values = (
+        benchmark_log_dir,
+        max_turns,
+        max_tool_calls,
+        max_elapsed_seconds,
+        max_total_tokens,
+        benchmark_source_identity,
+        benchmark_mcp_config,
+    )
+    if not benchmark and any(value is not None for value in benchmark_only_values):
+        raise typer.BadParameter("benchmark resource options require --benchmark")
+    if benchmark:
+        if prompt is None:
+            raise typer.BadParameter("--benchmark requires --prompt")
+        if provider is not None or model is not None:
+            raise typer.BadParameter(
+                "benchmark provider and model must be supplied through "
+                "PAICLI_* environment variables"
+            )
+        limits = {
+            "max_turns": DEFAULT_MAX_TURNS if max_turns is None else max_turns,
+            "max_tool_calls": (
+                DEFAULT_MAX_TOOL_CALLS if max_tool_calls is None else max_tool_calls
+            ),
+            "max_elapsed_seconds": (
+                DEFAULT_MAX_ELAPSED_SECONDS if max_elapsed_seconds is None else max_elapsed_seconds
+            ),
+            "max_total_tokens": (
+                DEFAULT_MAX_TOTAL_TOKENS if max_total_tokens is None else max_total_tokens
+            ),
+        }
+        if any(value <= 0 for value in limits.values()):
+            raise typer.BadParameter("benchmark resource limits must be positive")
+        log_dir = benchmark_log_dir or Path(
+            os.getenv("PAICLI_BENCHMARK_LOG_DIR", ".paicli/benchmark")
+        )
+        config = load_benchmark_config(overrides={"render_mode": "plain"})
+        options = BenchmarkOptions(
+            log_dir=log_dir,
+            source_identity_file=benchmark_source_identity,
+            mcp_config_file=benchmark_mcp_config,
+            **limits,
+        )
+        try:
+            result = asyncio.run(
+                run_benchmark_prompt(prompt, cwd=root, config=config, options=options)
+            )
+        except Exception as exc:  # noqa: BLE001 - CLI boundary reports benchmark failures
+            typer.echo(f"Fatal error: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        typer.echo(result)
+        return
     overrides: dict = {}
     if provider or model or plain:
         overrides = {
