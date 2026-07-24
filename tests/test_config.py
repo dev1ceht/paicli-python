@@ -6,7 +6,12 @@ from io import StringIO
 import pytest
 from rich.console import Console
 
-from paicli.config import PaiCliConfig, load_config, load_llm_config_for_provider
+from paicli.config import (
+    PaiCliConfig,
+    load_benchmark_config,
+    load_config,
+    load_llm_config_for_provider,
+)
 from paicli.entrypoints.repl import _model_command
 
 
@@ -204,3 +209,16 @@ def test_llm_context_window_can_be_overridden(tmp_path, monkeypatch):
 def test_llm_context_window_must_be_positive():
     with pytest.raises(ValueError, match="context_window"):
         PaiCliConfig().llm.__class__(context_window=0)
+
+
+def test_benchmark_config_ignores_non_paicli_provider_environment() -> None:
+    config = load_benchmark_config(
+        env={
+            "PAICLI_PROVIDER": "deepseek",
+            "DEEPSEEK_API_KEY": "must-not-be-used",
+            "DEEPSEEK_MODEL": "must-not-be-used",
+        }
+    )
+
+    assert config.llm.api_key == ""
+    assert config.llm.model != "must-not-be-used"

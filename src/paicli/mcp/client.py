@@ -17,11 +17,20 @@ from paicli.tools.base import Tool, ToolContext, ToolResult, object_schema
 
 
 class McpClientManager:
-    def __init__(self, project_root: str | Path):
+    def __init__(
+        self,
+        project_root: str | Path,
+        *,
+        config_paths: list[str | Path] | None = None,
+    ):
         self.project_root = str(Path(project_root).resolve())
         self.project_config_path = Path(self.project_root) / ".paicli" / "mcp.json"
         self.log_dir = Path(self.project_root) / ".paicli" / "mcp-logs"
-        self.specs = load_mcp_server_specs(self.project_root)
+        self._config_paths = config_paths
+        self.specs = load_mcp_server_specs(
+            self.project_root,
+            config_paths=config_paths,
+        )
         self.last_errors: dict[str, str] = {}
 
     async def load_tools(self) -> list[Tool]:
@@ -296,7 +305,10 @@ class McpClientManager:
             json.dumps(data, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-        self.specs = load_mcp_server_specs(self.project_root)
+        self.specs = load_mcp_server_specs(
+            self.project_root,
+            config_paths=self._config_paths,
+        )
         return True
 
     def _log_path(self, name: str) -> Path:

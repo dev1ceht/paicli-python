@@ -22,10 +22,19 @@ class McpServerSpec:
     timeout: float = 30.0
 
 
-def load_mcp_server_specs(project_root: str | Path) -> dict[str, McpServerSpec]:
+def load_mcp_server_specs(
+    project_root: str | Path,
+    *,
+    config_paths: list[str | Path] | None = None,
+) -> dict[str, McpServerSpec]:
     root = Path(project_root).resolve()
     merged: dict[str, Any] = {}
-    for path in [Path.home() / ".paicli" / "mcp.json", root / ".paicli" / "mcp.json"]:
+    paths: list[Path] = []
+    if config_paths is not None:
+        paths.extend(Path(path).resolve() for path in config_paths)
+    else:
+        paths.extend([Path.home() / ".paicli" / "mcp.json", root / ".paicli" / "mcp.json"])
+    for path in paths:
         data = _read_json(path)
         if not data:
             continue

@@ -213,6 +213,26 @@ def load_config(
     return config
 
 
+def load_benchmark_config(
+    overrides: dict[str, Any] | None = None,
+    env: dict[str, str | None] | None = None,
+) -> PaiCliConfig:
+    """Load defaults plus process environment without host or project config files."""
+
+    data = _config_to_dict(PaiCliConfig())
+    if overrides:
+        data = _deep_merge(data, overrides)
+    process_env = env if env is not None else os.environ
+    benchmark_env = {key: value for key, value in process_env.items() if key.startswith("PAICLI_")}
+    data = _apply_env(data, benchmark_env)
+    config = _dict_to_config(data)
+    config.memory.long_term_path = _expand_home(config.memory.long_term_path)
+    config.memory.long_term_db_path = _expand_home(config.memory.long_term_db_path)
+    config.policy.audit_log_path = _expand_home(config.policy.audit_log_path)
+    config.context.tool_result_storage_dir = _expand_home(config.context.tool_result_storage_dir)
+    return config
+
+
 def load_llm_config_for_provider(
     project_root: str | Path,
     provider: str,
