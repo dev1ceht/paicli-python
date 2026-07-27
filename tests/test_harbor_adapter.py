@@ -153,10 +153,12 @@ def test_harbor_agent_bootstraps_python_and_venv_support(
 
     command = agent._python_setup_command()
 
+    assert 'MISSING_PACKAGES="python3 python3-venv"' in command
     assert "python3.11 python3.11-venv" in command
     assert 'VENV_PROBE="$(mktemp -d)"' in command
     assert "python3-venv" in command
     assert "apt-get -o Acquire::Retries=3 update" in command
+    assert "attempting install from available signed indexes" in command
     assert "apt-get -o Acquire::Retries=3 install -y --no-install-recommends" in command
 
 

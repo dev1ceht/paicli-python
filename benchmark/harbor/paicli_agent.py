@@ -237,7 +237,7 @@ class PaiCliHarborAgent(BaseInstalledAgent):
             'PYTHON_BIN="python3"; '
             'MISSING_PACKAGES=""; '
             "if ! command -v python3 >/dev/null 2>&1; then "
-            '  MISSING_PACKAGES="python3"; '
+            '  MISSING_PACKAGES="python3 python3-venv"; '
             "fi; "
             "if command -v python3 >/dev/null 2>&1 && ! python3 -c "
             "'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then "
@@ -256,7 +256,10 @@ class PaiCliHarborAgent(BaseInstalledAgent):
             "fi; "
             'rm -rf "$VENV_PROBE"; '
             'if [ -n "$MISSING_PACKAGES" ]; then '
-            "  apt-get -o Acquire::Retries=3 update; "
+            "  if ! apt-get -o Acquire::Retries=3 update; then "
+            '    echo "apt update incomplete; attempting install from '
+            'available signed indexes" >&2; '
+            "  fi; "
             "  apt-get -o Acquire::Retries=3 install -y "
             "--no-install-recommends $MISSING_PACKAGES; "
             "fi; "
