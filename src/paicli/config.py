@@ -22,11 +22,14 @@ class LlmConfig:
     api_key: str = ""
     base_url: str | None = None
     max_tokens: int = 8192
+    thinking_budget: int | None = 4096
     temperature: float = 0.7
     timeout: float = 120.0
     context_window: int | None = None
 
     def __post_init__(self) -> None:
+        if self.thinking_budget is not None and self.thinking_budget <= 0:
+            raise ValueError("thinking_budget must be positive")
         if self.context_window is not None and self.context_window <= 0:
             raise ValueError("context_window must be positive")
 
@@ -317,6 +320,7 @@ def _apply_env(data: dict[str, Any], env: dict[str, str | None]) -> dict[str, An
         ("PAICLI_MODEL", "model", str),
         ("PAICLI_BASE_URL", "base_url", str),
         ("PAICLI_MAX_TOKENS", "max_tokens", int),
+        ("PAICLI_THINKING_BUDGET", "thinking_budget", int),
         ("PAICLI_TEMPERATURE", "temperature", float),
         ("PAICLI_CONTEXT_WINDOW", "context_window", int),
     ]

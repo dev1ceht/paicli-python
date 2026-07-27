@@ -1473,6 +1473,7 @@ def _configuration_identity(config: PaiCliConfig) -> dict[str, Any]:
         "base_url_hash": _hash_text(config.llm.base_url or ""),
         "temperature": config.llm.temperature,
         "max_tokens": config.llm.max_tokens,
+        "thinking_budget": config.llm.thinking_budget,
         "context_window": config.llm.context_window,
         "tool_profile": TOOL_PROFILE_NAME,
         "tools": sorted(TOOL_PROFILE),

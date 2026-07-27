@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from paicli.config import LlmConfig
 from paicli.llm import create_llm_client
 from paicli.types import Message
@@ -18,6 +20,48 @@ def test_dashscope_provider_alias_uses_same_base_url():
 
     assert client.provider_name == "dashscope"
     assert client.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+
+def test_qwen_request_limits_thinking_to_configured_budget():
+    client = create_llm_client(
+        LlmConfig(
+            provider="qwen",
+            model="qwen3.7-plus",
+            api_key="key",
+            thinking_budget=4096,
+        )
+    )
+
+    payload = json.loads(
+        client.prepare_request(
+            [Message(role="user", content="hello")],
+            [],
+            system_prompt="system",
+        ).payload_json
+    )
+
+    assert payload["thinking_budget"] == 4096
+
+
+def test_non_qwen_request_does_not_send_provider_specific_thinking_budget():
+    client = create_llm_client(
+        LlmConfig(
+            provider="deepseek",
+            model="deepseek-v4-flash",
+            api_key="key",
+            thinking_budget=4096,
+        )
+    )
+
+    payload = json.loads(
+        client.prepare_request(
+            [Message(role="user", content="hello")],
+            [],
+            system_prompt="system",
+        ).payload_json
+    )
+
+    assert "thinking_budget" not in payload
 
 
 def test_known_model_uses_its_reported_context_window():

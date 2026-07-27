@@ -29,12 +29,14 @@ class OpenAICompatibleClient:
     api_key: str
     base_url: str
     max_tokens: int = 8192
+    thinking_budget: int | None = None
     temperature: float = 0.7
     timeout: float = 120.0
     max_context_window: int = 128_000
     context_window_known: bool = True
     prompt_cache: bool = False
     supports_reasoning_content: bool = False
+    supports_thinking_budget: bool = False
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     transport: httpx.AsyncBaseTransport | None = field(default=None, repr=False)
     retry_audit_path: str | Path = field(default="~/.paicli/audit", repr=False)
@@ -83,6 +85,8 @@ class OpenAICompatibleClient:
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
         }
+        if self.supports_thinking_budget and self.thinking_budget is not None:
+            payload["thinking_budget"] = self.thinking_budget
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
