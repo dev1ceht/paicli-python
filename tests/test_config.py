@@ -211,6 +211,23 @@ def test_llm_context_window_must_be_positive():
         PaiCliConfig().llm.__class__(context_window=0)
 
 
+def test_thinking_budget_defaults_to_4096_and_can_be_overridden_from_env(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PAICLI_THINKING_BUDGET", "2048")
+
+    config = load_config(project_root=tmp_path)
+
+    assert PaiCliConfig().llm.thinking_budget == 4096
+    assert config.llm.thinking_budget == 2048
+
+
+def test_thinking_budget_must_be_positive():
+    with pytest.raises(ValueError, match="thinking_budget"):
+        PaiCliConfig().llm.__class__(thinking_budget=0)
+
+
 def test_benchmark_config_ignores_non_paicli_provider_environment() -> None:
     config = load_benchmark_config(
         env={
