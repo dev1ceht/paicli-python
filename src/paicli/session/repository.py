@@ -1,18 +1,23 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
-import zlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
+from paicli.session.blob_store import BlobStore
 from paicli.session.errors import (
     SessionCorruptError,
     SessionIdempotencyConflictError,
     SessionReadOnlyError,
+)
+from paicli.session.integrity import (
+    EventHashMaterial,
+    blob_refs_from_json,
+    blob_refs_json,
+    canonical_json,
 )
 from paicli.session.models import (
     BlobReference,
@@ -23,9 +28,22 @@ from paicli.session.models import (
     StoredBlob,
 )
 from paicli.session.replay import message_from_event, rebuild_session_view
+from paicli.session.schema import connect, ensure_schema
+from paicli.session.validation import validate_event_payload
+from paicli.session.verification import SessionIntegrityVerifier
+from paicli.session.versions import EVENT_SCHEMA_VERSION, upcast_event_payload
 
-DATABASE_SCHEMA_VERSION = 1
-EVENT_SCHEMA_VERSION = 1
+INLINE_CONTENT_LIMIT_BYTES = 64 * 1024
+RESERVED_PUBLIC_EVENT_TYPES = {
+    "session.archived",
+    "session.created",
+    "session.deleted",
+    "session.forked",
+    "session.metadata_updated",
+    "session.restored",
+    "session.unarchived",
+}
+FORK_BOUNDARY_EVENT_TYPES = {"turn.completed", "turn.interrupted", "context.reset"}
 
 
 class SessionRepository:
@@ -35,6 +53,8 @@ class SessionRepository:
         self.db_path = Path(db_path).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
+        self._blob_store = BlobStore(self.db_path)
+        self._integrity_verifier = SessionIntegrityVerifier(self.db_path)
 
     def create_session(
         self,
@@ -143,8 +163,12 @@ class SessionRepository:
         idempotency_key: str | None = None,
         blob_refs: list[BlobReference] | tuple[BlobReference, ...] = (),
     ) -> SessionEvent:
+        if event_type in RESERVED_PUBLIC_EVENT_TYPES:
+            raise ValueError(
+                f"reserved event type must use its transactional repository method: {event_type}"
+            )
         payload_json = _json_dumps(payload)
-        normalized_blob_refs = _normalize_blob_refs(blob_refs)
+        normalized_blob_refs = tuple(blob_refs)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._require_writable_session(connection, session_id)
@@ -197,11 +221,33 @@ class SessionRepository:
             raise ValueError(f"unsupported message role: {role}")
         if partial and role != "assistant":
             raise ValueError("only assistant messages can be partial")
-        message_id = f"msg_{uuid4().hex}"
+        if idempotency_key is not None:
+            message_id = f"msg_{uuid5(NAMESPACE_URL, f'{session_id}:{idempotency_key}').hex}"
+        else:
+            message_id = f"msg_{uuid4().hex}"
+        content_bytes = content.encode("utf-8")
+        blob_refs: tuple[BlobReference, ...] = ()
+        part_content = content
+        part_metadata: dict[str, Any] = {}
+        if len(content_bytes) > INLINE_CONTENT_LIMIT_BYTES:
+            blob = self.put_blob(content_bytes, content_type="text/plain; charset=utf-8")
+            blob_refs = (BlobReference(content_hash=blob.content_hash, role="message.content"),)
+            part_content = ""
+            part_metadata = {
+                "bytes": len(content_bytes),
+                "content_hash": blob.content_hash,
+                "content_type": blob.content_type,
+            }
         payload: dict[str, Any] = {
             "message_id": message_id,
             "role": role,
-            "parts": [{"kind": "text", "content": content, "metadata": {}}],
+            "parts": [
+                {
+                    "kind": "text",
+                    "content": part_content,
+                    "metadata": part_metadata,
+                }
+            ],
             "status": "partial" if partial else "complete",
             "replayable": not partial,
         }
@@ -213,8 +259,9 @@ class SessionRepository:
             payload,
             turn_id=turn_id,
             idempotency_key=idempotency_key,
+            blob_refs=blob_refs,
         )
-        return message_from_event(event)
+        return message_from_event(event, blob_loader=self._load_blob_bytes)
 
     def reset_context(
         self,
@@ -237,7 +284,7 @@ class SessionRepository:
         idempotency_key: str | None = None,
     ) -> SessionEvent:
         view = self.rebuild_session_view(session_id)
-        if not any(message.id == message_id for message in view.transcript):
+        if not any(message.id == message_id for message in view.session_history):
             raise KeyError(f"message not found in session {session_id}: {message_id}")
         return self.append_event(
             session_id,
@@ -280,19 +327,18 @@ class SessionRepository:
                 raise KeyError(f"session not found: {session_id}")
             if row["status"] == "corrupt" or row["deleted_at"] is not None:
                 raise SessionReadOnlyError(f"session cannot be unarchived: {session_id}")
-            if row["archived_at"] is None:
-                return self._require_session_record(session_id)
-            self._append_event_in_transaction(
-                connection,
-                session_id=session_id,
-                event_type="session.unarchived",
-                payload={},
-                created_at=now,
-            )
-            connection.execute(
-                "update sessions set archived_at = null where id = ?",
-                (session_id,),
-            )
+            if row["archived_at"] is not None:
+                self._append_event_in_transaction(
+                    connection,
+                    session_id=session_id,
+                    event_type="session.unarchived",
+                    payload={},
+                    created_at=now,
+                )
+                connection.execute(
+                    "update sessions set archived_at = null where id = ?",
+                    (session_id,),
+                )
         return self._require_session_record(session_id)
 
     def delete_session(self, session_id: str, *, retention_days: int = 30) -> SessionRecord:
@@ -315,23 +361,22 @@ class SessionRepository:
                 raise SessionReadOnlyError(
                     f"corrupt sessions must be permanently purged: {session_id}"
                 )
-            if row["deleted_at"] is not None:
-                return self._require_session_record(session_id)
-            self._append_event_in_transaction(
-                connection,
-                session_id=session_id,
-                event_type="session.deleted",
-                payload={"purge_after": purge_after},
-                created_at=deleted_at,
-            )
-            connection.execute(
-                """
-                update sessions
-                set deleted_at = ?, purge_after = ?
-                where id = ?
-                """,
-                (deleted_at, purge_after, session_id),
-            )
+            if row["deleted_at"] is None:
+                self._append_event_in_transaction(
+                    connection,
+                    session_id=session_id,
+                    event_type="session.deleted",
+                    payload={"purge_after": purge_after},
+                    created_at=deleted_at,
+                )
+                connection.execute(
+                    """
+                    update sessions
+                    set deleted_at = ?, purge_after = ?
+                    where id = ?
+                    """,
+                    (deleted_at, purge_after, session_id),
+                )
         return self._require_session_record(session_id)
 
     def restore_session(self, session_id: str) -> SessionRecord:
@@ -350,23 +395,22 @@ class SessionRepository:
                 raise KeyError(f"session not found: {session_id}")
             if row["status"] == "corrupt":
                 raise SessionReadOnlyError(f"session is corrupt and read-only: {session_id}")
-            if row["deleted_at"] is None:
-                return self._require_session_record(session_id)
-            self._append_event_in_transaction(
-                connection,
-                session_id=session_id,
-                event_type="session.restored",
-                payload={},
-                created_at=now,
-            )
-            connection.execute(
-                """
-                update sessions
-                set deleted_at = null, purge_after = null
-                where id = ?
-                """,
-                (session_id,),
-            )
+            if row["deleted_at"] is not None:
+                self._append_event_in_transaction(
+                    connection,
+                    session_id=session_id,
+                    event_type="session.restored",
+                    payload={},
+                    created_at=now,
+                )
+                connection.execute(
+                    """
+                    update sessions
+                    set deleted_at = null, purge_after = null
+                    where id = ?
+                    """,
+                    (session_id,),
+                )
         return self._require_session_record(session_id)
 
     def purge_session(self, session_id: str) -> bool:
@@ -403,19 +447,7 @@ class SessionRepository:
             return session_ids
 
     def collect_orphan_blobs(self) -> int:
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            cursor = connection.execute(
-                """
-                delete from blobs
-                where not exists (
-                    select 1
-                    from event_blob_refs
-                    where event_blob_refs.content_hash = blobs.content_hash
-                )
-                """
-            )
-            return cursor.rowcount
+        return self._blob_store.collect_orphans()
 
     def fork_session(
         self,
@@ -431,24 +463,55 @@ class SessionRepository:
             raise SessionReadOnlyError(f"deleted session cannot be forked: {source_session_id}")
         source_events = self.list_events(source_session_id)
         latest_sequence = source_events[-1].sequence
-        selected_sequence = through_sequence or latest_sequence
+        if through_sequence is None:
+            latest_turn_start = max(
+                (event.sequence for event in source_events if event.type == "turn.started"),
+                default=0,
+            )
+            latest_turn_terminal = max(
+                (
+                    event.sequence
+                    for event in source_events
+                    if event.type in {"turn.completed", "turn.interrupted"}
+                ),
+                default=0,
+            )
+            if latest_turn_start > latest_turn_terminal:
+                raise ValueError("active turn must reach a turn boundary before fork")
+            boundary = next(
+                (
+                    event
+                    for event in reversed(source_events)
+                    if event.type in FORK_BOUNDARY_EVENT_TYPES
+                ),
+                None,
+            )
+            if boundary is None:
+                raise ValueError("session has no completed turn boundary")
+            selected_sequence = boundary.sequence
+        else:
+            selected_sequence = through_sequence
         if selected_sequence < 1 or selected_sequence > latest_sequence:
             raise ValueError(f"invalid fork sequence: {selected_sequence}")
-        if selected_sequence != latest_sequence:
-            boundary = source_events[selected_sequence - 1]
-            if boundary.type not in {"turn.completed", "turn.interrupted", "context.reset"}:
-                raise ValueError(
-                    f"fork sequence is not a completed turn boundary: {selected_sequence}"
-                )
+        boundary = source_events[selected_sequence - 1]
+        if boundary.type not in FORK_BOUNDARY_EVENT_TYPES:
+            raise ValueError(f"fork sequence is not a completed turn boundary: {selected_sequence}")
 
         copied_events = [
             event
             for event in source_events
             if event.sequence <= selected_sequence and _is_forkable_event(event)
         ]
+        source_view = rebuild_session_view(
+            source_session_id,
+            source_events[:selected_sequence],
+            blob_loader=self._load_blob_bytes,
+        )
+        source_metadata = _event_metadata(source_view.metadata)
         child_id = f"sess_{uuid4().hex}"
         child_workspace = str(Path(workspace_root or source.workspace_root).expanduser().resolve())
-        child_title = title or f"{source.title} (fork)"
+        source_title = str(source_view.metadata.get("title") or source.title)
+        child_title = title or f"{source_title} (fork)"
         now = _now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -465,7 +528,7 @@ class SessionRepository:
                     child_title,
                     now,
                     now,
-                    _json_dumps(source.metadata),
+                    _json_dumps(source_metadata),
                 ),
             )
             self._append_event_in_transaction(
@@ -476,7 +539,7 @@ class SessionRepository:
                     "session_id": child_id,
                     "title": child_title,
                     "workspace_root": child_workspace,
-                    **_event_metadata(source.metadata),
+                    **source_metadata,
                 },
                 created_at=now,
             )
@@ -492,11 +555,18 @@ class SessionRepository:
                 source_session_id=source_session_id,
             )
             for event in copied_events:
+                copied_payload = event.payload
+                if event.type == "session.metadata_updated" and "title" in copied_payload:
+                    copied_payload = {
+                        key: value for key, value in copied_payload.items() if key != "title"
+                    }
+                    if not copied_payload:
+                        continue
                 self._append_event_in_transaction(
                     connection,
                     session_id=child_id,
                     event_type=event.type,
-                    payload=event.payload,
+                    payload=copied_payload,
                     created_at=event.created_at,
                     turn_id=event.turn_id,
                     source_session_id=source_session_id,
@@ -513,201 +583,46 @@ class SessionRepository:
         if self.get_session(session_id) is None:
             raise KeyError(f"session not found: {session_id}")
         self.verify_session(session_id)
-        return rebuild_session_view(session_id, self.list_events(session_id))
+        try:
+            return rebuild_session_view(
+                session_id,
+                self.list_events(session_id),
+                blob_loader=self._load_blob_bytes,
+            )
+        except (KeyError, TypeError, UnicodeError, ValueError) as error:
+            self._mark_session_corrupt(session_id)
+            raise SessionCorruptError(
+                f"session {session_id} contains an invalid event payload: {error}"
+            ) from error
 
     def put_blob(self, data: bytes, *, content_type: str) -> StoredBlob:
-        content_hash = hashlib.sha256(data).hexdigest()
-        existing = self.get_blob(content_hash)
-        if existing is not None:
-            return existing
-        compressed = zlib.compress(data)
-        if len(compressed) < len(data):
-            compression = "zlib"
-            stored_data = compressed
-        else:
-            compression = "none"
-            stored_data = data
-        now = _now()
+        return self._blob_store.put(data, content_type=content_type)
+
+    def get_blob(self, content_hash: str) -> StoredBlob | None:
+        return self._blob_store.get(content_hash)
+
+    def _load_blob_bytes(self, content_hash: str) -> bytes:
+        return self._blob_store.load_bytes(content_hash)
+
+    def list_event_blob_refs(self, event_id: str) -> tuple[BlobReference, ...]:
+        return self._blob_store.list_event_refs(event_id)
+
+    def verify_session(self, session_id: str) -> None:
+        issue = self._integrity_verifier.find_issue(session_id)
+        if issue is not None:
+            self._mark_session_corrupt(session_id)
+            raise SessionCorruptError(f"session {session_id} is corrupt: {issue}")
+
+    def _mark_session_corrupt(self, session_id: str) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
-                insert or ignore into blobs(
-                    content_hash, content_type, compression, original_size,
-                    stored_size, data, created_at
-                ) values (?, ?, ?, ?, ?, ?, ?)
+                update sessions
+                set status = 'corrupt', updated_at = ?
+                where id = ?
                 """,
-                (
-                    content_hash,
-                    content_type,
-                    compression,
-                    len(data),
-                    len(stored_data),
-                    stored_data,
-                    now,
-                ),
+                (_now(), session_id),
             )
-        stored = self.get_blob(content_hash)
-        if stored is None:  # pragma: no cover - an insert or racing insert must win
-            raise RuntimeError(f"blob disappeared after insert: {content_hash}")
-        return stored
-
-    def get_blob(self, content_hash: str) -> StoredBlob | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                select content_hash, content_type, compression, original_size,
-                       stored_size, data, created_at
-                from blobs
-                where content_hash = ?
-                """,
-                (content_hash,),
-            ).fetchone()
-        if row is None:
-            return None
-        raw = bytes(row["data"])
-        compression = str(row["compression"])
-        data = zlib.decompress(raw) if compression == "zlib" else raw
-        return StoredBlob(
-            content_hash=str(row["content_hash"]),
-            content_type=str(row["content_type"]),
-            compression=compression,
-            original_size=int(row["original_size"]),
-            stored_size=int(row["stored_size"]),
-            data=data,
-            created_at=str(row["created_at"]),
-        )
-
-    def list_event_blob_refs(self, event_id: str) -> tuple[BlobReference, ...]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                select content_hash, role
-                from event_blob_refs
-                where event_id = ?
-                order by role, content_hash
-                """,
-                (event_id,),
-            ).fetchall()
-        return tuple(
-            BlobReference(content_hash=str(row["content_hash"]), role=str(row["role"]))
-            for row in rows
-        )
-
-    def verify_session(self, session_id: str) -> None:
-        with self._connect() as connection:
-            session = connection.execute(
-                "select id from sessions where id = ?",
-                (session_id,),
-            ).fetchone()
-            if session is None:
-                raise KeyError(f"session not found: {session_id}")
-            rows = connection.execute(
-                """
-                select id, session_id, sequence, turn_id, type, schema_version,
-                       payload_json, idempotency_key, previous_event_hash, event_hash,
-                       created_at, source_session_id, source_event_id, blob_refs_json
-                from session_events
-                where session_id = ?
-                order by sequence
-                """,
-                (session_id,),
-            ).fetchall()
-            reference_rows = connection.execute(
-                """
-                select refs.event_id, refs.content_hash, refs.role
-                from event_blob_refs as refs
-                join session_events as events on events.id = refs.event_id
-                where events.session_id = ?
-                order by refs.event_id, refs.role, refs.content_hash
-                """,
-                (session_id,),
-            ).fetchall()
-            blob_rows = connection.execute(
-                """
-                select distinct blobs.content_hash, blobs.compression, blobs.original_size,
-                                blobs.stored_size, blobs.data
-                from blobs
-                join event_blob_refs as refs
-                  on refs.content_hash = blobs.content_hash
-                join session_events as events
-                  on events.id = refs.event_id
-                where events.session_id = ?
-                """,
-                (session_id,),
-            ).fetchall()
-
-        refs_by_event: dict[str, list[BlobReference]] = {}
-        for row in reference_rows:
-            refs_by_event.setdefault(str(row["event_id"]), []).append(
-                BlobReference(
-                    content_hash=str(row["content_hash"]),
-                    role=str(row["role"]),
-                )
-            )
-        blobs_by_hash = {str(row["content_hash"]): row for row in blob_rows}
-        previous_hash: str | None = None
-        issue: str | None = None
-        for expected_sequence, row in enumerate(rows, start=1):
-            if int(row["sequence"]) != expected_sequence:
-                issue = f"event sequence gap: expected {expected_sequence}, got {row['sequence']}"
-                break
-            schema_version = int(row["schema_version"])
-            if not 1 <= schema_version <= EVENT_SCHEMA_VERSION:
-                issue = f"unsupported event schema version: {schema_version}"
-                break
-            if row["previous_event_hash"] != previous_hash:
-                issue = f"previous event hash mismatch at sequence {expected_sequence}"
-                break
-            expected_refs = _blob_refs_from_json(str(row["blob_refs_json"]))
-            actual_refs = tuple(refs_by_event.get(str(row["id"]), []))
-            if actual_refs != expected_refs:
-                issue = f"blob reference mismatch at sequence {expected_sequence}"
-                break
-            invalid_blob = next(
-                (
-                    reference.content_hash
-                    for reference in expected_refs
-                    if not _stored_blob_is_valid(
-                        blobs_by_hash.get(reference.content_hash),
-                        reference.content_hash,
-                    )
-                ),
-                None,
-            )
-            if invalid_blob is not None:
-                issue = f"missing or corrupt blob {invalid_blob} at sequence {expected_sequence}"
-                break
-            expected_hash = _event_hash(
-                event_id=str(row["id"]),
-                session_id=str(row["session_id"]),
-                sequence=int(row["sequence"]),
-                event_type=str(row["type"]),
-                payload_json=str(row["payload_json"]),
-                schema_version=schema_version,
-                created_at=str(row["created_at"]),
-                previous_event_hash=previous_hash,
-                turn_id=row["turn_id"],
-                idempotency_key=row["idempotency_key"],
-                source_session_id=row["source_session_id"],
-                source_event_id=row["source_event_id"],
-                blob_refs_json=str(row["blob_refs_json"]),
-            )
-            if str(row["event_hash"]) != expected_hash:
-                issue = f"event hash mismatch at sequence {expected_sequence}"
-                break
-            previous_hash = expected_hash
-
-        if issue is not None:
-            with self._connect() as connection:
-                connection.execute(
-                    """
-                    update sessions
-                    set status = 'corrupt', updated_at = ?
-                    where id = ?
-                    """,
-                    (_now(), session_id),
-                )
-            raise SessionCorruptError(f"session {session_id} is corrupt: {issue}")
 
     def get_session(self, session_id: str) -> SessionRecord | None:
         with self._connect() as connection:
@@ -782,6 +697,7 @@ class SessionRepository:
         source_event_id: str | None = None,
         blob_refs: tuple[BlobReference, ...] = (),
     ) -> SessionEvent:
+        validate_event_payload(event_type, payload)
         session = connection.execute(
             "select next_sequence from sessions where id = ?",
             (session_id,),
@@ -802,8 +718,8 @@ class SessionRepository:
         event_id = f"evt_{uuid4().hex}"
         timestamp = created_at or _now()
         payload_json = _json_dumps(payload)
-        blob_refs_json = _blob_refs_json(blob_refs)
-        event_hash = _event_hash(
+        serialized_blob_refs = blob_refs_json(blob_refs)
+        event_hash = EventHashMaterial(
             event_id=event_id,
             session_id=session_id,
             sequence=sequence,
@@ -816,8 +732,8 @@ class SessionRepository:
             idempotency_key=idempotency_key,
             source_session_id=source_session_id,
             source_event_id=source_event_id,
-            blob_refs_json=blob_refs_json,
-        )
+            blob_refs_json=serialized_blob_refs,
+        ).digest()
         connection.execute(
             """
             insert into session_events(
@@ -840,10 +756,10 @@ class SessionRepository:
                 timestamp,
                 source_session_id,
                 source_event_id,
-                blob_refs_json,
+                serialized_blob_refs,
             ),
         )
-        for reference in blob_refs:
+        for ordinal, reference in enumerate(blob_refs):
             blob = connection.execute(
                 "select 1 from blobs where content_hash = ?",
                 (reference.content_hash,),
@@ -852,10 +768,10 @@ class SessionRepository:
                 raise KeyError(f"blob not found: {reference.content_hash}")
             connection.execute(
                 """
-                insert into event_blob_refs(event_id, content_hash, role)
-                values (?, ?, ?)
+                insert into event_blob_refs(event_id, ordinal, content_hash, role)
+                values (?, ?, ?, ?)
                 """,
-                (event_id, reference.content_hash, reference.role),
+                (event_id, ordinal, reference.content_hash, reference.role),
             )
         connection.execute(
             """
@@ -905,97 +821,10 @@ class SessionRepository:
             raise SessionReadOnlyError(f"session is deleted: {session_id}")
 
     def _ensure_schema(self) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                create table if not exists schema_migrations (
-                    version integer primary key,
-                    applied_at text not null
-                )
-                """
-            )
-            current = int(connection.execute("pragma user_version").fetchone()[0])
-            if current > DATABASE_SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"session database schema {current} is newer than supported "
-                    f"{DATABASE_SCHEMA_VERSION}"
-                )
-            if current == 0:
-                connection.executescript(
-                    """
-                    create table sessions (
-                        id text primary key,
-                        workspace_root text not null,
-                        title text not null,
-                        status text not null,
-                        created_at text not null,
-                        updated_at text not null,
-                        archived_at text,
-                        deleted_at text,
-                        purge_after text,
-                        next_sequence integer not null,
-                        version integer not null,
-                        metadata_json text not null
-                    );
-
-                    create table session_events (
-                        id text primary key,
-                        session_id text not null references sessions(id) on delete cascade,
-                        sequence integer not null,
-                        turn_id text,
-                        type text not null,
-                        schema_version integer not null,
-                        payload_json text not null,
-                        idempotency_key text,
-                        previous_event_hash text,
-                        event_hash text not null,
-                        created_at text not null,
-                        source_session_id text,
-                        source_event_id text,
-                        blob_refs_json text not null,
-                        unique(session_id, sequence)
-                    );
-
-                    create unique index idx_session_events_idempotency
-                    on session_events(session_id, idempotency_key)
-                    where idempotency_key is not null;
-
-                    create index idx_sessions_workspace
-                    on sessions(workspace_root, updated_at);
-
-                    create table blobs (
-                        content_hash text primary key,
-                        content_type text not null,
-                        compression text not null,
-                        original_size integer not null,
-                        stored_size integer not null,
-                        data blob not null,
-                        created_at text not null
-                    );
-
-                    create table event_blob_refs (
-                        event_id text not null references session_events(id) on delete cascade,
-                        content_hash text not null references blobs(content_hash),
-                        role text not null,
-                        primary key(event_id, content_hash, role)
-                    );
-                    """
-                )
-                connection.execute(
-                    "insert into schema_migrations(version, applied_at) values (?, ?)",
-                    (DATABASE_SCHEMA_VERSION, _now()),
-                )
-                connection.execute(f"pragma user_version = {DATABASE_SCHEMA_VERSION}")
+        ensure_schema(self.db_path)
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path, isolation_level=None, timeout=5.0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("pragma foreign_keys = on")
-        connection.execute("pragma busy_timeout = 5000")
-        connection.execute("pragma journal_mode = wal")
-        connection.execute("pragma synchronous = full")
-        connection.execute("pragma secure_delete = on")
-        return connection
+        return connect(self.db_path)
 
 
 def _session_from_row(row: sqlite3.Row) -> SessionRecord:
@@ -1014,13 +843,19 @@ def _session_from_row(row: sqlite3.Row) -> SessionRecord:
 
 
 def _event_from_row(row: sqlite3.Row) -> SessionEvent:
+    schema_version = int(row["schema_version"])
+    payload = json.loads(row["payload_json"])
+    if not isinstance(payload, dict):
+        raise TypeError("event payload must be a JSON object")
+    payload = upcast_event_payload(str(row["type"]), payload, schema_version)
+    validate_event_payload(str(row["type"]), payload)
     return SessionEvent(
         id=str(row["id"]),
         session_id=str(row["session_id"]),
         sequence=int(row["sequence"]),
         type=str(row["type"]),
-        payload=json.loads(row["payload_json"]),
-        schema_version=int(row["schema_version"]),
+        payload=payload,
+        schema_version=schema_version,
         created_at=str(row["created_at"]),
         previous_event_hash=row["previous_event_hash"],
         event_hash=str(row["event_hash"]),
@@ -1028,65 +863,12 @@ def _event_from_row(row: sqlite3.Row) -> SessionEvent:
         idempotency_key=row["idempotency_key"],
         source_session_id=row["source_session_id"],
         source_event_id=row["source_event_id"],
-        blob_refs=_blob_refs_from_json(str(row["blob_refs_json"])),
+        blob_refs=blob_refs_from_json(str(row["blob_refs_json"])),
     )
-
-
-def _event_hash(**material: Any) -> str:
-    encoded = _json_dumps(material).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _json_dumps(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-
-
-def _normalize_blob_refs(
-    references: list[BlobReference] | tuple[BlobReference, ...],
-) -> tuple[BlobReference, ...]:
-    return tuple(
-        sorted(
-            set(references),
-            key=lambda reference: (reference.role, reference.content_hash),
-        )
-    )
-
-
-def _blob_refs_json(references: tuple[BlobReference, ...]) -> str:
-    return _json_dumps(
-        [
-            {"content_hash": reference.content_hash, "role": reference.role}
-            for reference in references
-        ]
-    )
-
-
-def _blob_refs_from_json(value: str) -> tuple[BlobReference, ...]:
-    return tuple(
-        BlobReference(content_hash=str(item["content_hash"]), role=str(item["role"]))
-        for item in json.loads(value)
-    )
-
-
-def _stored_blob_is_valid(row: sqlite3.Row | None, content_hash: str) -> bool:
-    if row is None:
-        return False
-    stored = bytes(row["data"])
-    compression = str(row["compression"])
-    try:
-        if compression == "zlib":
-            raw = zlib.decompress(stored)
-        elif compression == "none":
-            raw = stored
-        else:
-            return False
-    except zlib.error:
-        return False
-    return (
-        len(stored) == int(row["stored_size"])
-        and len(raw) == int(row["original_size"])
-        and hashlib.sha256(raw).hexdigest() == content_hash
-    )
+    return canonical_json(value)
 
 
 def _is_forkable_event(event: SessionEvent) -> bool:
