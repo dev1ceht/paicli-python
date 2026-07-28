@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +71,8 @@ class PaiCliApp(App):
         console: Any = None,
         handle_slash: Any = None,
         approval_callback: Any = None,
+        session_repository: Any = None,
+        session_id: str | None = None,
     ) -> None:
         driver_class = None
         if sys.platform == "win32":
@@ -84,8 +87,20 @@ class PaiCliApp(App):
         self.mcp_manager = mcp_manager
         self._handle_slash = handle_slash
         self._approval_callback = approval_callback
+        self._interactive_session = None
+        if session_repository is not None:
+            from paicli.session import InteractiveSession
+
+            self._interactive_session = InteractiveSession(
+                session_repository,
+                cwd,
+                session_id=session_id,
+            )
+            if agent is not None:
+                self._interactive_session.restore_agent_history(agent)
         # State
         self._text_buffer: list[str] = []
+        self._session_text_buffer: list[str] = []
         self._thinking_buffer: list[str] = []
         self._input_tokens = 0
         self._output_tokens = 0
@@ -113,6 +128,12 @@ class PaiCliApp(App):
         self._task_thinking_buffers: dict[str, list[str]] = {}
         self._context_usage = ContextUsageState()
 
+    @property
+    def session_id(self) -> str | None:
+        if self._interactive_session is None:
+            return None
+        return self._interactive_session.id
+
     def compose(self) -> ComposeResult:
         yield ChatLog(id="chat-log")
         yield InputBar(id="input-bar")
@@ -127,6 +148,7 @@ class PaiCliApp(App):
                 self._context_usage.apply(context_event)
         self._update_status_bar()
         self._show_banner()
+        self._show_restored_session_history()
         self.call_after_refresh(self.query_one(TextArea).focus)
 
     def _show_banner(self) -> None:
@@ -151,6 +173,16 @@ class PaiCliApp(App):
                 cwd=_shorten_home(self.cwd),
             )
         )
+
+    def _show_restored_session_history(self) -> None:
+        if self._interactive_session is None:
+            return
+        chat_log = self.query_one("#chat-log", ChatLog)
+        for message in self._interactive_session.session_history:
+            if message.role == "user":
+                chat_log.add_user_message(message.content)
+            elif message.role == "assistant":
+                chat_log.add_assistant_text(message.content)
 
     def _hitl_banner_text(self) -> str:
         mode = self.config.policy.hitl_mode if self.config else "auto"
@@ -207,6 +239,8 @@ class PaiCliApp(App):
             chat_log.clear_conversation()
             return
         if command == "/reset":
+            if self._interactive_session is not None:
+                self._interactive_session.reset_context()
             if self.agent:
                 self.agent.clear_history()
                 build_context_event = getattr(self.agent, "context_usage_event", None)
@@ -282,6 +316,9 @@ class PaiCliApp(App):
         if command == "/snapshot":
             self._snapshot_command_info(arg, chat_log)
             return
+        if command == "/session":
+            self._session_command(arg, chat_log)
+            return
         if command == "/restore":
             if not arg:
                 chat_log.add_info("[red]Usage:[/red] /restore <snapshot-id-or-index>")
@@ -324,6 +361,7 @@ class PaiCliApp(App):
         self._phase = "running"
         self._run_start_time = time.monotonic()
         self._text_buffer.clear()
+        self._session_text_buffer.clear()
         self._thinking_buffer.clear()
         self._input_tokens = 0
         self._output_tokens = 0
@@ -334,19 +372,43 @@ class PaiCliApp(App):
 
         chat_log = self.query_one("#chat-log", ChatLog)
         chat_log.add_user_message(message)
+        if self._interactive_session is not None:
+            try:
+                self._interactive_session.begin_turn(message)
+            except Exception as exc:
+                self._agent_running = False
+                self._phase = "idle"
+                chat_log.add_info(f"[bold red]Session error:[/bold red] {exc}")
+                self._update_status_bar()
+                return
 
         async def _run() -> None:
+            completed = False
             try:
                 if self.agent is None:
                     chat_log.add_info("[red]Agent not initialized[/red]")
                     return
                 async for event in self.agent.run(message):
                     self.handle_event(event)
+                    if event.get("type") == "done":
+                        completed = True
                     if event.get("type") == "error":
                         break
             except Exception as exc:
                 chat_log.add_info(f"[bold red]Error:[/bold red] {exc}")
             finally:
+                try:
+                    if self._interactive_session is not None:
+                        assistant_text = "".join(self._session_text_buffer)
+                        if completed:
+                            self._interactive_session.complete_turn(assistant_text)
+                        else:
+                            self._interactive_session.interrupt_turn(
+                                assistant_text,
+                                reason="agent_stopped",
+                            )
+                except Exception as persistence_error:
+                    self._recover_session_persistence_error(persistence_error, chat_log)
                 self._agent_running = False
                 self._phase = "idle"
                 self._worker = None
@@ -363,6 +425,7 @@ class PaiCliApp(App):
         if event_type == "text_delta":
             text = str(payload.get("text") or "")
             self._text_buffer.append(text)
+            self._session_text_buffer.append(text)
             if text:
                 chat_log = self.query_one("#chat-log", ChatLog)
                 chat_log.begin_stream("assistant").append(text)
@@ -861,6 +924,17 @@ class PaiCliApp(App):
     def action_interrupt(self) -> None:
         """Cancel running agent if active; otherwise exit."""
         if self._agent_running and self._worker and self._worker.is_running:
+            if self._interactive_session is not None:
+                try:
+                    self._interactive_session.interrupt_turn(
+                        "".join(self._session_text_buffer),
+                        reason="user_interrupt",
+                    )
+                except Exception as persistence_error:
+                    self._recover_session_persistence_error(
+                        persistence_error,
+                        self.query_one("#chat-log", ChatLog),
+                    )
             self._worker.cancel()
             self._agent_running = False
             self._phase = "idle"
@@ -876,6 +950,94 @@ class PaiCliApp(App):
             self.exit()
 
     # -- Slash command helpers -------------------------------------------
+
+    def _recover_session_persistence_error(
+        self,
+        error: Exception,
+        chat_log: ChatLog,
+    ) -> None:
+        if self._interactive_session is not None:
+            with suppress(Exception):
+                self._interactive_session.interrupt_turn(
+                    "",
+                    reason="persistence_error",
+                )
+        chat_log.add_info(f"[bold red]Session persistence error:[/bold red] {error}")
+
+    def _session_command(self, arg: str, chat_log: ChatLog) -> None:
+        if self._interactive_session is None:
+            chat_log.add_info("[red]Durable sessions are unavailable[/red]")
+            return
+        subcommand, _, value = arg.partition(" ")
+        subcommand = subcommand or "list"
+        value = value.strip()
+        try:
+            if subcommand == "list":
+                lines = []
+                for record in self._interactive_session.list_sessions():
+                    flags = [record.status]
+                    if record.id == self._interactive_session.id:
+                        flags.append("current")
+                    if record.archived_at is not None:
+                        flags.append("archived")
+                    if record.deleted_at is not None:
+                        flags.append("deleted")
+                    lines.append(f"{record.id}  {record.title}  [{', '.join(flags)}]")
+                chat_log.add_info("\n".join(lines) or "(no sessions)")
+                return
+            if subcommand == "new":
+                record = self._interactive_session.new_session(title=value or None)
+                self._activate_interactive_session()
+                chat_log.add_info(f"Created session {record.id}")
+                return
+            if subcommand == "resume":
+                if not value:
+                    raise ValueError("Usage: /session resume <session-id>")
+                record = self._interactive_session.resume_session(value)
+                self._activate_interactive_session()
+                chat_log.add_info(f"Resumed session {record.id}")
+                return
+            if subcommand == "fork":
+                record = self._interactive_session.fork_session(title=value or None)
+                self._activate_interactive_session()
+                chat_log.add_info(f"Forked session {record.id}")
+                return
+            if subcommand == "archive":
+                archived, replacement = self._interactive_session.archive_session()
+                self._activate_interactive_session()
+                chat_log.add_info(
+                    f"Archived session {archived.id}; created session {replacement.id}"
+                )
+                return
+            if subcommand == "delete":
+                deleted, replacement = self._interactive_session.delete_session()
+                self._activate_interactive_session()
+                chat_log.add_info(f"Deleted session {deleted.id}; created session {replacement.id}")
+                return
+            if subcommand == "restore":
+                if not value:
+                    raise ValueError("Usage: /session restore <session-id>")
+                record = self._interactive_session.restore_session(value)
+                self._activate_interactive_session()
+                chat_log.add_info(f"Restored session {record.id}")
+                return
+        except (KeyError, RuntimeError, ValueError) as exc:
+            chat_log.add_info(f"[red]Session error:[/red] {exc}")
+            return
+        chat_log.add_info(f"[red]Unknown session command:[/red] {subcommand}")
+
+    def _activate_interactive_session(self) -> None:
+        if self._interactive_session is None:
+            return
+        if self.agent is not None:
+            self._interactive_session.restore_agent_history(self.agent)
+        self.query_one("#chat-log", ChatLog).clear_conversation()
+        self._show_restored_session_history()
+        build_context_event = getattr(self.agent, "context_usage_event", None)
+        context_event = build_context_event() if callable(build_context_event) else None
+        if context_event:
+            self._context_usage.apply(context_event)
+        self._update_status_bar()
 
     def _help_text(self) -> str:
         from paicli.entrypoints.repl import help_text

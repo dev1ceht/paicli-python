@@ -5,6 +5,7 @@ from paicli.session.errors import (
     SessionIdempotencyConflictError,
     SessionReadOnlyError,
 )
+from paicli.session.interactive import InteractiveSession, default_session_database_path
 from paicli.session.models import (
     BlobReference,
     MessagePart,
@@ -19,6 +20,7 @@ from paicli.session.repository import SessionRepository
 __all__ = [
     "BlobReference",
     "MessagePart",
+    "InteractiveSession",
     "SessionCorruptError",
     "SessionEvent",
     "SessionIdempotencyConflictError",
@@ -28,4 +30,5 @@ __all__ = [
     "SessionRepository",
     "SessionView",
     "StoredBlob",
+    "default_session_database_path",
 ]

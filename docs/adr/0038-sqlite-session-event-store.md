@@ -64,9 +64,10 @@ Orphan collection is separate from session deletion so a fork can retain shared 
 ## Delivery boundary
 
 This ADR covers phase one only: repository, schema, event replay, integrity, Blob storage,
-catalog metadata, lifecycle operations, and fork. Agent integration, asynchronous Turns,
-leases, approvals, tool execution recovery, Runtime API replacement, background-task child
-sessions, and Plan child Agents remain explicit later phases.
+catalog metadata, lifecycle operations, and fork. Interactive Agent integration and Turn
+persistence were delivered separately in ADR 0039. Leases, approvals, tool execution recovery,
+Runtime API replacement, background-task child sessions, and Plan child Agents remain explicit
+later phases.
 
 Legacy `runtime.db` data will not be migrated. Its removal belongs to the Runtime integration
 phase rather than this storage-only change.
