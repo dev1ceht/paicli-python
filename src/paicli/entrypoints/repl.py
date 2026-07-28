@@ -38,6 +38,7 @@ from paicli.prompt.project_memory import ProjectMemoryLoader
 from paicli.rag import CodeIndex
 from paicli.render import PaiCliApp, RichRenderer
 from paicli.runtime import DurableTaskManager
+from paicli.session import SessionRepository, default_session_database_path
 from paicli.skill import SkillRegistry
 from paicli.snapshot import SnapshotService
 from paicli.tools import ToolRegistry
@@ -67,14 +68,16 @@ SLASH_COMMANDS = [
     "/task",
     "/snapshot",
     "/restore",
+    "/session",
 ]
 
 HELP_LINES = [
+    "/session list|new|resume|fork|archive|delete|restore - Manage durable sessions",
     "可用命令：",
     "/help - 查看命令帮助",
     "/exit - 退出 PaiCLI",
-    "/clear - 清空屏幕显示（保留会话上下文）",
-    "/reset - 清空会话历史和屏幕显示",
+    "/clear - 清空屏幕显示（保留 Session history 和模型上下文）",
+    "/reset - 清空屏幕与后续模型上下文（保留 Session history）",
     "/context - 查看当前上下文状态",
     "/memory - 查看记忆系统状态",
     "/memory list - 查看长期记忆列表",
@@ -179,6 +182,7 @@ async def start_repl(cwd: str, config: PaiCliConfig) -> None:
         registry=registry,
         mcp_manager=mcp_manager,
         console=console,
+        session_repository=SessionRepository(default_session_database_path()),
     )
     tui_app._model = client.model_name
     tui_app._context_window = client.max_context_window
@@ -1037,9 +1041,7 @@ def _bottom_toolbar(
     has_context_telemetry = "context_used_tokens" in stats
     context_ratio = float(stats.get("context_ratio") or 0)
     context_text = (
-        _format_toolbar_percent(context_ratio)
-        if has_usage or has_context_telemetry
-        else "0%"
+        _format_toolbar_percent(context_ratio) if has_usage or has_context_telemetry else "0%"
     )
     context_window = int(stats.get("context_window") or 0)
     used_tokens = int(
@@ -1074,8 +1076,7 @@ def _bottom_toolbar(
         segments.append(
             (
                 "class:toolbar.ctx.detail",
-                f"{estimated_marker}{format_tokens(used_tokens)}/"
-                f"{format_tokens(context_window)}",
+                f"{estimated_marker}{format_tokens(used_tokens)}/{format_tokens(context_window)}",
             )
         )
         segments.append(("class:toolbar.gap", " "))
@@ -1107,14 +1108,10 @@ def _bottom_toolbar(
         if stats.get("usage_label") == "last":
             segments.append(("class:toolbar.token.label", "last "))
         segments.append(("class:toolbar.token.label", "in "))
-        segments.append(
-            ("class:toolbar.token.value", f"{usage_marker}{format_tokens(in_tok)}")
-        )
+        segments.append(("class:toolbar.token.value", f"{usage_marker}{format_tokens(in_tok)}"))
         segments.append(("class:toolbar.gap", " "))
         segments.append(("class:toolbar.token.label", "out "))
-        segments.append(
-            ("class:toolbar.token.value", f"{usage_marker}{format_tokens(out_tok)}")
-        )
+        segments.append(("class:toolbar.token.value", f"{usage_marker}{format_tokens(out_tok)}"))
         if cache_tok:
             segments.append(("class:toolbar.gap", " "))
             segments.append(("class:toolbar.token.label", "cache "))

@@ -118,7 +118,11 @@ class Agent:
         return QueryResult(text=text, total_tokens=tokens, turns=turns)
 
     def clear_history(self) -> None:
-        self.history = []
+        self.replace_history([])
+
+    def replace_history(self, history: list[Message]) -> None:
+        """Replace durable model history and reset derived context state."""
+        self.history = list(history)
         self.context_manager.reset()
 
     def close(self) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,13 @@ RESERVED_PUBLIC_EVENT_TYPES = {
     "session.unarchived",
 }
 FORK_BOUNDARY_EVENT_TYPES = {"turn.completed", "turn.interrupted", "context.reset"}
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedMessage:
+    event_type: str
+    payload: dict[str, Any]
+    blob_refs: tuple[BlobReference, ...]
 
 
 class SessionRepository:
@@ -217,6 +225,144 @@ class SessionRepository:
         turn_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> SessionMessage:
+        prepared = self._prepare_message(
+            session_id,
+            role=role,
+            content=content,
+            partial=partial,
+            interruption_reason=interruption_reason,
+            idempotency_key=idempotency_key,
+        )
+        event = self.append_event(
+            session_id,
+            prepared.event_type,
+            prepared.payload,
+            turn_id=turn_id,
+            idempotency_key=idempotency_key,
+            blob_refs=prepared.blob_refs,
+        )
+        return message_from_event(event, blob_loader=self._load_blob_bytes)
+
+    def begin_turn(self, session_id: str, *, turn_id: str, user_content: str) -> SessionMessage:
+        prepared = self._prepare_message(
+            session_id,
+            role="user",
+            content=user_content,
+            idempotency_key=f"{turn_id}:user",
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_writable_session(connection, session_id)
+            self._append_event_in_transaction(
+                connection,
+                session_id=session_id,
+                event_type="turn.started",
+                payload={},
+                turn_id=turn_id,
+                idempotency_key=f"{turn_id}:started",
+            )
+            event = self._append_event_in_transaction(
+                connection,
+                session_id=session_id,
+                event_type=prepared.event_type,
+                payload=prepared.payload,
+                turn_id=turn_id,
+                idempotency_key=f"{turn_id}:user",
+                blob_refs=prepared.blob_refs,
+            )
+        return message_from_event(event, blob_loader=self._load_blob_bytes)
+
+    def complete_turn(
+        self,
+        session_id: str,
+        *,
+        turn_id: str,
+        assistant_content: str,
+    ) -> SessionMessage:
+        prepared = self._prepare_message(
+            session_id,
+            role="assistant",
+            content=assistant_content,
+            idempotency_key=f"{turn_id}:assistant",
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_writable_session(connection, session_id)
+            event = self._append_event_in_transaction(
+                connection,
+                session_id=session_id,
+                event_type=prepared.event_type,
+                payload=prepared.payload,
+                turn_id=turn_id,
+                idempotency_key=f"{turn_id}:assistant",
+                blob_refs=prepared.blob_refs,
+            )
+            self._append_event_in_transaction(
+                connection,
+                session_id=session_id,
+                event_type="turn.completed",
+                payload={},
+                turn_id=turn_id,
+                idempotency_key=f"{turn_id}:completed",
+            )
+        return message_from_event(event, blob_loader=self._load_blob_bytes)
+
+    def interrupt_turn(
+        self,
+        session_id: str,
+        *,
+        turn_id: str,
+        assistant_content: str,
+        reason: str,
+    ) -> SessionMessage | None:
+        prepared = (
+            self._prepare_message(
+                session_id,
+                role="assistant",
+                content=assistant_content,
+                partial=True,
+                interruption_reason=reason,
+                idempotency_key=f"{turn_id}:assistant-partial",
+            )
+            if assistant_content
+            else None
+        )
+        message_event: SessionEvent | None = None
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_writable_session(connection, session_id)
+            if prepared is not None:
+                message_event = self._append_event_in_transaction(
+                    connection,
+                    session_id=session_id,
+                    event_type=prepared.event_type,
+                    payload=prepared.payload,
+                    turn_id=turn_id,
+                    idempotency_key=f"{turn_id}:assistant-partial",
+                    blob_refs=prepared.blob_refs,
+                )
+            self._append_event_in_transaction(
+                connection,
+                session_id=session_id,
+                event_type="turn.interrupted",
+                payload={"reason": reason},
+                turn_id=turn_id,
+                idempotency_key=f"{turn_id}:interrupted",
+            )
+        if message_event is None:
+            return None
+        return message_from_event(message_event, blob_loader=self._load_blob_bytes)
+
+    def _prepare_message(
+        self,
+        session_id: str,
+        *,
+        role: str,
+        content: str,
+        partial: bool = False,
+        interruption_reason: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> _PreparedMessage:
         if role not in {"user", "assistant", "tool"}:
             raise ValueError(f"unsupported message role: {role}")
         if partial and role != "assistant":
@@ -253,15 +399,11 @@ class SessionRepository:
         }
         if interruption_reason is not None:
             payload["interruption_reason"] = interruption_reason
-        event = self.append_event(
-            session_id,
-            "message.assistant.partial" if partial else f"message.{role}",
-            payload,
-            turn_id=turn_id,
-            idempotency_key=idempotency_key,
+        return _PreparedMessage(
+            event_type="message.assistant.partial" if partial else f"message.{role}",
+            payload=payload,
             blob_refs=blob_refs,
         )
-        return message_from_event(event, blob_loader=self._load_blob_bytes)
 
     def reset_context(
         self,
