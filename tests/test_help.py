@@ -24,3 +24,20 @@ def test_help_lists_every_slash_command_in_repl_and_tui():
     for command in SLASH_COMMANDS:
         assert command in repl_help
         assert command in tui_help
+
+
+def test_help_explains_durable_sessions_and_background_tasks():
+    text = help_text()
+
+    assert "/session resume <session-id> - 恢复指定会话" in text
+    assert "/session restore <session-id> - 从回收站恢复会话" in text
+    assert (
+        "持久化：会话、Runtime thread 和后台任务统一保存在 "
+        "~/.paicli/sessions/sessions.db"
+    ) in text
+    assert "后台任务是提交会话的 child Session" in text
+    assert "后台任务的对话历史、工具调用状态和待审批状态会持久化" in text
+    assert "中断的运行中任务不会自动重试，可使用 /task retry" in text
+    assert (
+        "状态：queued | running | waiting_approval | completed | failed | canceled"
+    ) in text
