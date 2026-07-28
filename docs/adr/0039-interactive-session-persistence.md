@@ -12,8 +12,8 @@ the canonical workspace root. When none exists, PaiCLI creates one. The Session'
 projection becomes `Agent.history`, while the complete Session history, including partial
 Assistant messages, is rendered on the conversation canvas.
 
-Operational tool-call state is not reconstructed in this phase. Durable tool execution and
-recovery remain phase-three work.
+Operational tool-call state was not reconstructed in this phase. ADR 0040 adds durable tool
+execution and restart recovery without changing the Turn and Session lifecycle defined here.
 
 ## Turn persistence
 

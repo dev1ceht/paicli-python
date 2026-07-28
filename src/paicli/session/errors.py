@@ -12,3 +12,7 @@ class SessionCorruptError(SessionError):
 
 class SessionReadOnlyError(SessionError):
     """A session lifecycle state forbids new semantic events."""
+
+
+class SessionLeaseConflictError(SessionError):
+    """Another live owner currently holds the session write lease."""

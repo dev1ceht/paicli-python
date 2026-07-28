@@ -36,6 +36,44 @@ class SessionRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionLease:
+    session_id: str
+    owner_id: str
+    token: str
+    acquired_at: str
+    refreshed_at: str
+    expires_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class ToolActionSpec:
+    tool_call_id: str
+    tool_name: str
+    arguments: dict[str, Any]
+    raw_call: dict[str, Any]
+    is_read_only: bool
+    is_idempotent: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PendingAction:
+    session_id: str
+    turn_id: str
+    tool_call_id: str
+    tool_name: str
+    arguments: dict[str, Any]
+    raw_call: dict[str, Any]
+    status: str
+    is_read_only: bool
+    is_idempotent: bool
+    model_turn: int
+    batch_index: int
+    approval_status: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class SessionEvent:
     id: str
     session_id: str
@@ -74,7 +112,7 @@ class SessionMessage:
 
     @property
     def content(self) -> str:
-        return "".join(part.content for part in self.parts if part.kind == "text")
+        return "".join(part.content for part in self.parts if part.kind in {"text", "tool_result"})
 
 
 @dataclass(frozen=True, slots=True)

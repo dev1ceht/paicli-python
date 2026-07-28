@@ -11,8 +11,10 @@ from paicli.session import (
     BlobReference,
     SessionCorruptError,
     SessionIdempotencyConflictError,
+    SessionLeaseConflictError,
     SessionReadOnlyError,
     SessionRepository,
+    ToolActionSpec,
 )
 from paicli.session.schema import _migration_1, connect
 from paicli.session.versions import DATABASE_SCHEMA_VERSION
@@ -40,7 +42,7 @@ def test_create_session_is_immediately_available_for_replay_and_listing(tmp_path
     }
 
 
-def test_v1_database_is_backed_up_and_migrated_to_ordered_blob_refs(tmp_path: Path) -> None:
+def test_v1_database_is_backed_up_and_migrated_to_current_schema(tmp_path: Path) -> None:
     db_path = tmp_path / "sessions.db"
     with connect(db_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -62,9 +64,9 @@ def test_v1_database_is_backed_up_and_migrated_to_ordered_blob_refs(tmp_path: Pa
                 "select version from schema_migrations order by version"
             ).fetchall()
         ]
-    assert version == DATABASE_SCHEMA_VERSION == 2
+    assert version == DATABASE_SCHEMA_VERSION == 3
     assert "ordinal" in columns
-    assert migrations == [1, 2]
+    assert migrations == [1, 2, 3]
     assert len(list(tmp_path.glob("sessions.backup-v1-*.db"))) == 1
 
 
@@ -453,6 +455,336 @@ def test_competing_writers_receive_one_contiguous_session_sequence(tmp_path: Pat
     repository.verify_session(session.id)
 
 
+def test_session_lease_excludes_competing_owners_until_release(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(tmp_path)
+
+    lease = repository.acquire_session_lease(session.id, owner_id="first-owner")
+
+    with pytest.raises(SessionLeaseConflictError):
+        repository.acquire_session_lease(session.id, owner_id="second-owner")
+
+    repository.refresh_session_lease(session.id, lease.token)
+    assert repository.release_session_lease(session.id, lease.token)
+
+    replacement = repository.acquire_session_lease(session.id, owner_id="second-owner")
+    assert replacement.owner_id == "second-owner"
+
+
+def test_live_session_lease_rejects_writes_without_its_token(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(tmp_path)
+    lease = repository.acquire_session_lease(session.id, owner_id="owner")
+
+    with pytest.raises(SessionLeaseConflictError):
+        repository.append_message(session.id, role="user", content="unowned write")
+
+    written = repository.append_message(
+        session.id,
+        role="user",
+        content="owned write",
+        lease_token=lease.token,
+    )
+    assert written.content == "owned write"
+
+
+def test_expired_session_lease_fences_its_previous_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(tmp_path)
+    lease = repository.acquire_session_lease(session.id, owner_id="owner")
+    monkeypatch.setattr(
+        "paicli.session.repository._now",
+        lambda: "9999-12-31T23:59:59.999999+00:00",
+    )
+
+    with pytest.raises(SessionLeaseConflictError):
+        repository.append_message(
+            session.id,
+            role="user",
+            content="stale owner write",
+            lease_token=lease.token,
+        )
+
+
+def test_prepared_tool_action_is_durable_before_execution(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(tmp_path)
+    repository.begin_turn(session.id, turn_id="turn_1", user_content="inspect it")
+    call = {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "read_file", "arguments": '{"path":"note.txt"}'},
+    }
+
+    prepared = repository.prepare_tool_actions(
+        session.id,
+        turn_id="turn_1",
+        model_turn=1,
+        assistant_content="I will inspect it.",
+        actions=(
+            ToolActionSpec(
+                tool_call_id="call_1",
+                tool_name="read_file",
+                arguments={"path": "note.txt"},
+                raw_call=call,
+                is_read_only=True,
+                is_idempotent=True,
+            ),
+        ),
+    )
+
+    assert prepared[0].status == "prepared"
+    assert prepared[0].raw_call == call
+    assert repository.list_pending_actions(session.id) == list(prepared)
+    assistant = repository.rebuild_session_view(session.id).model_messages[-1]
+    assert assistant.role == "assistant"
+    assert assistant.content == "I will inspect it."
+    assert assistant.parts[-1].kind == "tool_call"
+    assert assistant.parts[-1].metadata["tool_call_id"] == "call_1"
+
+
+def test_pending_tool_actions_preserve_the_model_batch_order(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(tmp_path)
+    repository.begin_turn(session.id, turn_id="turn_1", user_content="do both")
+
+    repository.prepare_tool_actions(
+        session.id,
+        turn_id="turn_1",
+        model_turn=1,
+        assistant_content="",
+        actions=tuple(
+            ToolActionSpec(
+                tool_call_id=call_id,
+                tool_name=f"tool_{call_id}",
+                arguments={},
+                raw_call={"id": call_id},
+                is_read_only=False,
+                is_idempotent=False,
+            )
+            for call_id in ("call_z", "call_a")
+        ),
+    )
+
+    pending = repository.list_pending_actions(session.id)
+    assert [action.tool_call_id for action in pending] == ["call_z", "call_a"]
+    assert [action.batch_index for action in pending] == [0, 1]
+
+
+def test_tool_result_atomically_settles_its_pending_action(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(tmp_path)
+    repository.begin_turn(session.id, turn_id="turn_1", user_content="inspect it")
+    repository.prepare_tool_actions(
+        session.id,
+        turn_id="turn_1",
+        model_turn=1,
+        assistant_content="",
+        actions=(
+            ToolActionSpec(
+                tool_call_id="call_1",
+                tool_name="read_file",
+                arguments={"path": "note.txt"},
+                raw_call={
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path":"note.txt"}',
+                    },
+                },
+                is_read_only=True,
+                is_idempotent=True,
+            ),
+        ),
+    )
+
+    executing = repository.start_tool_action(session.id, "call_1")
+    result = repository.complete_tool_action(
+        session.id,
+        "call_1",
+        content="1: hello",
+        is_error=False,
+    )
+
+    assert executing.status == "executing"
+    assert result.role == "tool"
+    assert result.content == "1: hello"
+    assert result.parts[0].metadata["tool_call_id"] == "call_1"
+    assert repository.list_pending_actions(session.id) == []
+    settled = repository.list_pending_actions(session.id, include_settled=True)
+    assert settled[0].status == "completed"
+    assert repository.rebuild_session_view(session.id).model_messages[-1] == result
+
+
+def test_uncertain_tool_action_is_closed_with_a_paired_unknown_result(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(tmp_path)
+    repository.begin_turn(session.id, turn_id="turn_1", user_content="change it")
+    repository.prepare_tool_actions(
+        session.id,
+        turn_id="turn_1",
+        model_turn=1,
+        assistant_content="",
+        actions=(
+            ToolActionSpec(
+                tool_call_id="call_write",
+                tool_name="write_file",
+                arguments={"path": "note.txt"},
+                raw_call={
+                    "id": "call_write",
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": '{"path":"note.txt"}',
+                    },
+                },
+                is_read_only=False,
+                is_idempotent=False,
+            ),
+        ),
+    )
+    repository.start_tool_action(session.id, "call_write")
+
+    result = repository.abandon_tool_action(
+        session.id,
+        "call_write",
+        reason="process_restarted",
+    )
+
+    assert result.role == "tool"
+    assert result.parts[0].metadata["execution_outcome"] == "unknown"
+    assert "must not be automatically repeated" in result.content
+    settled = repository.list_pending_actions(session.id, include_settled=True)
+    assert settled[0].status == "abandoned"
+
+
+def test_pending_tool_approval_is_durable_and_resolvable(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(tmp_path)
+    repository.begin_turn(session.id, turn_id="turn_1", user_content="write it")
+    repository.prepare_tool_actions(
+        session.id,
+        turn_id="turn_1",
+        model_turn=1,
+        assistant_content="",
+        actions=(
+            ToolActionSpec(
+                tool_call_id="call_write",
+                tool_name="write_file",
+                arguments={"path": "note.txt"},
+                raw_call={
+                    "id": "call_write",
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": '{"path":"note.txt"}',
+                    },
+                },
+                is_read_only=False,
+                is_idempotent=False,
+            ),
+        ),
+    )
+    repository.start_tool_action(session.id, "call_write")
+
+    waiting = repository.request_tool_approval(session.id, "call_write")
+    approved = repository.resolve_tool_approval(
+        session.id,
+        "call_write",
+        decision="approve",
+    )
+
+    assert waiting.status == "waiting_approval"
+    assert waiting.approval_status == "requested"
+    assert approved.status == "executing"
+    assert approved.approval_status == "approve"
+    assert [event.type for event in repository.list_events(session.id)][-2:] == [
+        "approval.requested",
+        "approval.resolved",
+    ]
+
+
+def test_settled_tool_action_cannot_be_resurrected_by_approval(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(tmp_path)
+    repository.begin_turn(session.id, turn_id="turn_1", user_content="inspect it")
+    repository.prepare_tool_actions(
+        session.id,
+        turn_id="turn_1",
+        model_turn=1,
+        assistant_content="",
+        actions=(
+            ToolActionSpec(
+                tool_call_id="call_1",
+                tool_name="read_file",
+                arguments={},
+                raw_call={"id": "call_1"},
+                is_read_only=True,
+                is_idempotent=True,
+            ),
+        ),
+    )
+    repository.complete_tool_action(
+        session.id,
+        "call_1",
+        content="done",
+        is_error=False,
+    )
+
+    with pytest.raises(ValueError, match="already settled"):
+        repository.request_tool_approval(session.id, "call_1")
+
+    action = repository.list_pending_actions(session.id, include_settled=True)[0]
+    assert action.status == "completed"
+    assert action.approval_status is None
+
+
+def test_interrupting_turn_closes_all_unsettled_tool_actions(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(tmp_path)
+    repository.begin_turn(session.id, turn_id="turn_1", user_content="change it")
+    repository.prepare_tool_actions(
+        session.id,
+        turn_id="turn_1",
+        model_turn=1,
+        assistant_content="",
+        actions=(
+            ToolActionSpec(
+                tool_call_id="call_write",
+                tool_name="write_file",
+                arguments={"path": "note.txt"},
+                raw_call={
+                    "id": "call_write",
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": '{"path":"note.txt"}',
+                    },
+                },
+                is_read_only=False,
+                is_idempotent=False,
+            ),
+        ),
+    )
+    repository.start_tool_action(session.id, "call_write")
+
+    repository.interrupt_turn(
+        session.id,
+        turn_id="turn_1",
+        assistant_content="",
+        reason="user_interrupt",
+    )
+
+    assert repository.list_pending_actions(session.id) == []
+    roles = [message.role for message in repository.rebuild_session_view(session.id).model_messages]
+    assert roles == ["user", "assistant", "tool"]
+    assert repository.list_events(session.id)[-1].type == "turn.interrupted"
+
+
 def test_blob_reference_tampering_marks_session_corrupt(tmp_path: Path) -> None:
     db_path = tmp_path / "sessions.db"
     repository = SessionRepository(db_path)
@@ -525,6 +857,24 @@ def test_public_append_enforces_partial_and_hidden_message_invariants(tmp_path: 
                 "message_id": "msg_invalid_partial",
                 "role": "assistant",
                 "parts": [{"kind": "text", "content": "half", "metadata": {}}],
+                "status": "complete",
+                "replayable": True,
+            },
+        )
+    with pytest.raises(TypeError, match="tool_call_id"):
+        repository.append_event(
+            session.id,
+            "message.assistant",
+            {
+                "message_id": "msg_invalid_tool_call",
+                "role": "assistant",
+                "parts": [
+                    {
+                        "kind": "tool_call",
+                        "content": "",
+                        "metadata": {"tool_name": "read_file", "raw_call": {}},
+                    }
+                ],
                 "status": "complete",
                 "replayable": True,
             },

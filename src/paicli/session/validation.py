@@ -34,8 +34,22 @@ def validate_event_payload(event_type: str, payload: dict[str, Any]) -> None:
             raise TypeError("message part must be a JSON object")
         if not isinstance(part.get("content", ""), str):
             raise TypeError("message part content must be a string")
-        if not isinstance(part.get("metadata", {}), dict):
+        metadata = part.get("metadata", {})
+        if not isinstance(metadata, dict):
             raise TypeError("message part metadata must be a JSON object")
+        kind = str(part.get("kind") or "text")
+        if kind == "tool_call":
+            _require_non_empty_string(metadata, "tool_call_id")
+            _require_non_empty_string(metadata, "tool_name")
+            if not isinstance(metadata.get("arguments"), dict):
+                raise TypeError("tool call arguments must be a JSON object")
+            if not isinstance(metadata.get("raw_call"), dict):
+                raise TypeError("raw tool call must be a JSON object")
+        elif kind == "tool_result":
+            _require_non_empty_string(metadata, "tool_call_id")
+            _require_non_empty_string(metadata, "tool_name")
+            if not isinstance(metadata.get("is_error"), bool):
+                raise TypeError("tool result is_error must be a boolean")
 
     status = payload.get("status", "complete")
     replayable = payload.get("replayable", True)

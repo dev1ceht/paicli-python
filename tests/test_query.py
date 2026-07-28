@@ -392,8 +392,7 @@ def test_agent_run_finishes_active_request_and_emits_retained_baseline(tmp_path)
     assert events[retained_index]["estimated"] is True
     assert events[retained_index]["used_tokens"] > 0
     assert events[retained_index]["pressure_ratio"] == pytest.approx(
-        events[retained_index]["used_tokens"]
-        / events[retained_index]["quality_budget_tokens"]
+        events[retained_index]["used_tokens"] / events[retained_index]["quality_budget_tokens"]
     )
 
 
@@ -720,9 +719,73 @@ def test_agent_run_does_not_emit_an_uncanonical_pending_estimate(tmp_path, monke
 
     assert any(event.get("type") == "tool_result" for event in events)
     assert not any(
-        event.get("type") == "context_usage" and event.get("state") == "pending"
-        for event in events
+        event.get("type") == "context_usage" and event.get("state") == "pending" for event in events
     )
+
+
+def test_agent_tool_events_expose_durable_call_identity_and_classification(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PAICLI_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    (tmp_path / "note.txt").write_text("hello\n", encoding="utf-8")
+    config = load_config(project_root=tmp_path)
+    registry = ToolRegistry()
+    registry.register_all(get_builtin_tools())
+    agent = Agent(
+        llm_client=FakeClient(),
+        tool_registry=registry,
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+    )
+
+    async def run() -> list[dict[str, Any]]:
+        return [event async for event in agent.run("read note")]
+
+    events = asyncio.run(run())
+    tool_turn = next(
+        event
+        for event in events
+        if event["type"] == "turn_complete" and event["stop_reason"] == "tool_use"
+    )
+    call = next(event for event in events if event["type"] == "tool_call")
+    result = next(event for event in events if event["type"] == "tool_result")
+
+    assert tool_turn["message"]["tool_calls"][0]["id"] == "call_1"
+    assert call["tool_call_id"] == "call_1"
+    assert call["raw_call"]["id"] == "call_1"
+    assert call["is_read_only"] is True
+    assert call["is_idempotent"] is True
+    assert result["tool_call_id"] == "call_1"
+
+
+def test_guarded_tool_batch_is_not_exposed_as_durable_work(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PAICLI_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    config = load_config(project_root=tmp_path)
+    config.features.memory = False
+    config.agent.max_tool_calls = 0
+    registry = ToolRegistry()
+    registry.register_all(get_builtin_tools())
+    agent = Agent(
+        llm_client=FakeClient(),
+        tool_registry=registry,
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+    )
+
+    async def run() -> list[dict[str, Any]]:
+        return [event async for event in agent.run("read note")]
+
+    events = asyncio.run(run())
+    guarded_turn = next(
+        event
+        for event in events
+        if event["type"] == "turn_complete" and event["stop_reason"] == "tool_use"
+    )
+
+    assert guarded_turn.get("tool_actions") == []
+    assert not any(event["type"] == "tool_call" for event in events)
 
 
 def test_failed_follow_up_request_clears_context_without_committing_history(tmp_path, monkeypatch):
@@ -951,9 +1014,7 @@ def test_agent_run_can_skip_history_commit(tmp_path, monkeypatch):
     assert agent.context_manager._current_summary == "retained summary"
 
 
-def test_agent_reconfigure_llm_preserves_context_manager_session_and_history(
-    tmp_path, monkeypatch
-):
+def test_agent_reconfigure_llm_preserves_context_manager_session_and_history(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     config = load_config(project_root=tmp_path)
     config.features.skill = False

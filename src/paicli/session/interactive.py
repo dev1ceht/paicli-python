@@ -4,7 +4,8 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
-from paicli.session.models import SessionMessage, SessionRecord
+from paicli.session.errors import SessionLeaseConflictError
+from paicli.session.models import SessionLease, SessionMessage, SessionRecord, ToolActionSpec
 from paicli.session.repository import SessionRepository
 from paicli.types import Message, Role
 
@@ -25,8 +26,9 @@ class InteractiveSession:
     ) -> None:
         self.repository = repository
         self.workspace_root = str(Path(workspace_root).expanduser().resolve())
-        self.record = self._open_session(session_id)
-        self._active_turn_id: str | None = None
+        self._owner_id = f"interactive_{uuid4().hex}"
+        self.record, self._lease = self._open_session(session_id)
+        self._active_turn_id = self._find_active_turn_id()
 
     @property
     def id(self) -> str:
@@ -38,11 +40,147 @@ class InteractiveSession:
 
     def restore_agent_history(self, agent: Any) -> None:
         view = self.repository.rebuild_session_view(self.id)
-        agent.replace_history(
-            [
-                Message(role=cast(Role, message.role), content=message.content)
-                for message in view.model_messages
-            ]
+        agent.replace_history([_agent_message(message) for message in view.model_messages])
+
+    def prepare_recovery_state(self) -> dict[str, Any] | None:
+        if self._active_turn_id is None:
+            return None
+        all_actions = [
+            action
+            for action in self.repository.list_pending_actions(
+                self.id,
+                include_settled=True,
+            )
+            if action.turn_id == self._active_turn_id
+        ]
+        if not all_actions:
+            return None
+        pending = [
+            action for action in all_actions if action.status not in {"completed", "abandoned"}
+        ]
+        retryable = []
+        for action in pending:
+            if action.approval_status in {"deny", "skip"}:
+                self.repository.complete_tool_action(
+                    self.id,
+                    action.tool_call_id,
+                    content=(
+                        f'Tool "{action.tool_name}" was '
+                        f"{'denied' if action.approval_status == 'deny' else 'skipped'} "
+                        "by approval policy."
+                    ),
+                    is_error=True,
+                    lease_token=self._lease.token,
+                )
+            elif action.status in {"prepared", "waiting_approval"} or (
+                action.status == "executing" and action.is_read_only and action.is_idempotent
+            ):
+                retryable.append(action)
+            else:
+                self.repository.abandon_tool_action(
+                    self.id,
+                    action.tool_call_id,
+                    reason="process_restarted",
+                    lease_token=self._lease.token,
+                )
+        view = self.repository.rebuild_session_view(self.id)
+        return {
+            "messages": [_agent_message_dict(message) for message in view.model_messages],
+            "pending_tool_calls": [action.raw_call for action in retryable],
+            "approval_decisions": {
+                action.tool_call_id: action.approval_status
+                for action in retryable
+                if action.approval_status in {"approve", "allow_session"}
+            },
+            "next_tool_index": 0,
+            "total_tokens": 0,
+            "turn": max((action.model_turn for action in all_actions), default=0),
+            "tool_call_count": len(all_actions),
+            "finalizing": False,
+            "limit_reason": "",
+            "last_signature": "",
+            "repeated_batches": 0,
+            "last_actual_usage": None,
+        }
+
+    def record_tool_batch(
+        self,
+        *,
+        model_turn: int,
+        assistant_content: str,
+        reasoning_content: str | None,
+        actions: list[dict[str, Any]],
+    ) -> None:
+        turn_id = self._require_active_turn()
+        self.repository.prepare_tool_actions(
+            self.id,
+            turn_id=turn_id,
+            model_turn=model_turn,
+            assistant_content=assistant_content,
+            reasoning_content=reasoning_content,
+            actions=tuple(
+                ToolActionSpec(
+                    tool_call_id=str(action["tool_call_id"]),
+                    tool_name=str(action["tool_name"]),
+                    arguments=dict(action.get("arguments") or {}),
+                    raw_call=dict(action.get("raw_call") or {}),
+                    is_read_only=bool(action.get("is_read_only")),
+                    is_idempotent=bool(action.get("is_idempotent")),
+                )
+                for action in actions
+            ),
+            lease_token=self._lease.token,
+        )
+
+    def start_tool_action(self, tool_call_id: str) -> None:
+        self.repository.start_tool_action(
+            self.id,
+            tool_call_id,
+            lease_token=self._lease.token,
+        )
+
+    def complete_tool_action(
+        self,
+        tool_call_id: str,
+        *,
+        content: str,
+        is_error: bool,
+    ) -> None:
+        self.repository.complete_tool_action(
+            self.id,
+            tool_call_id,
+            content=content,
+            is_error=is_error,
+            lease_token=self._lease.token,
+        )
+
+    def request_tool_approval(self, request: dict[str, Any]) -> str:
+        requested_call_id = str(request.get("tool_call_id") or "")
+        tool_name = str(request.get("tool_name") or "")
+        arguments = request.get("input")
+        candidates = [
+            action
+            for action in self.repository.list_pending_actions(self.id)
+            if (not requested_call_id or action.tool_call_id == requested_call_id)
+            and action.tool_name == tool_name
+            and action.arguments == (arguments if isinstance(arguments, dict) else {})
+        ]
+        if len(candidates) != 1:
+            raise RuntimeError("approval request does not match one pending tool action")
+        tool_call_id = candidates[0].tool_call_id
+        self.repository.request_tool_approval(
+            self.id,
+            tool_call_id,
+            lease_token=self._lease.token,
+        )
+        return tool_call_id
+
+    def resolve_tool_approval(self, tool_call_id: str, decision: str) -> None:
+        self.repository.resolve_tool_approval(
+            self.id,
+            tool_call_id,
+            decision=decision,
+            lease_token=self._lease.token,
         )
 
     def begin_turn(self, message: str) -> str:
@@ -53,6 +191,7 @@ class InteractiveSession:
             self.id,
             turn_id=turn_id,
             user_content=message,
+            lease_token=self._lease.token,
         )
         self._active_turn_id = turn_id
         return turn_id
@@ -63,6 +202,7 @@ class InteractiveSession:
             self.id,
             turn_id=turn_id,
             assistant_content=assistant_text,
+            lease_token=self._lease.token,
         )
         self._active_turn_id = None
 
@@ -75,13 +215,14 @@ class InteractiveSession:
             turn_id=turn_id,
             assistant_content=assistant_text,
             reason=reason,
+            lease_token=self._lease.token,
         )
         self._active_turn_id = None
 
     def reset_context(self) -> None:
         if self._active_turn_id is not None:
             raise RuntimeError("cannot reset context during an active turn")
-        self.repository.reset_context(self.id)
+        self.repository.reset_context(self.id, lease_token=self._lease.token)
 
     def list_sessions(self) -> tuple[SessionRecord, ...]:
         return tuple(
@@ -95,41 +236,63 @@ class InteractiveSession:
 
     def new_session(self, *, title: str | None = None) -> SessionRecord:
         self._require_idle()
-        self.record = self.repository.create_session(
+        record = self.repository.create_session(
             self.workspace_root,
             title=title,
         )
+        self._switch_to(record)
         return self.record
 
     def resume_session(self, session_id: str) -> SessionRecord:
         self._require_idle()
         record = self._resolve_workspace_session(session_id, allow_archived=True)
         if record.archived_at is not None:
-            record = self.repository.unarchive_session(session_id)
-        self.record = record
+            next_lease = self.repository.acquire_session_lease(
+                record.id,
+                owner_id=self._owner_id,
+            )
+            try:
+                record = self.repository.unarchive_session(
+                    session_id,
+                    lease_token=next_lease.token,
+                )
+            except Exception:
+                self.repository.release_session_lease(record.id, next_lease.token)
+                raise
+            self._switch_to(record, next_lease=next_lease)
+        else:
+            self._switch_to(record)
         return self.record
 
     def fork_session(self, *, title: str | None = None) -> SessionRecord:
         self._require_idle()
-        self.record = self.repository.fork_session(
+        record = self.repository.fork_session(
             self.id,
             workspace_root=self.workspace_root,
             title=title,
+            lease_token=self._lease.token,
         )
+        self._switch_to(record)
         return self.record
 
     def archive_session(self) -> tuple[SessionRecord, SessionRecord]:
         self._require_idle()
-        archived = self.repository.archive_session(self.id)
+        archived = self.repository.archive_session(
+            self.id,
+            lease_token=self._lease.token,
+        )
         replacement = self.repository.create_session(self.workspace_root)
-        self.record = replacement
+        self._switch_to(replacement)
         return archived, replacement
 
     def delete_session(self) -> tuple[SessionRecord, SessionRecord]:
         self._require_idle()
-        deleted = self.repository.delete_session(self.id)
+        deleted = self.repository.delete_session(
+            self.id,
+            lease_token=self._lease.token,
+        )
         replacement = self.repository.create_session(self.workspace_root)
-        self.record = replacement
+        self._switch_to(replacement)
         return deleted, replacement
 
     def restore_session(self, session_id: str) -> SessionRecord:
@@ -141,8 +304,29 @@ class InteractiveSession:
         )
         if record.deleted_at is None:
             raise ValueError(f"session is not deleted: {session_id}")
-        self.record = self.repository.restore_session(session_id)
+        next_lease = self.repository.acquire_session_lease(
+            record.id,
+            owner_id=self._owner_id,
+        )
+        try:
+            restored = self.repository.restore_session(
+                session_id,
+                lease_token=next_lease.token,
+            )
+        except Exception:
+            self.repository.release_session_lease(record.id, next_lease.token)
+            raise
+        self._switch_to(restored, next_lease=next_lease)
         return self.record
+
+    def refresh_lease(self) -> None:
+        self._lease = self.repository.refresh_session_lease(
+            self.id,
+            self._lease.token,
+        )
+
+    def close(self) -> None:
+        self.repository.release_session_lease(self.id, self._lease.token)
 
     def _require_active_turn(self) -> str:
         if self._active_turn_id is None:
@@ -153,18 +337,61 @@ class InteractiveSession:
         if self._active_turn_id is not None:
             raise RuntimeError("cannot switch sessions during an active turn")
 
-    def _open_session(self, session_id: str | None) -> SessionRecord:
+    def _open_session(
+        self,
+        session_id: str | None,
+    ) -> tuple[SessionRecord, SessionLease]:
         if session_id is not None:
-            return self._resolve_workspace_session(session_id)
-        existing = next(
-            (
-                record
-                for record in self.repository.list_sessions()
-                if record.workspace_root == self.workspace_root and record.status != "corrupt"
-            ),
-            None,
+            record = self._resolve_workspace_session(session_id)
+            return record, self.repository.acquire_session_lease(
+                record.id,
+                owner_id=self._owner_id,
+            )
+        for record in self.repository.list_sessions():
+            if record.workspace_root != self.workspace_root or record.status == "corrupt":
+                continue
+            try:
+                lease = self.repository.acquire_session_lease(
+                    record.id,
+                    owner_id=self._owner_id,
+                )
+            except SessionLeaseConflictError:
+                continue
+            return record, lease
+        record = self.repository.create_session(self.workspace_root)
+        return record, self.repository.acquire_session_lease(
+            record.id,
+            owner_id=self._owner_id,
         )
-        return existing or self.repository.create_session(self.workspace_root)
+
+    def _switch_to(
+        self,
+        record: SessionRecord,
+        *,
+        next_lease: SessionLease | None = None,
+    ) -> None:
+        if record.id == self.id:
+            if next_lease is not None and next_lease.token != self._lease.token:
+                self.repository.release_session_lease(record.id, next_lease.token)
+            return
+        acquired_lease = next_lease or self.repository.acquire_session_lease(
+            record.id, owner_id=self._owner_id
+        )
+        previous_id = self.id
+        previous_token = self._lease.token
+        self.record = record
+        self._lease = acquired_lease
+        self._active_turn_id = self._find_active_turn_id()
+        self.repository.release_session_lease(previous_id, previous_token)
+
+    def _find_active_turn_id(self) -> str | None:
+        active: str | None = None
+        for event in self.repository.list_events(self.id):
+            if event.type == "turn.started":
+                active = event.turn_id
+            elif event.type in {"turn.completed", "turn.interrupted"} and event.turn_id == active:
+                active = None
+        return active
 
     def _resolve_workspace_session(
         self,
@@ -185,3 +412,43 @@ class InteractiveSession:
         if record.deleted_at is not None and not allow_deleted:
             raise ValueError(f"session is deleted: {session_id}")
         return record
+
+
+def _agent_message(message: SessionMessage) -> Message:
+    tool_calls = [
+        dict(part.metadata.get("raw_call") or {})
+        for part in message.parts
+        if part.kind == "tool_call"
+    ]
+    tool_result = next(
+        (part for part in message.parts if part.kind == "tool_result"),
+        None,
+    )
+    text_part = next((part for part in message.parts if part.kind == "text"), None)
+    return Message(
+        role=cast(Role, message.role),
+        content=message.content,
+        tool_call_id=(
+            str(tool_result.metadata["tool_call_id"])
+            if tool_result is not None and tool_result.metadata.get("tool_call_id")
+            else None
+        ),
+        tool_calls=tool_calls,
+        reasoning_content=(
+            str(text_part.metadata["reasoning_content"])
+            if text_part is not None and text_part.metadata.get("reasoning_content")
+            else None
+        ),
+    )
+
+
+def _agent_message_dict(message: SessionMessage) -> dict[str, Any]:
+    converted = _agent_message(message)
+    return {
+        "role": converted.role,
+        "content": converted.content,
+        "name": converted.name,
+        "tool_call_id": converted.tool_call_id,
+        "tool_calls": converted.tool_calls,
+        "reasoning_content": converted.reasoning_content,
+    }

@@ -322,7 +322,9 @@ def test_background_task_resumes_the_approved_tool_from_its_checkpoint(tmp_path,
 
     assert calls == []
     assert server.task_manager.get(task_id).status == "waiting_approval"  # type: ignore[union-attr]
-    assert server.task_manager.get_checkpoint(task_id)["next_tool_index"] == 0  # type: ignore[index]
+    checkpoint = server.task_manager.get_checkpoint(task_id)
+    assert checkpoint["next_tool_index"] == 0  # type: ignore[index]
+    assert "tool_call_id" not in checkpoint["approval_request"]  # type: ignore[index]
     assert server.task_manager.approve(task_id)
     assert server.task_manager.claim_next() is not None
 
