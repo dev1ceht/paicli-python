@@ -27,6 +27,7 @@ from paicli.session.models import (
     SessionLease,
     SessionMessage,
     SessionRecord,
+    SessionRelationship,
     SessionView,
     StoredBlob,
     ToolActionSpec,
@@ -75,46 +76,565 @@ class SessionRepository:
         title: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> SessionRecord:
-        session_id = f"sess_{uuid4().hex}"
         canonical_workspace = str(Path(workspace_root).expanduser().resolve())
-        resolved_title = title or session_id
-        now = _now()
-        session_metadata = dict(metadata or {})
-        payload = {
-            "session_id": session_id,
-            "title": resolved_title,
-            "workspace_root": canonical_workspace,
-        }
-        payload.update(_event_metadata(session_metadata))
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                """
-                insert into sessions(
-                    id, workspace_root, title, status, created_at, updated_at,
-                    next_sequence, version, metadata_json
-                ) values (?, ?, ?, 'idle', ?, ?, 1, 1, ?)
-                """,
-                (
-                    session_id,
-                    canonical_workspace,
-                    resolved_title,
-                    now,
-                    now,
-                    _json_dumps(session_metadata),
-                ),
-            )
-            self._append_event_in_transaction(
+            session_id = self._create_session_in_transaction(
                 connection,
-                session_id=session_id,
-                event_type="session.created",
-                payload=payload,
-                created_at=now,
+                workspace_root=canonical_workspace,
+                title=title,
+                metadata=metadata,
             )
         record = self.get_session(session_id)
         if record is None:  # pragma: no cover - the transaction above guarantees the row
             raise RuntimeError(f"created session disappeared: {session_id}")
         return record
+
+    def get_or_create_root_session(
+        self,
+        workspace_root: str | Path,
+        *,
+        root_kind: str,
+        title: str,
+    ) -> SessionRecord:
+        """Resolve one normalized root per workspace and kind without a startup race."""
+        canonical_workspace = str(Path(workspace_root).expanduser().resolve())
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                select session_id
+                from session_roots
+                where workspace_root = ? and root_kind = ?
+                """,
+                (canonical_workspace, root_kind),
+            ).fetchone()
+            if row is None:
+                session_id = self._create_session_in_transaction(
+                    connection,
+                    workspace_root=canonical_workspace,
+                    title=title,
+                    metadata={"session_kind": root_kind},
+                )
+                connection.execute(
+                    """
+                    insert into session_roots(workspace_root, root_kind, session_id)
+                    values (?, ?, ?)
+                    """,
+                    (canonical_workspace, root_kind, session_id),
+                )
+            else:
+                session_id = str(row["session_id"])
+        record = self.get_session(session_id)
+        if record is None:  # pragma: no cover
+            raise RuntimeError(f"root session disappeared: {session_id}")
+        return record
+
+    def create_child_session(
+        self,
+        parent_session_id: str,
+        *,
+        relation_type: str,
+        title: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        lease_token: str | None = None,
+    ) -> SessionRecord:
+        if not relation_type:
+            raise ValueError("child session relation_type must be non-empty")
+        now = _now()
+        relationship_metadata = dict(metadata or {})
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            child_session_id = self._create_child_session_in_transaction(
+                connection,
+                parent_session_id=parent_session_id,
+                relation_type=relation_type,
+                title=title,
+                metadata=metadata,
+                created_at=now,
+                relationship_metadata=relationship_metadata,
+                lease_token=lease_token,
+            )
+        child = self.get_session(child_session_id)
+        if child is None:  # pragma: no cover
+            raise RuntimeError(f"created child session disappeared: {child_session_id}")
+        return child
+
+    def create_background_task(
+        self,
+        parent_session_id: str,
+        *,
+        queue_session_id: str,
+        task_id: str,
+        prompt: str,
+        retry_of: str | None,
+        relation_type: str,
+        lease_token: str | None = None,
+    ) -> SessionRecord:
+        """Create the task child, queue projection, and lifecycle fact atomically."""
+        now = _now()
+        metadata = {"session_kind": "background_task", "task_id": task_id}
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            child_session_id = self._create_child_session_in_transaction(
+                connection,
+                parent_session_id=parent_session_id,
+                relation_type=relation_type,
+                title=prompt[:80] or task_id,
+                metadata=metadata,
+                relationship_metadata=metadata,
+                created_at=now,
+                lease_token=lease_token,
+            )
+            connection.execute(
+                """
+                insert into background_tasks(
+                    id, session_id, parent_session_id, queue_session_id, prompt, status,
+                    created_at, updated_at, retry_of
+                )
+                values (?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    child_session_id,
+                    parent_session_id,
+                    queue_session_id,
+                    prompt,
+                    now,
+                    now,
+                    retry_of,
+                ),
+            )
+            self._append_event_in_transaction(
+                connection,
+                session_id=child_session_id,
+                event_type="background_task.queued",
+                payload={"task_id": task_id, "prompt": prompt, "retry_of": retry_of},
+                created_at=now,
+            )
+        child = self.get_session(child_session_id)
+        if child is None:  # pragma: no cover
+            raise RuntimeError(f"created task session disappeared: {child_session_id}")
+        return child
+
+    def claim_next_background_task(
+        self,
+        queue_session_id: str,
+        *,
+        owner_id: str,
+        ttl_seconds: int = 60,
+    ) -> dict[str, Any] | None:
+        """Claim one queued task and append its running fact in the same transaction."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                select id, prompt, status, created_at, updated_at, started_at, finished_at,
+                       result, error, retry_of, session_id, parent_session_id
+                from background_tasks
+                where queue_session_id = ? and status = 'queued'
+                order by created_at
+                limit 1
+                """,
+                (queue_session_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            updated_at = _now()
+            claim_token = f"task_claim_{uuid4().hex}"
+            claim_expires_at = (
+                datetime.now(UTC) + timedelta(seconds=ttl_seconds)
+            ).isoformat()
+            updated = connection.execute(
+                """
+                update background_tasks
+                set status = 'running', updated_at = ?, started_at = coalesce(started_at, ?),
+                    claim_owner = ?, claim_token = ?, claim_expires_at = ?
+                where id = ? and status = 'queued'
+                """,
+                (
+                    updated_at,
+                    updated_at,
+                    owner_id,
+                    claim_token,
+                    claim_expires_at,
+                    row["id"],
+                ),
+            )
+            if updated.rowcount != 1:
+                return None
+            self._append_event_in_transaction(
+                connection,
+                session_id=str(row["session_id"]),
+                event_type="background_task.running",
+                payload={"task_id": str(row["id"])},
+                created_at=updated_at,
+            )
+            claimed = dict(row)
+            claimed["status"] = "running"
+            claimed["updated_at"] = updated_at
+            claimed["started_at"] = row["started_at"] or updated_at
+            claimed["claim_token"] = claim_token
+            return claimed
+
+    def refresh_background_task_claim(
+        self,
+        task_id: str,
+        *,
+        owner_id: str,
+        claim_token: str,
+        ttl_seconds: int = 60,
+    ) -> bool:
+        now = _now()
+        expires_at = (datetime.now(UTC) + timedelta(seconds=ttl_seconds)).isoformat()
+        with self._connect() as connection:
+            updated = connection.execute(
+                """
+                update background_tasks
+                set claim_expires_at = ?, updated_at = ?
+                where id = ? and status = 'running'
+                  and claim_owner = ? and claim_token = ?
+                  and claim_expires_at > ?
+                """,
+                (expires_at, now, task_id, owner_id, claim_token, now),
+            )
+        return updated.rowcount == 1
+
+    def pause_background_task_for_approval(
+        self,
+        task_id: str,
+        *,
+        session_id: str,
+        tool_call_id: str,
+        checkpoint: dict[str, Any],
+        approval_id: str,
+        request: dict[str, Any],
+        claim_owner: str,
+        claim_token: str,
+        invalidation_reason: str | None = None,
+        lease_token: str | None = None,
+    ) -> bool:
+        """Atomically pause both the Agent action and its background task."""
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_writable_session(
+                connection,
+                session_id,
+                lease_token=lease_token,
+            )
+            action = PendingActionStore.get(connection, session_id, tool_call_id)
+            if action is None:
+                raise KeyError(f"pending tool action not found: {tool_call_id}")
+            if action.status in {"completed", "abandoned"}:
+                raise ValueError(f"tool action is already settled: {tool_call_id}")
+            task_update = connection.execute(
+                """
+                update background_tasks
+                set status = 'waiting_approval', updated_at = ?
+                where id = ? and session_id = ? and status = 'running'
+                  and claim_owner = ? and claim_token = ? and claim_expires_at > ?
+                """,
+                (now, task_id, session_id, claim_owner, claim_token, now),
+            )
+            if task_update.rowcount != 1:
+                return False
+            requested_key = f"{action.turn_id}:approval:{tool_call_id}:requested"
+            if not self._event_idempotency_key_exists(
+                connection,
+                session_id,
+                requested_key,
+            ):
+                self._append_event_in_transaction(
+                    connection,
+                    session_id=session_id,
+                    event_type="approval.requested",
+                    payload={
+                        "tool_call_id": tool_call_id,
+                        "tool_name": action.tool_name,
+                    },
+                    turn_id=action.turn_id,
+                    idempotency_key=requested_key,
+                )
+            if not PendingActionStore.transition(
+                connection,
+                session_id,
+                tool_call_id,
+                status="waiting_approval",
+                approval_status="requested",
+                now=now,
+                expected_statuses=("prepared", "executing", "waiting_approval"),
+            ):
+                raise ValueError(f"tool action is already settled: {tool_call_id}")
+            if invalidation_reason:
+                connection.execute(
+                    """
+                    insert into task_approvals(
+                        id, task_id, status, request_json, requested_at,
+                        decided_at, decision_source
+                    ) values (?, ?, 'invalidated', ?, ?, ?, ?)
+                    """,
+                    (
+                        f"approval_{uuid4().hex}",
+                        task_id,
+                        _json_dumps(request),
+                        now,
+                        now,
+                        invalidation_reason,
+                    ),
+                )
+            connection.execute(
+                """
+                insert into task_checkpoints(
+                    task_id, schema_version, state_json, created_at, updated_at
+                )
+                values (?, 'approval-v1', ?, ?, ?)
+                on conflict(task_id) do update set
+                    schema_version = excluded.schema_version,
+                    state_json = excluded.state_json,
+                    updated_at = excluded.updated_at
+                """,
+                (task_id, _json_dumps(checkpoint), now, now),
+            )
+            connection.execute(
+                """
+                insert into task_approvals(
+                    id, task_id, status, request_json, requested_at
+                ) values (?, ?, 'requested', ?, ?)
+                """,
+                (approval_id, task_id, _json_dumps(request), now),
+            )
+            return True
+
+    def transition_background_task(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        from_status: str,
+        result: str | None,
+        error: str | None,
+        claim_owner: str,
+        claim_token: str,
+    ) -> bool:
+        """Commit a terminal task projection and its Session fact together."""
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "select session_id from background_tasks where id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            updated = connection.execute(
+                """
+                update background_tasks
+                set status = ?, result = ?, error = ?, updated_at = ?, finished_at = ?,
+                    claim_owner = null, claim_token = null, claim_expires_at = null
+                where id = ? and status = ?
+                  and claim_owner = ? and claim_token = ? and claim_expires_at > ?
+                """,
+                (
+                    status,
+                    result,
+                    error,
+                    now,
+                    now,
+                    task_id,
+                    from_status,
+                    claim_owner,
+                    claim_token,
+                    now,
+                ),
+            )
+            if updated.rowcount != 1:
+                return False
+            payload: dict[str, str] = {"task_id": task_id}
+            if result is not None:
+                payload["result"] = result
+            if error is not None:
+                payload["error"] = error
+            self._append_event_in_transaction(
+                connection,
+                session_id=str(row["session_id"]),
+                event_type=f"background_task.{status}",
+                payload=payload,
+                created_at=now,
+            )
+            return True
+
+    def cancel_background_task(self, task_id: str, *, queue_session_id: str) -> bool:
+        """Cancel a task and its outstanding approval as one durable transition."""
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                select session_id
+                from background_tasks
+                where id = ? and queue_session_id = ?
+                """,
+                (task_id, queue_session_id),
+            ).fetchone()
+            if row is None:
+                return False
+            updated = connection.execute(
+                """
+                update background_tasks
+                set status = 'canceled', updated_at = ?, finished_at = ?,
+                    claim_owner = null, claim_token = null, claim_expires_at = null
+                where id = ? and status in ('queued', 'running', 'waiting_approval')
+                """,
+                (now, now, task_id),
+            )
+            if updated.rowcount != 1:
+                return False
+            active_turn_id = self._find_active_turn_in_transaction(
+                connection,
+                str(row["session_id"]),
+            )
+            if active_turn_id is not None:
+                self._interrupt_turn_in_transaction(
+                    connection,
+                    session_id=str(row["session_id"]),
+                    turn_id=active_turn_id,
+                    reason="background_task_canceled",
+                )
+            connection.execute(
+                """
+                update task_approvals
+                set status = 'canceled', decided_at = ?, decision_source = 'cancel'
+                where task_id = ? and status = 'requested'
+                """,
+                (now, task_id),
+            )
+            self._append_event_in_transaction(
+                connection,
+                session_id=str(row["session_id"]),
+                event_type="background_task.canceled",
+                payload={"task_id": task_id},
+                created_at=now,
+            )
+            return True
+
+    def fail_interrupted_background_tasks(
+        self,
+        queue_session_id: str,
+        error: str,
+    ) -> int:
+        """Close active Agent turns and fail Runtime tasks left running after shutdown."""
+        now = _now()
+        failed = 0
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                select id, session_id
+                from background_tasks
+                where queue_session_id = ? and status = 'running'
+                  and (claim_expires_at is null or claim_expires_at <= ?)
+                """,
+                (queue_session_id, now),
+            ).fetchall()
+            for row in rows:
+                task_id = str(row["id"])
+                session_id = str(row["session_id"])
+                active_turn_id = self._find_active_turn_in_transaction(
+                    connection,
+                    session_id,
+                )
+                if active_turn_id is not None:
+                    self._interrupt_turn_in_transaction(
+                        connection,
+                        session_id=session_id,
+                        turn_id=active_turn_id,
+                        reason="background_task_process_restarted",
+                    )
+                updated = connection.execute(
+                    """
+                    update background_tasks
+                    set status = 'failed', result = null, error = ?,
+                        updated_at = ?, finished_at = ?,
+                        claim_owner = null, claim_token = null, claim_expires_at = null
+                    where id = ? and status = 'running'
+                    """,
+                    (error, now, now, task_id),
+                )
+                if updated.rowcount != 1:
+                    continue
+                self._append_event_in_transaction(
+                    connection,
+                    session_id=session_id,
+                    event_type="background_task.failed",
+                    payload={"task_id": task_id, "error": error},
+                    created_at=now,
+                )
+                failed += 1
+        return failed
+
+    @staticmethod
+    def _find_active_turn_in_transaction(
+        connection: sqlite3.Connection,
+        session_id: str,
+    ) -> str | None:
+        active_turn_id: str | None = None
+        rows = connection.execute(
+            """
+            select type, turn_id
+            from session_events
+            where session_id = ?
+              and type in ('turn.started', 'turn.completed', 'turn.interrupted')
+            order by sequence
+            """,
+            (session_id,),
+        ).fetchall()
+        for row in rows:
+            event_type = str(row["type"])
+            turn_id = str(row["turn_id"]) if row["turn_id"] is not None else None
+            if event_type == "turn.started":
+                active_turn_id = turn_id
+            elif turn_id == active_turn_id:
+                active_turn_id = None
+        return active_turn_id
+
+    def get_parent_relationship(self, child_session_id: str) -> SessionRelationship | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                select parent_session_id, child_session_id, relation_type,
+                       created_at, metadata_json
+                from session_relationships
+                where child_session_id = ?
+                """,
+                (child_session_id,),
+            ).fetchone()
+        return _relationship_from_row(row) if row is not None else None
+
+    def list_child_sessions(
+        self,
+        parent_session_id: str,
+        *,
+        relation_type: str | None = None,
+    ) -> list[SessionRecord]:
+        condition = "and r.relation_type = ?" if relation_type is not None else ""
+        values: tuple[Any, ...] = (
+            (parent_session_id, relation_type)
+            if relation_type is not None
+            else (parent_session_id,)
+        )
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                select s.*
+                from session_relationships r
+                join sessions s on s.id = r.child_session_id
+                where r.parent_session_id = ? {condition}
+                order by r.created_at, r.child_session_id
+                """,
+                values,
+            ).fetchall()
+        return [_session_from_row(row) for row in rows]
 
     def acquire_session_lease(
         self,
@@ -513,6 +1033,7 @@ class SessionRepository:
         tool_call_id: str,
         *,
         decision: str,
+        deferred_execution: bool = False,
         lease_token: str | None = None,
     ) -> PendingAction:
         if decision not in {"approve", "allow_session", "deny", "skip"}:
@@ -547,7 +1068,7 @@ class SessionRepository:
                 connection,
                 session_id,
                 tool_call_id,
-                status="executing",
+                status="prepared" if deferred_execution else "executing",
                 approval_status=decision,
                 now=now,
                 expected_statuses=("waiting_approval",),
@@ -846,68 +1367,99 @@ class SessionRepository:
                 session_id,
                 lease_token=lease_token,
             )
-            pending_actions = PendingActionStore.list(
-                connection,
-                session_id,
-                include_settled=False,
-                turn_id=turn_id,
-            )
-            for action in pending_actions:
-                action_message_key, action_message = self._prepare_abandoned_action_message(
-                    session_id,
-                    action,
-                    reason=reason,
-                )
-                self._append_event_in_transaction(
-                    connection,
-                    session_id=session_id,
-                    event_type=action_message.event_type,
-                    payload=action_message.payload,
-                    turn_id=turn_id,
-                    idempotency_key=action_message_key,
-                    blob_refs=action_message.blob_refs,
-                )
-                self._append_event_in_transaction(
-                    connection,
-                    session_id=session_id,
-                    event_type="pending_action.abandoned",
-                    payload={
-                        "tool_call_id": action.tool_call_id,
-                        "reason": reason,
-                        "execution_outcome": "unknown",
-                    },
-                    turn_id=turn_id,
-                    idempotency_key=(f"{turn_id}:action:{action.tool_call_id}:abandoned"),
-                )
-                PendingActionStore.set_status(
-                    connection,
-                    session_id,
-                    action.tool_call_id,
-                    status="abandoned",
-                    now=_now(),
-                    expected_statuses=("prepared", "executing", "waiting_approval"),
-                )
-            if prepared is not None:
-                message_event = self._append_event_in_transaction(
-                    connection,
-                    session_id=session_id,
-                    event_type=prepared.event_type,
-                    payload=prepared.payload,
-                    turn_id=turn_id,
-                    idempotency_key=f"{turn_id}:assistant-partial",
-                    blob_refs=prepared.blob_refs,
-                )
-            self._append_event_in_transaction(
+            terminal = connection.execute(
+                """
+                select 1
+                from session_events
+                where session_id = ? and turn_id = ?
+                  and type in ('turn.completed', 'turn.interrupted')
+                limit 1
+                """,
+                (session_id, turn_id),
+            ).fetchone()
+            if terminal is not None:
+                return None
+            message_event = self._interrupt_turn_in_transaction(
                 connection,
                 session_id=session_id,
-                event_type="turn.interrupted",
-                payload={"reason": reason},
                 turn_id=turn_id,
-                idempotency_key=f"{turn_id}:interrupted",
+                reason=reason,
+                prepared_assistant=prepared,
             )
         if message_event is None:
             return None
         return message_from_event(message_event, blob_loader=self._load_blob_bytes)
+
+    def _interrupt_turn_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        session_id: str,
+        turn_id: str,
+        reason: str,
+        prepared_assistant: _PreparedMessage | None = None,
+    ) -> SessionEvent | None:
+        message_event: SessionEvent | None = None
+        pending_actions = PendingActionStore.list(
+            connection,
+            session_id,
+            include_settled=False,
+            turn_id=turn_id,
+        )
+        for action in pending_actions:
+            action_message_key, action_message = self._prepare_abandoned_action_message(
+                session_id,
+                action,
+                reason=reason,
+            )
+            self._append_event_in_transaction(
+                connection,
+                session_id=session_id,
+                event_type=action_message.event_type,
+                payload=action_message.payload,
+                turn_id=turn_id,
+                idempotency_key=action_message_key,
+                blob_refs=action_message.blob_refs,
+            )
+            self._append_event_in_transaction(
+                connection,
+                session_id=session_id,
+                event_type="pending_action.abandoned",
+                payload={
+                    "tool_call_id": action.tool_call_id,
+                    "reason": reason,
+                    "execution_outcome": "unknown",
+                },
+                turn_id=turn_id,
+                idempotency_key=f"{turn_id}:action:{action.tool_call_id}:abandoned",
+            )
+            PendingActionStore.set_status(
+                connection,
+                session_id,
+                action.tool_call_id,
+                status="abandoned",
+                now=_now(),
+                expected_statuses=("prepared", "executing", "waiting_approval"),
+            )
+        if prepared_assistant is not None:
+            message_event = self._append_event_in_transaction(
+                connection,
+                session_id=session_id,
+                event_type=prepared_assistant.event_type,
+                payload=prepared_assistant.payload,
+                turn_id=turn_id,
+                idempotency_key=f"{turn_id}:assistant-partial",
+                blob_refs=prepared_assistant.blob_refs,
+            )
+        self._append_event_in_transaction(
+            connection,
+            session_id=session_id,
+            event_type="turn.interrupted",
+            payload={"reason": reason},
+            turn_id=turn_id,
+            idempotency_key=f"{turn_id}:interrupted",
+        )
+        return message_event
 
     def _prepare_message(
         self,
@@ -1563,6 +2115,115 @@ class SessionRepository:
         ).fetchone()
         return row is not None
 
+    def _create_session_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_root: str,
+        title: str | None,
+        metadata: dict[str, Any] | None,
+        created_at: str | None = None,
+    ) -> str:
+        session_id = f"sess_{uuid4().hex}"
+        resolved_title = title or session_id
+        now = created_at or _now()
+        session_metadata = dict(metadata or {})
+        connection.execute(
+            """
+            insert into sessions(
+                id, workspace_root, title, status, created_at, updated_at,
+                next_sequence, version, metadata_json
+            ) values (?, ?, ?, 'idle', ?, ?, 1, 1, ?)
+            """,
+            (
+                session_id,
+                workspace_root,
+                resolved_title,
+                now,
+                now,
+                _json_dumps(session_metadata),
+            ),
+        )
+        payload = {
+            "session_id": session_id,
+            "title": resolved_title,
+            "workspace_root": workspace_root,
+        }
+        payload.update(_event_metadata(session_metadata))
+        self._append_event_in_transaction(
+            connection,
+            session_id=session_id,
+            event_type="session.created",
+            payload=payload,
+            created_at=now,
+        )
+        return session_id
+
+    def _create_child_session_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        parent_session_id: str,
+        relation_type: str,
+        title: str | None,
+        metadata: dict[str, Any] | None,
+        relationship_metadata: dict[str, Any],
+        created_at: str,
+        lease_token: str | None,
+    ) -> str:
+        self._require_writable_session(
+            connection,
+            parent_session_id,
+            lease_token=lease_token,
+        )
+        parent = connection.execute(
+            "select workspace_root from sessions where id = ?",
+            (parent_session_id,),
+        ).fetchone()
+        child_session_id = self._create_session_in_transaction(
+            connection,
+            workspace_root=str(parent["workspace_root"]),
+            title=title,
+            metadata=metadata,
+            created_at=created_at,
+        )
+        relation_payload = {
+            "parent_session_id": parent_session_id,
+            "child_session_id": child_session_id,
+            "relation_type": relation_type,
+            "metadata": relationship_metadata,
+        }
+        self._append_event_in_transaction(
+            connection,
+            session_id=parent_session_id,
+            event_type="session.child_linked",
+            payload=relation_payload,
+            created_at=created_at,
+        )
+        self._append_event_in_transaction(
+            connection,
+            session_id=child_session_id,
+            event_type="session.parent_linked",
+            payload=relation_payload,
+            created_at=created_at,
+        )
+        connection.execute(
+            """
+            insert into session_relationships(
+                parent_session_id, child_session_id, relation_type,
+                created_at, metadata_json
+            ) values (?, ?, ?, ?, ?)
+            """,
+            (
+                parent_session_id,
+                child_session_id,
+                relation_type,
+                created_at,
+                _json_dumps(relationship_metadata),
+            ),
+        )
+        return child_session_id
+
     def _require_writable_session(
         self,
         connection: sqlite3.Connection,
@@ -1662,6 +2323,16 @@ def _event_from_row(row: sqlite3.Row) -> SessionEvent:
         source_session_id=row["source_session_id"],
         source_event_id=row["source_event_id"],
         blob_refs=blob_refs_from_json(str(row["blob_refs_json"])),
+    )
+
+
+def _relationship_from_row(row: sqlite3.Row) -> SessionRelationship:
+    return SessionRelationship(
+        parent_session_id=str(row["parent_session_id"]),
+        child_session_id=str(row["child_session_id"]),
+        relation_type=str(row["relation_type"]),
+        created_at=str(row["created_at"]),
+        metadata=json.loads(row["metadata_json"]),
     )
 
 

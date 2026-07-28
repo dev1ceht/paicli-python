@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-DATABASE_SCHEMA_VERSION = 3
+DATABASE_SCHEMA_VERSION = 4
 EVENT_SCHEMA_VERSION = 1
 
 EventUpcaster = Callable[[str, dict[str, Any]], dict[str, Any]]
