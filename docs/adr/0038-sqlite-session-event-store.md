@@ -23,26 +23,31 @@ timeout, and secure deletion. Semantic transitions use short `BEGIN IMMEDIATE` t
 An optional idempotency key is unique within one session: repeating the same event returns the
 original event, while reusing the key with different content is rejected.
 
+Database changes use ordered, transactional migrations recorded in `schema_migrations` and
+`PRAGMA user_version`. Upgrades back up the database before applying migrations. Stored events
+remain immutable; versioned upcasters adapt older payloads only in memory during replay.
+
 ## Replay
 
 The repository rebuilds a `SessionView` containing:
 
-- the complete user-visible transcript;
+- the complete user-visible session history;
 - the smaller message projection eligible for the next model request;
 - effective session metadata;
 - the most recent context-reset boundary.
 
-`message.assistant.partial` remains visible in the transcript but is not replayed to the model.
+`message.assistant.partial` remains visible in the session history but is not replayed to the
+model.
 `context.reset` clears only the model projection. `message.hidden` changes the effective
 projection without deleting the original event.
 
 ## Blob storage
 
-Large content is stored in a content-addressed `blobs` table using the SHA-256 hash of the
-uncompressed bytes. Compression is transparent and used only when it reduces storage.
-`event_blob_refs` is a normalized association, while the same ordered references are covered
-by the event hash. Orphan collection is separate from session deletion so a fork can retain
-shared content.
+Text content larger than 64 KiB and binary content are stored in a content-addressed `blobs`
+table using the SHA-256 hash of the uncompressed bytes. Compression is transparent and used
+only when it reduces storage. `event_blob_refs` preserves reference order and duplicates in a
+normalized association, while the same ordered references are covered by the event hash.
+Orphan collection is separate from session deletion so a fork can retain shared content.
 
 ## Lifecycle
 

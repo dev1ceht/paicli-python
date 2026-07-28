@@ -81,6 +81,6 @@ class SessionMessage:
 class SessionView:
     session_id: str
     metadata: dict[str, Any]
-    transcript: tuple[SessionMessage, ...]
+    session_history: tuple[SessionMessage, ...]
     model_messages: tuple[SessionMessage, ...]
     reset_sequence: int | None = None
