@@ -352,6 +352,8 @@ Chrome DevTools MCP 会把浏览器页面和 DevTools 状态暴露给 Agent。�
 ## Runtime API
 
 PaiCLI 内置轻量 Runtime API，适合外部系统接入线程、turn、事件和后台任务。
+Runtime thread 与后台任务都持久化到 `~/.paicli/sessions/sessions.db`：thread 是可续接的
+Session，后台任务是带父子关系的 child Session。旧 `runtime.db` / `tasks.db` 数据不会迁移。
 
 启动服务：
 

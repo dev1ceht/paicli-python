@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
+
+from paicli.session import SessionRepository
+from paicli.session.schema import connect
 
 
 @dataclass(slots=True)
@@ -19,6 +24,8 @@ class TaskRecord:
     result: str | None = None
     error: str | None = None
     retry_of: str | None = None
+    session_id: str = ""
+    parent_session_id: str = ""
 
     @property
     def duration_seconds(self) -> float | None:
@@ -43,6 +50,8 @@ class TaskRecord:
             "result": self.result,
             "error": self.error,
             "retry_of": self.retry_of,
+            "session_id": self.session_id,
+            "parent_session_id": self.parent_session_id,
         }
 
 
@@ -69,101 +78,100 @@ class TaskApproval:
 
 
 class DurableTaskManager:
-    def __init__(self, db_path: str | Path):
-        self.db_path = Path(db_path).expanduser()
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._ensure_schema()
+    def __init__(
+        self,
+        db_path: str | Path | SessionRepository,
+        *,
+        workspace_root: str | Path | None = None,
+        parent_session_id: str | None = None,
+        queue_session_id: str | None = None,
+        parent_lease_token: str | None = None,
+        claim_ttl_seconds: int = 60,
+    ):
+        self.repository = (
+            db_path if isinstance(db_path, SessionRepository) else SessionRepository(db_path)
+        )
+        self.db_path = self.repository.db_path
+        self.workspace_root = str(
+            Path(workspace_root or self.db_path.parent).expanduser().resolve()
+        )
+        self.parent_session_id = parent_session_id or self._resolve_task_root()
+        self.queue_session_id = queue_session_id or self._resolve_runtime_queue()
+        self.parent_lease_token = parent_lease_token
+        self.claim_ttl_seconds = claim_ttl_seconds
+        self._claim_owner = f"task_manager_{uuid4().hex}"
+        self._claim_tokens: dict[str, str] = {}
+        self._claim_tokens_lock = threading.Lock()
 
     def add(self, prompt: str, *, retry_of: str | None = None) -> str:
         task_id = _new_id("task")
-        now = _now()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                insert into tasks(id, prompt, status, created_at, updated_at, retry_of)
-                values (?, ?, 'queued', ?, ?, ?)
-                """,
-                (task_id, prompt, now, now, retry_of),
-            )
+        parent_session_id = self.parent_session_id
+        relation_type = "background_task"
+        if retry_of is not None:
+            retried = self.get(retry_of)
+            if retried is None:
+                raise KeyError(f"retry source task not found: {retry_of}")
+            parent_session_id = retried.session_id
+            relation_type = "background_task_retry"
+        self.repository.create_background_task(
+            parent_session_id,
+            queue_session_id=self.queue_session_id,
+            task_id=task_id,
+            prompt=prompt,
+            retry_of=retry_of,
+            relation_type=relation_type,
+            lease_token=(
+                self.parent_lease_token if parent_session_id == self.parent_session_id else None
+            ),
+        )
         return task_id
 
     def retry(self, task_id: str) -> str | None:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "select prompt from tasks where id = ? and status = 'failed'", (task_id,)
+                """
+                select prompt
+                from background_tasks
+                where id = ? and queue_session_id = ? and status = 'failed'
+                """,
+                (task_id, self.queue_session_id),
             ).fetchone()
             if not row:
                 return None
-            retry_id = _new_id("task")
-            now = _now()
-            conn.execute(
-                """
-                insert into tasks(id, prompt, status, created_at, updated_at, retry_of)
-                values (?, ?, 'queued', ?, ?, ?)
-                """,
-                (retry_id, row[0], now, now, task_id),
-            )
-        return retry_id
+        return self.add(str(row[0]), retry_of=task_id)
 
     def fail_interrupted_tasks(self) -> int:
-        with self._connect() as conn:
-            now = _now()
-            cursor = conn.execute(
-                """
-                update tasks
-                set status = 'failed', result = null, error = ?, updated_at = ?, finished_at = ?
-                where status = 'running'
-                """,
-                (
-                    "Task interrupted by a previous Runtime shutdown; not retried automatically.",
-                    now,
-                    now,
-                ),
-            )
-            return cursor.rowcount
+        return self.repository.fail_interrupted_background_tasks(
+            self.queue_session_id,
+            "Task interrupted by a previous Runtime shutdown; not retried automatically."
+        )
 
     def claim_next(self) -> TaskRecord | None:
-        with self._connect() as conn:
-            # Acquire the SQLite write lock before reading so only this worker can
-            # observe and claim the next queued task in this transaction.
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                """
-                select id, prompt, status, created_at, updated_at, started_at, finished_at, result,
-                       error,
-                       retry_of
-                from tasks
-                where status = 'queued'
-                order by created_at
-                limit 1
-                """
-            ).fetchone()
-            if not row:
-                return None
-            updated_at = _now()
-            cursor = conn.execute(
-                """
-                update tasks
-                set status = 'running', updated_at = ?, started_at = coalesce(started_at, ?)
-                where id = ? and status = 'queued'
-                """,
-                (updated_at, updated_at, row[0]),
-            )
-            if cursor.rowcount != 1:
-                return None
-        return TaskRecord(
-            row[0],
-            row[1],
-            "running",
-            row[3],
-            updated_at,
-            row[5] or updated_at,
-            row[6],
-            row[7],
-            row[8],
-            row[9],
+        self.fail_interrupted_tasks()
+        row = self.repository.claim_next_background_task(
+            self.queue_session_id,
+            owner_id=self._claim_owner,
+            ttl_seconds=self.claim_ttl_seconds,
         )
+        if row is None:
+            return None
+        claim_token = str(row.pop("claim_token"))
+        task = TaskRecord(**row)
+        with self._claim_tokens_lock:
+            self._claim_tokens[task.id] = claim_token
+        return task
+
+    def refresh_claim(self, task_id: str) -> None:
+        with self._claim_tokens_lock:
+            claim_token = self._claim_tokens.get(task_id)
+        if claim_token is None or not self.repository.refresh_background_task_claim(
+            task_id,
+            owner_id=self._claim_owner,
+            claim_token=claim_token,
+            ttl_seconds=self.claim_ttl_seconds,
+        ):
+            raise RuntimeError(f"background task claim is no longer owned: {task_id}")
 
     def complete(self, task_id: str, result: str) -> bool:
         return self._update(task_id, "completed", result=result, error=None, from_status="running")
@@ -172,27 +180,13 @@ class DurableTaskManager:
         return self._update(task_id, "failed", result=None, error=error, from_status="running")
 
     def cancel(self, task_id: str) -> bool:
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            now = _now()
-            cursor = conn.execute(
-                """
-                update tasks
-                set status = 'canceled', updated_at = ?, finished_at = ?
-                where id = ? and status in ('queued', 'running', 'waiting_approval')
-                """,
-                (now, now, task_id),
-            )
-            if cursor.rowcount:
-                conn.execute(
-                    """
-                    update task_approvals
-                    set status = 'canceled', decided_at = ?, decision_source = 'cancel'
-                    where task_id = ? and status = 'requested'
-                    """,
-                    (now, task_id),
-                )
-            return cursor.rowcount > 0
+        canceled = self.repository.cancel_background_task(
+            task_id,
+            queue_session_id=self.queue_session_id,
+        )
+        if canceled:
+            self._forget_claim(task_id)
+        return canceled
 
     def wait_for_approval(
         self,
@@ -201,18 +195,45 @@ class DurableTaskManager:
         checkpoint: dict[str, object],
         request: dict[str, object],
         invalidation_reason: str | None = None,
+        session_id: str | None = None,
+        tool_call_id: str | None = None,
+        lease_token: str | None = None,
     ) -> TaskApproval | None:
         """Persist an execution checkpoint and move a running task to approval wait."""
+        claim_token = self._claim_token(task_id)
+        if claim_token is None:
+            return None
+        if session_id is not None and tool_call_id is not None:
+            approval_id = _new_id("approval")
+            if not self.repository.pause_background_task_for_approval(
+                task_id,
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                checkpoint=checkpoint,
+                approval_id=approval_id,
+                request=request,
+                claim_owner=self._claim_owner,
+                claim_token=claim_token,
+                invalidation_reason=invalidation_reason,
+                lease_token=lease_token,
+            ):
+                return None
+            return next(
+                approval
+                for approval in reversed(self.list_approvals(task_id))
+                if approval.id == approval_id
+            )
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             now = _now()
             cursor = conn.execute(
                 """
-                update tasks
+                update background_tasks
                 set status = 'waiting_approval', updated_at = ?
                 where id = ? and status = 'running'
+                  and claim_owner = ? and claim_token = ? and claim_expires_at > ?
                 """,
-                (now, task_id),
+                (now, task_id, self._claim_owner, claim_token, now),
             )
             if cursor.rowcount != 1:
                 return None
@@ -278,6 +299,8 @@ class DurableTaskManager:
         return self._decide_approval(task_id, decision="denied", source=source)
 
     def get_checkpoint(self, task_id: str) -> dict[str, object] | None:
+        if self.get(task_id) is None:
+            return None
         with self._connect() as conn:
             row = conn.execute(
                 "select state_json from task_checkpoints where task_id = ?", (task_id,)
@@ -285,6 +308,8 @@ class DurableTaskManager:
         return json.loads(row[0]) if row else None
 
     def list_approvals(self, task_id: str) -> list[TaskApproval]:
+        if self.get(task_id) is None:
+            return []
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -313,13 +338,13 @@ class DurableTaskManager:
             rows = conn.execute(
                 """
                 select id, prompt, status, created_at, updated_at, started_at, finished_at, result,
-                       error,
-                       retry_of
-                from tasks
+                       error, retry_of, session_id, parent_session_id
+                from background_tasks
+                where queue_session_id = ?
                 order by created_at desc
                 limit ?
                 """,
-                (limit,),
+                (self.queue_session_id, limit),
             ).fetchall()
         return [TaskRecord(*row) for row in rows]
 
@@ -328,12 +353,11 @@ class DurableTaskManager:
             row = conn.execute(
                 """
                 select id, prompt, status, created_at, updated_at, started_at, finished_at, result,
-                       error,
-                       retry_of
-                from tasks
-                where id = ?
+                       error, retry_of, session_id, parent_session_id
+                from background_tasks
+                where id = ? and queue_session_id = ?
                 """,
-                (task_id,),
+                (task_id, self.queue_session_id),
             ).fetchone()
         return TaskRecord(*row) if row else None
 
@@ -359,19 +383,33 @@ class DurableTaskManager:
         error: str | None,
         from_status: str,
     ) -> bool:
-        with self._connect() as conn:
-            now = _now()
-            cursor = conn.execute(
-                """
-                update tasks
-                set status = ?, result = ?, error = ?, updated_at = ?, finished_at = ?
-                where id = ? and status = ?
-                """,
-                (status, result, error, now, now, task_id, from_status),
-            )
-            return cursor.rowcount == 1
+        claim_token = self._claim_token(task_id)
+        if claim_token is None:
+            return False
+        updated = self.repository.transition_background_task(
+            task_id,
+            status=status,
+            from_status=from_status,
+            result=result,
+            error=error,
+            claim_owner=self._claim_owner,
+            claim_token=claim_token,
+        )
+        if updated:
+            self._forget_claim(task_id)
+        return updated
+
+    def _forget_claim(self, task_id: str) -> None:
+        with self._claim_tokens_lock:
+            self._claim_tokens.pop(task_id, None)
+
+    def _claim_token(self, task_id: str) -> str | None:
+        with self._claim_tokens_lock:
+            return self._claim_tokens.get(task_id)
 
     def _decide_approval(self, task_id: str, *, decision: str, source: str) -> bool:
+        if self.get(task_id) is None:
+            return False
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             now = _now()
@@ -388,8 +426,9 @@ class DurableTaskManager:
                 return False
             task_update = conn.execute(
                 """
-                update tasks
-                set status = 'queued', updated_at = ?
+                update background_tasks
+                set status = 'queued', updated_at = ?,
+                    claim_owner = null, claim_token = null, claim_expires_at = null
                 where id = ? and status = 'waiting_approval'
                 """,
                 (now, task_id),
@@ -419,63 +458,27 @@ class DurableTaskManager:
                 """,
                 (decision, now, source, approval[0]),
             )
-            return approval_update.rowcount == 1
-
-    def _ensure_schema(self) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                create table if not exists tasks (
-                    id text primary key,
-                    prompt text not null,
-                    status text not null,
-                    created_at text not null,
-                    updated_at text not null,
-                    started_at text,
-                    finished_at text,
-                    result text,
-                    error text,
-                    retry_of text
-                )
-                """
-            )
-            columns = {row[1] for row in conn.execute("pragma table_info(tasks)")}
-            if "retry_of" not in columns:
-                conn.execute("alter table tasks add column retry_of text")
-            conn.execute("create index if not exists idx_tasks_status on tasks(status, created_at)")
-            conn.execute(
-                """
-                create table if not exists task_checkpoints (
-                    task_id text primary key,
-                    schema_version text not null,
-                    state_json text not null,
-                    created_at text not null,
-                    updated_at text not null
-                )
-                """
-            )
-            conn.execute(
-                """
-                create table if not exists task_approvals (
-                    id text primary key,
-                    task_id text not null,
-                    status text not null,
-                    request_json text not null,
-                    requested_at text not null,
-                    decided_at text,
-                    decision_source text
-                )
-                """
-            )
-            conn.execute(
-                """
-                create index if not exists idx_task_approvals_task
-                on task_approvals(task_id, requested_at)
-                """
-            )
+            decided = approval_update.rowcount == 1
+        if decided:
+            self._forget_claim(task_id)
+        return decided
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.db_path)
+        return connect(self.db_path)
+
+    def _resolve_task_root(self) -> str:
+        return self.repository.get_or_create_root_session(
+            self.workspace_root,
+            title="Background tasks",
+            root_kind="background_task_root",
+        ).id
+
+    def _resolve_runtime_queue(self) -> str:
+        return self.repository.get_or_create_root_session(
+            self.workspace_root,
+            title="Runtime",
+            root_kind="runtime_root",
+        ).id
 
 
 def _now() -> str:

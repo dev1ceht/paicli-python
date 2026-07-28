@@ -771,7 +771,10 @@ def _skill_command(arg: str, console: Console, cwd: str) -> None:
 
 
 def _task_command(arg: str, console: Console) -> None:
-    manager = DurableTaskManager(Path.home() / ".paicli" / "tasks" / "tasks.db")
+    manager = DurableTaskManager(
+        SessionRepository(default_session_database_path()),
+        workspace_root=Path.cwd(),
+    )
     sub, _, rest = arg.partition(" ")
     if sub == "add" and rest:
         task_id = manager.add(rest)

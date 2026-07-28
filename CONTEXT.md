@@ -5,8 +5,24 @@ PaiCLI is a terminal AI agent that accepts user input in a Textual TUI and relay
 ## Language
 
 **Background task**:
-A durable, independently executed agent request whose lifecycle is recorded outside an interactive session.
+A durable, independently executed agent request whose lifecycle and Agent conversation are
+recorded in a child Session.
 _Avoid_: job, async request
+
+**Runtime root Session**:
+The workspace-scoped parent Session that owns Runtime thread Sessions and unbound Background
+Task Sessions without appearing as an API conversation itself.
+_Avoid_: runtime database, global thread
+
+**Runtime thread Session**:
+A child Session exposed through the Runtime `/v1/threads` API whose turns, messages, tools, and
+events use the same durable replay model as an interactive Session.
+_Avoid_: API-only thread, event bucket
+
+**Session relationship**:
+The durable typed parent-child edge connecting a Runtime thread or Background Task Session to
+the Session that created or owns it.
+_Avoid_: foreign-key metadata, task reference
 
 **Queued task**:
 A background task accepted for execution but not yet exclusively claimed by a worker.

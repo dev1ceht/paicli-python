@@ -42,6 +42,46 @@ def test_create_session_is_immediately_available_for_replay_and_listing(tmp_path
     }
 
 
+def test_child_session_relationship_is_durable_and_queryable(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.db")
+    parent = repository.create_session(tmp_path, title="Runtime root")
+
+    child = repository.create_child_session(
+        parent.id,
+        relation_type="background_task",
+        title="Inspect project",
+        metadata={"task_id": "task_1"},
+    )
+
+    relation = repository.get_parent_relationship(child.id)
+    assert relation is not None
+    assert relation.parent_session_id == parent.id
+    assert relation.child_session_id == child.id
+    assert relation.relation_type == "background_task"
+    assert relation.metadata == {"task_id": "task_1"}
+    assert repository.list_child_sessions(parent.id) == [child]
+    assert repository.list_events(child.id)[-1].type == "session.parent_linked"
+    assert repository.list_events(parent.id)[-1].type == "session.child_linked"
+
+
+def test_root_session_creation_is_atomic_under_concurrency(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions.db")
+    start = Barrier(4)
+
+    def resolve_root() -> str:
+        start.wait()
+        return repository.get_or_create_root_session(
+            tmp_path,
+            root_kind="runtime_root",
+            title="Runtime",
+        ).id
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        root_ids = list(executor.map(lambda _: resolve_root(), range(4)))
+
+    assert len(set(root_ids)) == 1
+
+
 def test_v1_database_is_backed_up_and_migrated_to_current_schema(tmp_path: Path) -> None:
     db_path = tmp_path / "sessions.db"
     with connect(db_path) as connection:
@@ -64,9 +104,9 @@ def test_v1_database_is_backed_up_and_migrated_to_current_schema(tmp_path: Path)
                 "select version from schema_migrations order by version"
             ).fetchall()
         ]
-    assert version == DATABASE_SCHEMA_VERSION == 3
+    assert version == DATABASE_SCHEMA_VERSION == 4
     assert "ordinal" in columns
-    assert migrations == [1, 2, 3]
+    assert migrations == [1, 2, 3, 4]
     assert len(list(tmp_path.glob("sessions.backup-v1-*.db"))) == 1
 
 

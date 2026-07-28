@@ -35,12 +35,22 @@ class InteractiveSession:
         return self.record.id
 
     @property
+    def lease_token(self) -> str:
+        return self._lease.token
+
+    @property
     def session_history(self) -> tuple[SessionMessage, ...]:
         return self.repository.rebuild_session_view(self.id).session_history
 
+    @property
+    def agent_history(self) -> list[Message]:
+        return [
+            _agent_message(message)
+            for message in self.repository.rebuild_session_view(self.id).model_messages
+        ]
+
     def restore_agent_history(self, agent: Any) -> None:
-        view = self.repository.rebuild_session_view(self.id)
-        agent.replace_history([_agent_message(message) for message in view.model_messages])
+        agent.replace_history(self.agent_history)
 
     def prepare_recovery_state(self) -> dict[str, Any] | None:
         if self._active_turn_id is None:
@@ -175,11 +185,18 @@ class InteractiveSession:
         )
         return tool_call_id
 
-    def resolve_tool_approval(self, tool_call_id: str, decision: str) -> None:
+    def resolve_tool_approval(
+        self,
+        tool_call_id: str,
+        decision: str,
+        *,
+        deferred_execution: bool = False,
+    ) -> None:
         self.repository.resolve_tool_approval(
             self.id,
             tool_call_id,
             decision=decision,
+            deferred_execution=deferred_execution,
             lease_token=self._lease.token,
         )
 

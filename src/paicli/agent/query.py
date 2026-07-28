@@ -73,6 +73,7 @@ async def query(
             "messages": [_message_to_dict(message) for message in messages],
             "pending_tool_calls": pending_tool_calls,
             "next_tool_index": next_tool_index,
+            "active_tool_call_id": active_tool_call_id,
             "total_tokens": total_tokens,
             "turn": turn,
             "tool_call_count": tool_call_count,

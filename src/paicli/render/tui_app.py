@@ -10,7 +10,6 @@ import json
 import sys
 import time
 from contextlib import suppress
-from pathlib import Path
 from typing import Any
 
 from textual.app import App, ComposeResult
@@ -1420,8 +1419,25 @@ class PaiCliApp(App):
 
     def _task_command_info(self, arg: str, chat_log: ChatLog) -> None:
         from paicli.runtime import DurableTaskManager
+        from paicli.session import SessionRepository, default_session_database_path
 
-        manager = DurableTaskManager(Path.home() / ".paicli" / "tasks" / "tasks.db")
+        repository = (
+            self._interactive_session.repository
+            if self._interactive_session is not None
+            else SessionRepository(default_session_database_path())
+        )
+        manager = DurableTaskManager(
+            repository,
+            workspace_root=self.cwd,
+            parent_session_id=(
+                self._interactive_session.id if self._interactive_session is not None else None
+            ),
+            parent_lease_token=(
+                self._interactive_session.lease_token
+                if self._interactive_session is not None
+                else None
+            ),
+        )
         sub, _, rest = arg.partition(" ")
         if sub == "add" and rest:
             task_id = manager.add(rest)

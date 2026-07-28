@@ -217,8 +217,97 @@ def _migration_3(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migration_4(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        create table session_roots (
+            workspace_root text not null,
+            root_kind text not null,
+            session_id text not null unique references sessions(id) on delete cascade,
+            primary key(workspace_root, root_kind)
+        )
+        """
+    )
+    connection.execute(
+        """
+        create table session_relationships (
+            child_session_id text primary key references sessions(id) on delete cascade,
+            parent_session_id text not null references sessions(id) on delete cascade,
+            relation_type text not null,
+            created_at text not null,
+            metadata_json text not null
+        )
+        """
+    )
+    connection.execute(
+        """
+        create index idx_session_relationships_parent
+        on session_relationships(parent_session_id, created_at, child_session_id)
+        """
+    )
+    connection.execute(
+        """
+        create table background_tasks (
+            id text primary key,
+            session_id text not null unique references sessions(id) on delete cascade,
+            parent_session_id text not null references sessions(id) on delete cascade,
+            queue_session_id text not null references sessions(id) on delete cascade,
+            prompt text not null,
+            status text not null,
+            created_at text not null,
+            updated_at text not null,
+            started_at text,
+            finished_at text,
+            result text,
+            error text,
+            retry_of text references background_tasks(id),
+            claim_owner text,
+            claim_token text,
+            claim_expires_at text
+        )
+        """
+    )
+    connection.execute(
+        """
+        create index idx_background_tasks_queue_status
+        on background_tasks(queue_session_id, status, created_at)
+        """
+    )
+    connection.execute(
+        """
+        create table task_checkpoints (
+            task_id text primary key references background_tasks(id) on delete cascade,
+            schema_version text not null,
+            state_json text not null,
+            created_at text not null,
+            updated_at text not null
+        )
+        """
+    )
+    connection.execute(
+        """
+        create table task_approvals (
+            id text primary key,
+            task_id text not null references background_tasks(id) on delete cascade,
+            status text not null,
+            request_json text not null,
+            requested_at text not null,
+            decided_at text,
+            decision_source text
+        )
+        """
+    )
+    connection.execute(
+        """
+        create index idx_task_approvals_task
+        on task_approvals(task_id, requested_at)
+        """
+    )
+
+
 _MIGRATIONS: dict[int, Migration] = {
     1: _migration_1,
     2: _migration_2,
     3: _migration_3,
+    4: _migration_4,
 }

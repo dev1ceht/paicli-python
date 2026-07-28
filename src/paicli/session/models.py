@@ -46,6 +46,15 @@ class SessionLease:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionRelationship:
+    parent_session_id: str
+    child_session_id: str
+    relation_type: str
+    created_at: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class ToolActionSpec:
     tool_call_id: str
     tool_name: str
