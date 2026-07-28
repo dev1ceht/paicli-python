@@ -175,4 +175,50 @@ def _migration_2(connection: sqlite3.Connection) -> None:
     connection.execute("alter table event_blob_refs_v2 rename to event_blob_refs")
 
 
-_MIGRATIONS: dict[int, Migration] = {1: _migration_1, 2: _migration_2}
+def _migration_3(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        create table session_leases (
+            session_id text primary key references sessions(id) on delete cascade,
+            owner_id text not null,
+            token text not null unique,
+            acquired_at text not null,
+            refreshed_at text not null,
+            expires_at text not null
+        )
+        """
+    )
+    connection.execute(
+        """
+        create table pending_actions (
+            session_id text not null references sessions(id) on delete cascade,
+            tool_call_id text not null,
+            turn_id text not null,
+            tool_name text not null,
+            arguments_json text not null,
+            raw_call_json text not null,
+            status text not null,
+            is_read_only integer not null,
+            is_idempotent integer not null,
+            model_turn integer not null,
+            batch_index integer not null,
+            approval_status text,
+            created_at text not null,
+            updated_at text not null,
+            primary key(session_id, tool_call_id)
+        )
+        """
+    )
+    connection.execute(
+        """
+        create index idx_pending_actions_session_status
+        on pending_actions(session_id, status, model_turn, batch_index)
+        """
+    )
+
+
+_MIGRATIONS: dict[int, Migration] = {
+    1: _migration_1,
+    2: _migration_2,
+    3: _migration_3,
+}

@@ -4,7 +4,7 @@ import inspect
 import json
 import time
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 from paicli.cancellation import CancellationCheck, TaskCanceled, raise_if_cancelled
 from paicli.config import PaiCliConfig
@@ -13,10 +13,10 @@ from paicli.context.telemetry import current_context_scope
 from paicli.image import parse_image_references
 from paicli.llm.base import LlmClient
 from paicli.prompt import PromptSections
-from paicli.tools.base import ApprovalPending, ToolContext
+from paicli.tools.base import ApprovalPending, ToolContext, ToolDecision
 from paicli.tools.executor import ToolExecutor
 from paicli.tools.registry import ToolRegistry
-from paicli.types import Message
+from paicli.types import Message, Role
 
 
 async def query(
@@ -38,6 +38,7 @@ async def query(
     checkpoint_callback=None,
 ) -> AsyncIterator[dict[str, Any]]:
     restored_state = dict(execution_state or {})
+    pending_tool_calls: list[dict[str, Any]]
     if restored_state:
         messages = [_message_from_dict(item) for item in restored_state["messages"]]
         pending_tool_calls = list(restored_state.get("pending_tool_calls") or [])
@@ -47,7 +48,7 @@ async def query(
             *(history or []),
             Message(role="user", content=parse_image_references(user_message, cwd)),
         ]
-        pending_tool_calls: list[dict[str, Any]] = []
+        pending_tool_calls = []
         next_tool_index = 0
     tool_definitions = tool_registry.definitions()
     executor = ToolExecutor(tool_registry)
@@ -64,6 +65,8 @@ async def query(
     last_actual_usage: dict[str, int] | None = restored_state.get("last_actual_usage")
     resumed_approval_request = restored_state.get("approval_request")
     resumed_approval_decision = restored_state.get("approval_decision")
+    resumed_approval_decisions = dict(restored_state.get("approval_decisions") or {})
+    active_tool_call_id = ""
 
     def checkpoint_state() -> dict[str, Any]:
         return {
@@ -80,8 +83,13 @@ async def query(
             "last_actual_usage": last_actual_usage,
         }
 
-    async def background_approval_callback(request: dict[str, Any]) -> str:
+    async def background_approval_callback(request: dict[str, Any]) -> ToolDecision:
         nonlocal resumed_approval_decision
+        if active_tool_call_id in resumed_approval_decisions:
+            return cast(
+                ToolDecision,
+                resumed_approval_decisions.pop(active_tool_call_id),
+            )
         if resumed_approval_decision:
             if request != resumed_approval_request:
                 raise RuntimeError("approval checkpoint does not match the pending tool call")
@@ -97,10 +105,12 @@ async def query(
             raise ApprovalPending()
         if not approval_callback:
             return "deny"
-        result = approval_callback(request)
+        interactive_request = dict(request)
+        interactive_request["tool_call_id"] = active_tool_call_id
+        result = approval_callback(interactive_request)
         if inspect.isawaitable(result):
             result = await result
-        return str(result)
+        return cast(ToolDecision, result)
 
     context = ToolContext(
         cwd=cwd,
@@ -119,8 +129,18 @@ async def query(
             for index in range(next_tool_index, len(pending_tool_calls)):
                 next_tool_index = index
                 call = pending_tool_calls[index]
+                active_tool_call_id = str(call.get("id") or "")
                 name = call.get("function", {}).get("name", "unknown")
-                yield {"type": "tool_call", "name": name, "input": _tool_input(call)}
+                tool = tool_registry.get(str(name))
+                yield {
+                    "type": "tool_call",
+                    "tool_call_id": str(call.get("id") or ""),
+                    "name": name,
+                    "input": _tool_input(call),
+                    "raw_call": dict(call),
+                    "is_read_only": bool(tool and tool.is_read_only),
+                    "is_idempotent": bool(tool and tool.is_idempotent),
+                }
                 results = await executor.execute_all([call], context)
                 raise_if_cancelled(cancellation_check)
                 for retry_event in tool_retry_events:
@@ -129,6 +149,7 @@ async def query(
                 for result in results:
                     yield {
                         "type": "tool_result",
+                        "tool_call_id": result.tool_use_id or "",
                         "name": _tool_name_by_id([call], result.tool_use_id or ""),
                         "result": result.content,
                         "is_error": result.is_error,
@@ -303,7 +324,29 @@ async def query(
             reasoning_content=thinking or None,
         )
         messages.append(assistant_message)
-        yield {"type": "turn_complete", "turn": turn, "stop_reason": stop_reason}
+        actionable_tool_calls = False
+        if not finalizing and (stop_reason == "tool_use" or tool_calls):
+            signature = _tool_batch_signature(tool_calls)
+            repeated_batches = (
+                repeated_batches + 1 if signature and signature == last_signature else 1
+            )
+            last_signature = signature
+            if tool_call_count + len(tool_calls) > config.agent.max_tool_calls:
+                limit_reason = "tool call limit reached"
+            elif repeated_batches >= config.agent.stagnation_threshold:
+                limit_reason = "repeated-call stagnation detected"
+            actionable_tool_calls = not limit_reason
+        yield {
+            "type": "turn_complete",
+            "turn": turn,
+            "stop_reason": stop_reason,
+            "message": _message_to_dict(assistant_message),
+            "tool_actions": (
+                [_durable_tool_action(call, tool_registry) for call in tool_calls]
+                if actionable_tool_calls
+                else []
+            ),
+        }
 
         if finalizing:
             break
@@ -311,13 +354,6 @@ async def query(
         if stop_reason != "tool_use" and not tool_calls:
             break
 
-        signature = _tool_batch_signature(tool_calls)
-        repeated_batches = repeated_batches + 1 if signature and signature == last_signature else 1
-        last_signature = signature
-        if tool_call_count + len(tool_calls) > config.agent.max_tool_calls:
-            limit_reason = "tool call limit reached"
-        elif repeated_batches >= config.agent.stagnation_threshold:
-            limit_reason = "repeated-call stagnation detected"
         if limit_reason:
             finalizing = True
             messages.append(Message(role="user", content=_finalization_prompt(limit_reason)))
@@ -349,7 +385,7 @@ def _message_to_dict(message: Message) -> dict[str, Any]:
 
 def _message_from_dict(value: dict[str, Any]) -> Message:
     return Message(
-        role=str(value["role"]),
+        role=cast(Role, value["role"]),
         content=value["content"],
         name=value.get("name"),
         tool_call_id=value.get("tool_call_id"),
@@ -393,6 +429,23 @@ def _tool_input(call: dict[str, Any]) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {"raw": raw}
     return parsed if isinstance(parsed, dict) else {"value": parsed}
+
+
+def _durable_tool_action(
+    call: dict[str, Any],
+    tool_registry: ToolRegistry,
+) -> dict[str, Any]:
+    tool_call_id = str(call.get("id") or "")
+    tool_name = _tool_name_by_id([call], tool_call_id)
+    tool = tool_registry.get(tool_name)
+    return {
+        "tool_call_id": tool_call_id,
+        "tool_name": tool_name,
+        "arguments": _tool_input(call),
+        "raw_call": dict(call),
+        "is_read_only": bool(tool and tool.is_read_only),
+        "is_idempotent": bool(tool and tool.is_idempotent),
+    }
 
 
 def _tool_name_by_id(calls: list[dict[str, Any]], tool_call_id: str) -> str:

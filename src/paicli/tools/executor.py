@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from contextlib import suppress
+from typing import Any, cast
 from uuid import uuid4
 
 from paicli.cancellation import TaskCanceled
@@ -131,7 +132,7 @@ class ToolExecutor:
             raise
         except Exception as exc:  # noqa: BLE001 - tool errors must flow back to the model
             if tool and _must_audit(tool):
-                try:
+                with suppress(OSError):
                     audit.record(
                         tool_name=tool.name,
                         input_data=payload,
@@ -140,8 +141,6 @@ class ToolExecutor:
                         cwd=context.cwd,
                         reason=str(exc),
                     )
-                except OSError:
-                    pass
             return ToolResult(
                 tool_use_id=tool_call_id,
                 content=f'Tool "{name}" execution error: {exc}',
@@ -251,9 +250,7 @@ class ToolExecutor:
         mode = context.config.policy.hitl_mode
         if tool.mandatory_confirmation:
             pass
-        elif mode == "never":
-            return "approve"
-        elif tool.name in context.session_allowed_tools:
+        elif mode == "never" or tool.name in context.session_allowed_tools:
             return "approve"
         if (
             mode == "auto"
@@ -273,7 +270,7 @@ class ToolExecutor:
         )
         if asyncio.iscoroutine(result):
             result = await result
-        return result
+        return cast(ToolDecision, result)
 
     def _preflight(self, tool: Tool, payload: dict[str, Any], context: ToolContext) -> None:
         if tool.name in {"bash", "execute_command"}:
@@ -281,12 +278,14 @@ class ToolExecutor:
 
 
 def _tool_call_name(call: dict[str, Any]) -> str:
-    function = call.get("function") if isinstance(call.get("function"), dict) else {}
+    raw_function = call.get("function")
+    function = raw_function if isinstance(raw_function, dict) else {}
     return str(function.get("name") or call.get("name") or "")
 
 
 def _tool_call_arguments(call: dict[str, Any]) -> dict[str, Any]:
-    function = call.get("function") if isinstance(call.get("function"), dict) else {}
+    raw_function = call.get("function")
+    function = raw_function if isinstance(raw_function, dict) else {}
     arguments = function.get("arguments", call.get("arguments", {}))
     if isinstance(arguments, str):
         import json

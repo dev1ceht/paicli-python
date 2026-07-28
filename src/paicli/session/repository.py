@@ -22,12 +22,16 @@ from paicli.session.integrity import (
 )
 from paicli.session.models import (
     BlobReference,
+    PendingAction,
     SessionEvent,
+    SessionLease,
     SessionMessage,
     SessionRecord,
     SessionView,
     StoredBlob,
+    ToolActionSpec,
 )
+from paicli.session.operational import PendingActionStore, SessionLeaseStore
 from paicli.session.replay import message_from_event, rebuild_session_view
 from paicli.session.schema import connect, ensure_schema
 from paicli.session.validation import validate_event_payload
@@ -112,12 +116,57 @@ class SessionRepository:
             raise RuntimeError(f"created session disappeared: {session_id}")
         return record
 
+    def acquire_session_lease(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        ttl_seconds: int = 60,
+    ) -> SessionLease:
+        if not owner_id:
+            raise ValueError("lease owner_id must be non-empty")
+        if ttl_seconds <= 0:
+            raise ValueError("lease ttl_seconds must be positive")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_leaseable_session(connection, session_id)
+            return SessionLeaseStore.acquire(
+                connection,
+                session_id,
+                owner_id=owner_id,
+                ttl_seconds=ttl_seconds,
+            )
+
+    def refresh_session_lease(
+        self,
+        session_id: str,
+        token: str,
+        *,
+        ttl_seconds: int = 60,
+    ) -> SessionLease:
+        if ttl_seconds <= 0:
+            raise ValueError("lease ttl_seconds must be positive")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return SessionLeaseStore.refresh(
+                connection,
+                session_id,
+                token,
+                ttl_seconds=ttl_seconds,
+            )
+
+    def release_session_lease(self, session_id: str, token: str) -> bool:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return SessionLeaseStore.release(connection, session_id, token)
+
     def update_session_metadata(
         self,
         session_id: str,
         *,
         title: str | None = None,
         metadata: dict[str, Any] | None = None,
+        lease_token: str | None = None,
     ) -> SessionRecord:
         metadata_patch = _event_metadata(metadata or {}, preserve_none=True)
         event_payload: dict[str, Any] = dict(metadata_patch)
@@ -129,7 +178,11 @@ class SessionRepository:
         now = _now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            self._require_writable_session(connection, session_id)
+            self._require_writable_session(
+                connection,
+                session_id,
+                lease_token=lease_token,
+            )
             row = connection.execute(
                 "select title, metadata_json from sessions where id = ?",
                 (session_id,),
@@ -170,6 +223,7 @@ class SessionRepository:
         turn_id: str | None = None,
         idempotency_key: str | None = None,
         blob_refs: list[BlobReference] | tuple[BlobReference, ...] = (),
+        lease_token: str | None = None,
     ) -> SessionEvent:
         if event_type in RESERVED_PUBLIC_EVENT_TYPES:
             raise ValueError(
@@ -179,7 +233,7 @@ class SessionRepository:
         normalized_blob_refs = tuple(blob_refs)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            self._require_writable_session(connection, session_id)
+            self._require_writable_session(connection, session_id, lease_token=lease_token)
             if idempotency_key is not None:
                 row = connection.execute(
                     """
@@ -224,6 +278,7 @@ class SessionRepository:
         interruption_reason: str | None = None,
         turn_id: str | None = None,
         idempotency_key: str | None = None,
+        lease_token: str | None = None,
     ) -> SessionMessage:
         prepared = self._prepare_message(
             session_id,
@@ -240,10 +295,456 @@ class SessionRepository:
             turn_id=turn_id,
             idempotency_key=idempotency_key,
             blob_refs=prepared.blob_refs,
+            lease_token=lease_token,
         )
         return message_from_event(event, blob_loader=self._load_blob_bytes)
 
-    def begin_turn(self, session_id: str, *, turn_id: str, user_content: str) -> SessionMessage:
+    def prepare_tool_actions(
+        self,
+        session_id: str,
+        *,
+        turn_id: str,
+        model_turn: int,
+        assistant_content: str,
+        reasoning_content: str | None = None,
+        actions: tuple[ToolActionSpec, ...],
+        lease_token: str | None = None,
+    ) -> tuple[PendingAction, ...]:
+        if not actions:
+            raise ValueError("tool action batch must not be empty")
+        if len({action.tool_call_id for action in actions}) != len(actions):
+            raise ValueError("tool action ids must be unique within a batch")
+        for action in actions:
+            if not action.tool_call_id or not action.tool_name:
+                raise ValueError("tool actions require a call id and name")
+        message_key = f"{turn_id}:assistant-step:{model_turn}"
+        prepared_message = self._prepare_message(
+            session_id,
+            role="assistant",
+            content=assistant_content,
+            idempotency_key=message_key,
+        )
+        if reasoning_content:
+            prepared_message.payload["parts"][0]["metadata"]["reasoning_content"] = (
+                reasoning_content
+            )
+        prepared_message.payload["parts"].extend(
+            {
+                "kind": "tool_call",
+                "content": "",
+                "metadata": {
+                    "tool_call_id": action.tool_call_id,
+                    "tool_name": action.tool_name,
+                    "arguments": action.arguments,
+                    "raw_call": action.raw_call,
+                },
+            }
+            for action in actions
+        )
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_writable_session(
+                connection,
+                session_id,
+                lease_token=lease_token,
+            )
+            self._append_event_in_transaction(
+                connection,
+                session_id=session_id,
+                event_type=prepared_message.event_type,
+                payload=prepared_message.payload,
+                turn_id=turn_id,
+                idempotency_key=message_key,
+                blob_refs=prepared_message.blob_refs,
+            )
+            for batch_index, action in enumerate(actions):
+                payload = {
+                    "tool_call_id": action.tool_call_id,
+                    "tool_name": action.tool_name,
+                    "arguments": action.arguments,
+                    "raw_call": action.raw_call,
+                    "is_read_only": action.is_read_only,
+                    "is_idempotent": action.is_idempotent,
+                    "model_turn": model_turn,
+                    "batch_index": batch_index,
+                    "status": "prepared",
+                }
+                self._append_event_in_transaction(
+                    connection,
+                    session_id=session_id,
+                    event_type="pending_action.prepared",
+                    payload=payload,
+                    turn_id=turn_id,
+                    idempotency_key=f"{turn_id}:action:{action.tool_call_id}:prepared",
+                )
+                PendingActionStore.insert_prepared(
+                    connection,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    model_turn=model_turn,
+                    batch_index=batch_index,
+                    action=action,
+                    now=now,
+                )
+        return tuple(
+            action
+            for action in self.list_pending_actions(session_id)
+            if action.tool_call_id in {spec.tool_call_id for spec in actions}
+        )
+
+    def list_pending_actions(
+        self,
+        session_id: str,
+        *,
+        include_settled: bool = False,
+    ) -> list[PendingAction]:
+        with self._connect() as connection:
+            return PendingActionStore.list(
+                connection,
+                session_id,
+                include_settled=include_settled,
+            )
+
+    def start_tool_action(
+        self,
+        session_id: str,
+        tool_call_id: str,
+        *,
+        lease_token: str | None = None,
+    ) -> PendingAction:
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_writable_session(
+                connection,
+                session_id,
+                lease_token=lease_token,
+            )
+            row = connection.execute(
+                """
+                select turn_id, status
+                from pending_actions
+                where session_id = ? and tool_call_id = ?
+                """,
+                (session_id, tool_call_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"pending tool action not found: {tool_call_id}")
+            if str(row["status"]) in {"completed", "abandoned"}:
+                raise ValueError(f"tool action is already settled: {tool_call_id}")
+            if str(row["status"]) != "executing":
+                started_key = f"{row['turn_id']}:action:{tool_call_id}:started"
+                if not self._event_idempotency_key_exists(
+                    connection,
+                    session_id,
+                    started_key,
+                ):
+                    self._append_event_in_transaction(
+                        connection,
+                        session_id=session_id,
+                        event_type="pending_action.started",
+                        payload={"tool_call_id": tool_call_id},
+                        turn_id=str(row["turn_id"]),
+                        idempotency_key=started_key,
+                    )
+                PendingActionStore.set_status(
+                    connection,
+                    session_id,
+                    tool_call_id,
+                    status="executing",
+                    now=now,
+                    expected_statuses=("prepared", "waiting_approval"),
+                )
+        return self._require_pending_action(session_id, tool_call_id)
+
+    def request_tool_approval(
+        self,
+        session_id: str,
+        tool_call_id: str,
+        *,
+        lease_token: str | None = None,
+    ) -> PendingAction:
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_writable_session(
+                connection,
+                session_id,
+                lease_token=lease_token,
+            )
+            action = PendingActionStore.get(connection, session_id, tool_call_id)
+            if action is None:
+                raise KeyError(f"pending tool action not found: {tool_call_id}")
+            if action.status in {"completed", "abandoned"}:
+                raise ValueError(f"tool action is already settled: {tool_call_id}")
+            requested_key = f"{action.turn_id}:approval:{tool_call_id}:requested"
+            if not self._event_idempotency_key_exists(
+                connection,
+                session_id,
+                requested_key,
+            ):
+                self._append_event_in_transaction(
+                    connection,
+                    session_id=session_id,
+                    event_type="approval.requested",
+                    payload={
+                        "tool_call_id": tool_call_id,
+                        "tool_name": action.tool_name,
+                    },
+                    turn_id=action.turn_id,
+                    idempotency_key=requested_key,
+                )
+            if not PendingActionStore.transition(
+                connection,
+                session_id,
+                tool_call_id,
+                status="waiting_approval",
+                approval_status="requested",
+                now=now,
+                expected_statuses=("prepared", "executing", "waiting_approval"),
+            ):
+                raise ValueError(f"tool action is already settled: {tool_call_id}")
+        return self._require_pending_action(session_id, tool_call_id)
+
+    def resolve_tool_approval(
+        self,
+        session_id: str,
+        tool_call_id: str,
+        *,
+        decision: str,
+        lease_token: str | None = None,
+    ) -> PendingAction:
+        if decision not in {"approve", "allow_session", "deny", "skip"}:
+            raise ValueError(f"unsupported tool approval decision: {decision}")
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_writable_session(
+                connection,
+                session_id,
+                lease_token=lease_token,
+            )
+            action = PendingActionStore.get(connection, session_id, tool_call_id)
+            if action is None:
+                raise KeyError(f"pending tool action not found: {tool_call_id}")
+            if action.status in {"completed", "abandoned"}:
+                raise ValueError(f"tool action is already settled: {tool_call_id}")
+            if action.approval_status != "requested":
+                raise ValueError(f"tool action is not waiting for approval: {tool_call_id}")
+            self._append_event_in_transaction(
+                connection,
+                session_id=session_id,
+                event_type="approval.resolved",
+                payload={
+                    "tool_call_id": tool_call_id,
+                    "decision": decision,
+                },
+                turn_id=action.turn_id,
+                idempotency_key=f"{action.turn_id}:approval:{tool_call_id}:resolved",
+            )
+            if not PendingActionStore.transition(
+                connection,
+                session_id,
+                tool_call_id,
+                status="executing",
+                approval_status=decision,
+                now=now,
+                expected_statuses=("waiting_approval",),
+                expected_approval="requested",
+            ):
+                raise ValueError(f"tool action approval changed concurrently: {tool_call_id}")
+        return self._require_pending_action(session_id, tool_call_id)
+
+    def complete_tool_action(
+        self,
+        session_id: str,
+        tool_call_id: str,
+        *,
+        content: str,
+        is_error: bool,
+        lease_token: str | None = None,
+    ) -> SessionMessage:
+        row = self._require_pending_action(session_id, tool_call_id)
+        message_key = f"{row.turn_id}:tool-result:{tool_call_id}"
+        prepared = self._prepare_message(
+            session_id,
+            role="tool",
+            content=content,
+            idempotency_key=message_key,
+        )
+        prepared.payload["parts"][0]["kind"] = "tool_result"
+        prepared.payload["parts"][0]["metadata"].update(
+            {
+                "tool_call_id": tool_call_id,
+                "tool_name": row.tool_name,
+                "is_error": is_error,
+                "execution_outcome": "error" if is_error else "completed",
+            }
+        )
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_writable_session(
+                connection,
+                session_id,
+                lease_token=lease_token,
+            )
+            current = connection.execute(
+                """
+                select status
+                from pending_actions
+                where session_id = ? and tool_call_id = ?
+                """,
+                (session_id, tool_call_id),
+            ).fetchone()
+            if current is None:
+                raise KeyError(f"pending tool action not found: {tool_call_id}")
+            if str(current["status"]) in {"completed", "abandoned"}:
+                raise ValueError(f"tool action is already settled: {tool_call_id}")
+            event = self._append_event_in_transaction(
+                connection,
+                session_id=session_id,
+                event_type=prepared.event_type,
+                payload=prepared.payload,
+                turn_id=row.turn_id,
+                idempotency_key=message_key,
+                blob_refs=prepared.blob_refs,
+            )
+            self._append_event_in_transaction(
+                connection,
+                session_id=session_id,
+                event_type="pending_action.completed",
+                payload={
+                    "tool_call_id": tool_call_id,
+                    "is_error": is_error,
+                },
+                turn_id=row.turn_id,
+                idempotency_key=f"{row.turn_id}:action:{tool_call_id}:completed",
+            )
+            if not PendingActionStore.set_status(
+                connection,
+                session_id,
+                tool_call_id,
+                status="completed",
+                now=now,
+                expected_statuses=("prepared", "executing", "waiting_approval"),
+            ):
+                raise ValueError(f"tool action is already settled: {tool_call_id}")
+        return message_from_event(event, blob_loader=self._load_blob_bytes)
+
+    def abandon_tool_action(
+        self,
+        session_id: str,
+        tool_call_id: str,
+        *,
+        reason: str,
+        lease_token: str | None = None,
+    ) -> SessionMessage:
+        row = self._require_pending_action(session_id, tool_call_id)
+        message_key, prepared = self._prepare_abandoned_action_message(
+            session_id,
+            row,
+            reason=reason,
+        )
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_writable_session(
+                connection,
+                session_id,
+                lease_token=lease_token,
+            )
+            current = connection.execute(
+                """
+                select status
+                from pending_actions
+                where session_id = ? and tool_call_id = ?
+                """,
+                (session_id, tool_call_id),
+            ).fetchone()
+            if current is None:
+                raise KeyError(f"pending tool action not found: {tool_call_id}")
+            if str(current["status"]) in {"completed", "abandoned"}:
+                raise ValueError(f"tool action is already settled: {tool_call_id}")
+            event = self._append_event_in_transaction(
+                connection,
+                session_id=session_id,
+                event_type=prepared.event_type,
+                payload=prepared.payload,
+                turn_id=row.turn_id,
+                idempotency_key=message_key,
+                blob_refs=prepared.blob_refs,
+            )
+            self._append_event_in_transaction(
+                connection,
+                session_id=session_id,
+                event_type="pending_action.abandoned",
+                payload={
+                    "tool_call_id": tool_call_id,
+                    "reason": reason,
+                    "execution_outcome": "unknown",
+                },
+                turn_id=row.turn_id,
+                idempotency_key=f"{row.turn_id}:action:{tool_call_id}:abandoned",
+            )
+            if not PendingActionStore.set_status(
+                connection,
+                session_id,
+                tool_call_id,
+                status="abandoned",
+                now=now,
+                expected_statuses=("prepared", "executing", "waiting_approval"),
+            ):
+                raise ValueError(f"tool action is already settled: {tool_call_id}")
+        return message_from_event(event, blob_loader=self._load_blob_bytes)
+
+    def _prepare_abandoned_action_message(
+        self,
+        session_id: str,
+        action: PendingAction,
+        *,
+        reason: str,
+    ) -> tuple[str, _PreparedMessage]:
+        content = (
+            f'Tool "{action.tool_name}" execution outcome is unknown after {reason}; '
+            "it may not have run, partially run, or completed and must not be "
+            "automatically repeated. Inspect workspace state before retrying."
+        )
+        message_key = f"{action.turn_id}:tool-result:{action.tool_call_id}:unknown"
+        prepared = self._prepare_message(
+            session_id,
+            role="tool",
+            content=content,
+            idempotency_key=message_key,
+        )
+        prepared.payload["parts"][0]["kind"] = "tool_result"
+        prepared.payload["parts"][0]["metadata"].update(
+            {
+                "tool_call_id": action.tool_call_id,
+                "tool_name": action.tool_name,
+                "is_error": True,
+                "execution_outcome": "unknown",
+                "interruption_reason": reason,
+            }
+        )
+        return message_key, prepared
+
+    def _require_pending_action(self, session_id: str, tool_call_id: str) -> PendingAction:
+        with self._connect() as connection:
+            action = PendingActionStore.get(connection, session_id, tool_call_id)
+        if action is None:
+            raise KeyError(f"pending tool action not found: {tool_call_id}")
+        return action
+
+    def begin_turn(
+        self,
+        session_id: str,
+        *,
+        turn_id: str,
+        user_content: str,
+        lease_token: str | None = None,
+    ) -> SessionMessage:
         prepared = self._prepare_message(
             session_id,
             role="user",
@@ -252,7 +753,11 @@ class SessionRepository:
         )
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            self._require_writable_session(connection, session_id)
+            self._require_writable_session(
+                connection,
+                session_id,
+                lease_token=lease_token,
+            )
             self._append_event_in_transaction(
                 connection,
                 session_id=session_id,
@@ -278,6 +783,7 @@ class SessionRepository:
         *,
         turn_id: str,
         assistant_content: str,
+        lease_token: str | None = None,
     ) -> SessionMessage:
         prepared = self._prepare_message(
             session_id,
@@ -287,7 +793,11 @@ class SessionRepository:
         )
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            self._require_writable_session(connection, session_id)
+            self._require_writable_session(
+                connection,
+                session_id,
+                lease_token=lease_token,
+            )
             event = self._append_event_in_transaction(
                 connection,
                 session_id=session_id,
@@ -314,6 +824,7 @@ class SessionRepository:
         turn_id: str,
         assistant_content: str,
         reason: str,
+        lease_token: str | None = None,
     ) -> SessionMessage | None:
         prepared = (
             self._prepare_message(
@@ -330,7 +841,52 @@ class SessionRepository:
         message_event: SessionEvent | None = None
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            self._require_writable_session(connection, session_id)
+            self._require_writable_session(
+                connection,
+                session_id,
+                lease_token=lease_token,
+            )
+            pending_actions = PendingActionStore.list(
+                connection,
+                session_id,
+                include_settled=False,
+                turn_id=turn_id,
+            )
+            for action in pending_actions:
+                action_message_key, action_message = self._prepare_abandoned_action_message(
+                    session_id,
+                    action,
+                    reason=reason,
+                )
+                self._append_event_in_transaction(
+                    connection,
+                    session_id=session_id,
+                    event_type=action_message.event_type,
+                    payload=action_message.payload,
+                    turn_id=turn_id,
+                    idempotency_key=action_message_key,
+                    blob_refs=action_message.blob_refs,
+                )
+                self._append_event_in_transaction(
+                    connection,
+                    session_id=session_id,
+                    event_type="pending_action.abandoned",
+                    payload={
+                        "tool_call_id": action.tool_call_id,
+                        "reason": reason,
+                        "execution_outcome": "unknown",
+                    },
+                    turn_id=turn_id,
+                    idempotency_key=(f"{turn_id}:action:{action.tool_call_id}:abandoned"),
+                )
+                PendingActionStore.set_status(
+                    connection,
+                    session_id,
+                    action.tool_call_id,
+                    status="abandoned",
+                    now=_now(),
+                    expected_statuses=("prepared", "executing", "waiting_approval"),
+                )
             if prepared is not None:
                 message_event = self._append_event_in_transaction(
                     connection,
@@ -410,12 +966,14 @@ class SessionRepository:
         session_id: str,
         *,
         idempotency_key: str | None = None,
+        lease_token: str | None = None,
     ) -> SessionEvent:
         return self.append_event(
             session_id,
             "context.reset",
             {},
             idempotency_key=idempotency_key,
+            lease_token=lease_token,
         )
 
     def hide_message(
@@ -424,6 +982,7 @@ class SessionRepository:
         message_id: str,
         *,
         idempotency_key: str | None = None,
+        lease_token: str | None = None,
     ) -> SessionEvent:
         view = self.rebuild_session_view(session_id)
         if not any(message.id == message_id for message in view.session_history):
@@ -433,13 +992,23 @@ class SessionRepository:
             "message.hidden",
             {"message_id": message_id},
             idempotency_key=idempotency_key,
+            lease_token=lease_token,
         )
 
-    def archive_session(self, session_id: str) -> SessionRecord:
+    def archive_session(
+        self,
+        session_id: str,
+        *,
+        lease_token: str | None = None,
+    ) -> SessionRecord:
         now = _now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            self._require_writable_session(connection, session_id)
+            self._require_writable_session(
+                connection,
+                session_id,
+                lease_token=lease_token,
+            )
             self._append_event_in_transaction(
                 connection,
                 session_id=session_id,
@@ -453,10 +1022,20 @@ class SessionRepository:
             )
         return self._require_session_record(session_id)
 
-    def unarchive_session(self, session_id: str) -> SessionRecord:
+    def unarchive_session(
+        self,
+        session_id: str,
+        *,
+        lease_token: str | None = None,
+    ) -> SessionRecord:
         now = _now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self._require_leaseable_session(
+                connection,
+                session_id,
+                lease_token=lease_token,
+            )
             row = connection.execute(
                 """
                 select status, archived_at, deleted_at
@@ -483,12 +1062,23 @@ class SessionRepository:
                 )
         return self._require_session_record(session_id)
 
-    def delete_session(self, session_id: str, *, retention_days: int = 30) -> SessionRecord:
+    def delete_session(
+        self,
+        session_id: str,
+        *,
+        retention_days: int = 30,
+        lease_token: str | None = None,
+    ) -> SessionRecord:
         now = datetime.now(UTC)
         deleted_at = now.isoformat()
         purge_after = (now + timedelta(days=retention_days)).isoformat()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self._require_writable_session(
+                connection,
+                session_id,
+                lease_token=lease_token,
+            )
             row = connection.execute(
                 """
                 select status, deleted_at
@@ -521,10 +1111,20 @@ class SessionRepository:
                 )
         return self._require_session_record(session_id)
 
-    def restore_session(self, session_id: str) -> SessionRecord:
+    def restore_session(
+        self,
+        session_id: str,
+        *,
+        lease_token: str | None = None,
+    ) -> SessionRecord:
         now = _now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self._require_leaseable_session(
+                connection,
+                session_id,
+                lease_token=lease_token,
+            )
             row = connection.execute(
                 """
                 select status, deleted_at
@@ -598,8 +1198,15 @@ class SessionRepository:
         through_sequence: int | None = None,
         workspace_root: str | Path | None = None,
         title: str | None = None,
+        lease_token: str | None = None,
     ) -> SessionRecord:
         self.verify_session(source_session_id)
+        with self._connect() as connection:
+            self._require_writable_session(
+                connection,
+                source_session_id,
+                lease_token=lease_token,
+            )
         source = self._require_session_record(source_session_id)
         if source.deleted_at is not None:
             raise SessionReadOnlyError(f"deleted session cannot be forked: {source_session_id}")
@@ -940,10 +1547,29 @@ class SessionRepository:
             blob_refs=blob_refs,
         )
 
+    def _event_idempotency_key_exists(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+        idempotency_key: str,
+    ) -> bool:
+        row = connection.execute(
+            """
+            select 1
+            from session_events
+            where session_id = ? and idempotency_key = ?
+            """,
+            (session_id, idempotency_key),
+        ).fetchone()
+        return row is not None
+
     def _require_writable_session(
         self,
         connection: sqlite3.Connection,
         session_id: str,
+        *,
+        lease_token: str | None = None,
+        enforce_lease: bool = True,
     ) -> None:
         row = connection.execute(
             """
@@ -961,6 +1587,36 @@ class SessionRepository:
             raise SessionReadOnlyError(f"session is archived: {session_id}")
         if row["deleted_at"] is not None:
             raise SessionReadOnlyError(f"session is deleted: {session_id}")
+        if not enforce_lease:
+            return
+        SessionLeaseStore.require_active_token(
+            connection,
+            session_id,
+            lease_token,
+            now=_now(),
+        )
+
+    def _require_leaseable_session(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+        *,
+        lease_token: str | None = None,
+    ) -> None:
+        row = connection.execute(
+            "select status from sessions where id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"session not found: {session_id}")
+        if row["status"] == "corrupt":
+            raise SessionReadOnlyError(f"session is corrupt and read-only: {session_id}")
+        SessionLeaseStore.require_active_token(
+            connection,
+            session_id,
+            lease_token,
+            now=_now(),
+        )
 
     def _ensure_schema(self) -> None:
         ensure_schema(self.db_path)

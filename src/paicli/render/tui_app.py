@@ -149,7 +149,34 @@ class PaiCliApp(App):
         self._update_status_bar()
         self._show_banner()
         self._show_restored_session_history()
+        if self._interactive_session is not None:
+            self.set_interval(20, self._refresh_session_lease)
+            recovery_state = self._interactive_session.prepare_recovery_state()
+            if recovery_state is not None:
+                self.query_one("#chat-log", ChatLog).add_info(
+                    "[yellow]Recovering interrupted tool execution state[/yellow]"
+                )
+                self._run_recovery_task(recovery_state)
         self.call_after_refresh(self.query_one(TextArea).focus)
+
+    def on_unmount(self) -> None:
+        if self._interactive_session is not None:
+            self._interactive_session.close()
+
+    def _refresh_session_lease(self) -> None:
+        if self._interactive_session is None:
+            return
+        try:
+            self._interactive_session.refresh_lease()
+        except Exception as exc:
+            self.query_one("#chat-log", ChatLog).add_info(
+                f"[bold red]Session lease lost:[/bold red] {exc}"
+            )
+            self._agent_running = False
+            self._phase = "idle"
+            if self._worker is not None and self._worker.is_running:
+                self._worker.cancel()
+            self._update_status_bar()
 
     def _show_banner(self) -> None:
         """Display a startup banner in the chat log."""
@@ -357,6 +384,26 @@ class PaiCliApp(App):
 
     def run_agent_task(self, message: str) -> None:
         """Launch the agent as a background task."""
+        self._prepare_agent_run()
+        chat_log = self.query_one("#chat-log", ChatLog)
+        chat_log.add_user_message(message)
+        if self._interactive_session is not None:
+            try:
+                self._interactive_session.begin_turn(message)
+            except Exception as exc:
+                self._agent_running = False
+                self._phase = "idle"
+                chat_log.add_info(f"[bold red]Session error:[/bold red] {exc}")
+                self._update_status_bar()
+                return
+        self._launch_agent_run(
+            message=message,
+            execution_state=None,
+            interruption_reason="agent_stopped",
+            error_label="Error",
+        )
+
+    def _prepare_agent_run(self) -> None:
         self._agent_running = True
         self._phase = "running"
         self._run_start_time = time.monotonic()
@@ -370,17 +417,15 @@ class PaiCliApp(App):
         self._task_thinking_buffers.clear()
         self._update_status_bar()
 
+    def _launch_agent_run(
+        self,
+        *,
+        message: str,
+        execution_state: dict[str, Any] | None,
+        interruption_reason: str,
+        error_label: str,
+    ) -> None:
         chat_log = self.query_one("#chat-log", ChatLog)
-        chat_log.add_user_message(message)
-        if self._interactive_session is not None:
-            try:
-                self._interactive_session.begin_turn(message)
-            except Exception as exc:
-                self._agent_running = False
-                self._phase = "idle"
-                chat_log.add_info(f"[bold red]Session error:[/bold red] {exc}")
-                self._update_status_bar()
-                return
 
         async def _run() -> None:
             completed = False
@@ -388,14 +433,19 @@ class PaiCliApp(App):
                 if self.agent is None:
                     chat_log.add_info("[red]Agent not initialized[/red]")
                     return
-                async for event in self.agent.run(message):
+                run = (
+                    self.agent.run(message, execution_state=execution_state)
+                    if execution_state is not None
+                    else self.agent.run(message)
+                )
+                async for event in run:
                     self.handle_event(event)
                     if event.get("type") == "done":
                         completed = True
                     if event.get("type") == "error":
                         break
             except Exception as exc:
-                chat_log.add_info(f"[bold red]Error:[/bold red] {exc}")
+                chat_log.add_info(f"[bold red]{error_label}:[/bold red] {exc}")
             finally:
                 try:
                     if self._interactive_session is not None:
@@ -405,7 +455,7 @@ class PaiCliApp(App):
                         else:
                             self._interactive_session.interrupt_turn(
                                 assistant_text,
-                                reason="agent_stopped",
+                                reason=interruption_reason,
                             )
                 except Exception as persistence_error:
                     self._recover_session_persistence_error(persistence_error, chat_log)
@@ -415,6 +465,15 @@ class PaiCliApp(App):
                 self._update_status_bar()
 
         self._worker = self.run_worker(_run(), exclusive=True)
+
+    def _run_recovery_task(self, execution_state: dict[str, Any]) -> None:
+        self._prepare_agent_run()
+        self._launch_agent_run(
+            message="",
+            execution_state=execution_state,
+            interruption_reason="recovery_stopped",
+            error_label="Recovery error",
+        )
 
     def handle_event(self, event: dict[str, Any]) -> None:
         """Process an agent event and update the UI."""
@@ -485,6 +544,20 @@ class PaiCliApp(App):
             chat_log = self.query_one("#chat-log", ChatLog)
             chat_log.add_info(f"Context reduced: {before}% → {after}% · {actions}")
         elif event_type == "turn_complete":
+            tool_actions = payload.get("tool_actions") or []
+            if self._interactive_session is not None and tool_actions:
+                message = payload.get("message") or {}
+                self._interactive_session.record_tool_batch(
+                    model_turn=int(payload.get("turn") or 0),
+                    assistant_content=str(message.get("content") or ""),
+                    reasoning_content=(
+                        str(message["reasoning_content"])
+                        if message.get("reasoning_content")
+                        else None
+                    ),
+                    actions=list(tool_actions),
+                )
+                self._session_text_buffer.clear()
             self._flush_thinking()
             stop_reason = str(payload.get("stop_reason") or "end_turn")
             if stop_reason != "tool_use" and self._text_buffer:
@@ -492,10 +565,18 @@ class PaiCliApp(App):
             elif stop_reason == "tool_use":
                 self._flush_text("Assistant Output")
         elif event_type == "tool_call":
+            if self._interactive_session is not None:
+                self._interactive_session.start_tool_action(str(payload.get("tool_call_id") or ""))
             self._flush_thinking()
             self._flush_text("Assistant Output")
             self._handle_tool_call(payload)
         elif event_type == "tool_result":
+            if self._interactive_session is not None:
+                self._interactive_session.complete_tool_action(
+                    str(payload.get("tool_call_id") or ""),
+                    content=str(payload.get("result") or ""),
+                    is_error=bool(payload.get("is_error")),
+                )
             self._flush_thinking()
             self._flush_text("Assistant Output")
             self._handle_tool_result(payload)
@@ -1437,8 +1518,14 @@ class PaiCliApp(App):
 
     async def request_approval(self, request: dict[str, Any]) -> str:
         """Wait for a safety decision embedded in the conversation canvas."""
+        tool_call_id = None
+        if self._interactive_session is not None:
+            tool_call_id = self._interactive_session.request_tool_approval(request)
         approval = InlineApprovalRequest(request)
-        return await self._wait_for_inline_decision(approval)
+        decision = await self._wait_for_inline_decision(approval)
+        if self._interactive_session is not None and tool_call_id is not None:
+            self._interactive_session.resolve_tool_approval(tool_call_id, decision)
+        return decision
 
     async def _wait_for_inline_decision(self, decision_widget: Any) -> Any:
         """Own the shared input and focus lifecycle for an inline decision."""

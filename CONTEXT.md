@@ -108,6 +108,18 @@ _Avoid_: shared credentials, endpoint defaults
 The accumulated conversation messages retained by an Agent across completed submissions; it remains available after a hot model switch.
 _Avoid_: transcript, chat log
 
+**Pending tool action**:
+A durable tool call that has been accepted from an Assistant model turn but has not yet been paired with a conclusive Tool result. Its local call payload, safety classification, execution status, and approval status support restart recovery without trusting model replay.
+_Avoid_: background task, child Agent, queued task
+
+**Session write lease**:
+A renewable, expiring ownership token that permits one interactive process to mutate a Session while allowing another process to use a different Session in the same workspace.
+_Avoid_: database lock, permanent ownership, process mutex
+
+**Unknown execution outcome**:
+The conservative result assigned when PaiCLI restarted or was interrupted after a side-effecting tool began but before its result became durable. Such a call is never automatically repeated; the model receives a paired Tool error directing it to inspect current state first.
+_Avoid_: failed tool, safe retry, rolled-back operation
+
 **Context-management evaluation**:
 A paired experiment that compares PaiCLI context-reduction variants for task quality and context consumption.
 _Avoid_: context test, compression test

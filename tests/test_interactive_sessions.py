@@ -4,11 +4,18 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from paicli.config import PaiCliConfig
 from paicli.entrypoints.repl import start_repl
 from paicli.render.textual_widgets import ChatLog
 from paicli.render.tui_app import PaiCliApp
-from paicli.session import SessionRepository
+from paicli.session import (
+    InteractiveSession,
+    SessionLeaseConflictError,
+    SessionRepository,
+    ToolActionSpec,
+)
 from paicli.types import Message
 
 
@@ -37,12 +44,179 @@ class EmptyCompletingAgent(HistoryAgent):
         yield {"type": "done", "total_tokens": 1, "total_turns": 1}
 
 
+class ToolCompletingAgent(HistoryAgent):
+    async def run(self, message: str):
+        assert message == "inspect with tool"
+        call = {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": '{"path":"note.txt"}'},
+        }
+        yield {"type": "text_delta", "text": "I will inspect."}
+        yield {
+            "type": "turn_complete",
+            "turn": 1,
+            "stop_reason": "tool_use",
+            "message": {
+                "role": "assistant",
+                "content": "I will inspect.",
+                "name": None,
+                "tool_call_id": None,
+                "tool_calls": [call],
+                "reasoning_content": "inspect reasoning",
+            },
+            "tool_actions": [
+                {
+                    "tool_call_id": "call_1",
+                    "tool_name": "read_file",
+                    "arguments": {"path": "note.txt"},
+                    "raw_call": call,
+                    "is_read_only": True,
+                    "is_idempotent": True,
+                }
+            ],
+        }
+        yield {
+            "type": "tool_call",
+            "tool_call_id": "call_1",
+            "name": "read_file",
+            "input": {"path": "note.txt"},
+            "raw_call": call,
+            "is_read_only": True,
+            "is_idempotent": True,
+        }
+        yield {
+            "type": "tool_result",
+            "tool_call_id": "call_1",
+            "name": "read_file",
+            "result": "1: hello",
+            "is_error": False,
+        }
+        yield {"type": "text_delta", "text": "Inspected."}
+        yield {
+            "type": "turn_complete",
+            "turn": 2,
+            "stop_reason": "end_turn",
+            "message": {
+                "role": "assistant",
+                "content": "Inspected.",
+                "name": None,
+                "tool_call_id": None,
+                "tool_calls": [],
+                "reasoning_content": None,
+            },
+        }
+        yield {"type": "done", "total_tokens": 3, "total_turns": 2}
+
+
 class InterruptibleAgent(HistoryAgent):
     async def run(self, message: str):
         assert message == "interrupt me"
         yield {"type": "text_delta", "text": "half answer"}
         await asyncio.Event().wait()
         yield {"type": "done", "total_tokens": 0, "total_turns": 1}
+
+
+class RecoveringAgent(HistoryAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self.execution_state: dict | None = None
+
+    async def run(self, message: str, *, execution_state=None):
+        assert message == ""
+        self.execution_state = execution_state
+        assert execution_state["pending_tool_calls"] == []
+        assert execution_state["messages"][-1]["role"] == "tool"
+        assert "must not be automatically repeated" in execution_state["messages"][-1]["content"]
+        yield {"type": "text_delta", "text": "I will inspect state before retrying."}
+        yield {
+            "type": "turn_complete",
+            "turn": 2,
+            "stop_reason": "end_turn",
+            "message": {
+                "role": "assistant",
+                "content": "I will inspect state before retrying.",
+                "name": None,
+                "tool_call_id": None,
+                "tool_calls": [],
+                "reasoning_content": None,
+            },
+            "tool_actions": [],
+        }
+        yield {"type": "done", "total_tokens": 1, "total_turns": 2}
+
+
+class SafeRecoveringAgent(HistoryAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self.resumed_calls = 0
+
+    async def run(self, message: str, *, execution_state=None):
+        assert message == ""
+        call = execution_state["pending_tool_calls"][0]
+        assert call["id"] == "call_read"
+        self.resumed_calls += 1
+        yield {
+            "type": "tool_call",
+            "tool_call_id": "call_read",
+            "name": "read_file",
+            "input": {"path": "note.txt"},
+            "raw_call": call,
+            "is_read_only": True,
+            "is_idempotent": True,
+        }
+        yield {
+            "type": "tool_result",
+            "tool_call_id": "call_read",
+            "name": "read_file",
+            "result": "1: hello",
+            "is_error": False,
+        }
+        yield {"type": "text_delta", "text": "Recovered safely."}
+        yield {
+            "type": "turn_complete",
+            "turn": 2,
+            "stop_reason": "end_turn",
+            "message": {
+                "role": "assistant",
+                "content": "Recovered safely.",
+                "name": None,
+                "tool_call_id": None,
+                "tool_calls": [],
+                "reasoning_content": None,
+            },
+            "tool_actions": [],
+        }
+        yield {"type": "done", "total_tokens": 1, "total_turns": 2}
+
+
+class SettledToolRecoveringAgent(HistoryAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self.resumed = False
+
+    async def run(self, message: str, *, execution_state=None):
+        assert message == ""
+        assert execution_state["pending_tool_calls"] == []
+        assert execution_state["messages"][-1]["role"] == "tool"
+        assert execution_state["messages"][-1]["content"] == "1: hello"
+        self.resumed = True
+        yield {"type": "text_delta", "text": "Continued after restart."}
+        yield {
+            "type": "turn_complete",
+            "turn": 2,
+            "stop_reason": "end_turn",
+            "message": {
+                "role": "assistant",
+                "content": "Continued after restart.",
+                "name": None,
+                "tool_call_id": None,
+                "tool_calls": [],
+                "reasoning_content": None,
+            },
+            "tool_actions": [],
+        }
+        yield {"type": "done", "total_tokens": 1, "total_turns": 2}
 
 
 class FailingCompletionRepository(SessionRepository):
@@ -85,6 +259,65 @@ def test_tui_resumes_latest_workspace_session_and_restores_model_history(
         ("user", "latest question"),
         ("assistant", "latest answer"),
     ]
+
+
+def test_interactive_session_skips_busy_session_and_rejects_explicit_conflict(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+
+    first = InteractiveSession(repository, workspace)
+    second = InteractiveSession(repository, workspace)
+
+    assert second.id != first.id
+    with pytest.raises(SessionLeaseConflictError):
+        InteractiveSession(repository, workspace, session_id=first.id)
+
+    first.close()
+    resumed = InteractiveSession(repository, workspace, session_id=first.id)
+    assert resumed.id == first.id
+
+
+def test_busy_archived_session_is_not_unarchived_before_lease_acquisition(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+    archived = repository.create_session(workspace)
+    lease = repository.acquire_session_lease(archived.id, owner_id="archiver")
+    repository.archive_session(archived.id, lease_token=lease.token)
+    interactive = InteractiveSession(repository, workspace)
+
+    with pytest.raises(SessionLeaseConflictError):
+        interactive.resume_session(archived.id)
+
+    record = repository.get_session(archived.id)
+    assert record is not None and record.archived_at is not None
+    interactive.close()
+    repository.release_session_lease(archived.id, lease.token)
+
+
+def test_busy_deleted_session_is_not_restored_before_lease_acquisition(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+    deleted = repository.create_session(workspace)
+    lease = repository.acquire_session_lease(deleted.id, owner_id="deleter")
+    repository.delete_session(deleted.id, lease_token=lease.token)
+    interactive = InteractiveSession(repository, workspace)
+
+    with pytest.raises(SessionLeaseConflictError):
+        interactive.restore_session(deleted.id)
+
+    record = repository.get_session(deleted.id)
+    assert record is not None and record.deleted_at is not None
+    interactive.close()
+    repository.release_session_lease(deleted.id, lease.token)
 
 
 def test_tui_persists_completed_submission_and_turn_boundary(tmp_path: Path) -> None:
@@ -140,6 +373,42 @@ def test_tui_persists_empty_assistant_fact_for_successful_turn(tmp_path: Path) -
     asyncio.run(run())
 
 
+def test_tui_persists_tool_call_and_result_for_model_replay(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+
+    async def run() -> None:
+        app = PaiCliApp(
+            agent=ToolCompletingAgent(),
+            cwd=str(workspace),
+            session_repository=repository,
+        )
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.run_agent_task("inspect with tool")
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+
+    asyncio.run(run())
+
+    restored = HistoryAgent()
+    PaiCliApp(
+        agent=restored,
+        cwd=str(workspace),
+        session_repository=repository,
+    )
+
+    assert [(message.role, message.content) for message in restored.history] == [
+        ("user", "inspect with tool"),
+        ("assistant", "I will inspect."),
+        ("tool", "1: hello"),
+        ("assistant", "Inspected."),
+    ]
+    assert restored.history[1].tool_calls[0]["id"] == "call_1"
+    assert restored.history[1].reasoning_content == "inspect reasoning"
+    assert restored.history[2].tool_call_id == "call_1"
+
+
 def test_tui_persists_one_partial_message_on_interrupt_without_model_replay(
     tmp_path: Path,
 ) -> None:
@@ -175,6 +444,351 @@ def test_tui_persists_one_partial_message_on_interrupt_without_model_replay(
             assert repository.list_events(app.session_id)[-1].type == "turn.interrupted"
 
     asyncio.run(run())
+
+
+def test_tui_restart_never_reexecutes_an_uncertain_write_action(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(workspace)
+    repository.begin_turn(session.id, turn_id="turn_crashed", user_content="change it")
+    repository.prepare_tool_actions(
+        session.id,
+        turn_id="turn_crashed",
+        model_turn=1,
+        assistant_content="",
+        actions=(
+            ToolActionSpec(
+                tool_call_id="call_write",
+                tool_name="write_file",
+                arguments={"path": "note.txt"},
+                raw_call={
+                    "id": "call_write",
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": '{"path":"note.txt"}',
+                    },
+                },
+                is_read_only=False,
+                is_idempotent=False,
+            ),
+        ),
+    )
+    repository.start_tool_action(session.id, "call_write")
+    agent = RecoveringAgent()
+
+    async def run() -> None:
+        app = PaiCliApp(
+            agent=agent,
+            cwd=str(workspace),
+            session_repository=repository,
+        )
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+
+    asyncio.run(run())
+
+    assert agent.execution_state is not None
+    settled = repository.list_pending_actions(session.id, include_settled=True)
+    assert settled[0].status == "abandoned"
+    assert repository.list_events(session.id)[-1].type == "turn.completed"
+
+
+def test_tui_restart_resumes_an_idempotent_read_action(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(workspace)
+    repository.begin_turn(session.id, turn_id="turn_crashed", user_content="inspect it")
+    repository.prepare_tool_actions(
+        session.id,
+        turn_id="turn_crashed",
+        model_turn=1,
+        assistant_content="",
+        actions=(
+            ToolActionSpec(
+                tool_call_id="call_read",
+                tool_name="read_file",
+                arguments={"path": "note.txt"},
+                raw_call={
+                    "id": "call_read",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path":"note.txt"}',
+                    },
+                },
+                is_read_only=True,
+                is_idempotent=True,
+            ),
+        ),
+    )
+    repository.start_tool_action(session.id, "call_read")
+    agent = SafeRecoveringAgent()
+
+    async def run() -> None:
+        app = PaiCliApp(
+            agent=agent,
+            cwd=str(workspace),
+            session_repository=repository,
+        )
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+
+    asyncio.run(run())
+
+    assert agent.resumed_calls == 1
+    settled = repository.list_pending_actions(session.id, include_settled=True)
+    assert settled[0].status == "completed"
+    history = repository.rebuild_session_view(session.id).model_messages
+    assert [message.role for message in history] == ["user", "assistant", "tool", "assistant"]
+
+
+def test_tui_restart_continues_after_a_durable_tool_result(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(workspace)
+    repository.begin_turn(session.id, turn_id="turn_crashed", user_content="inspect it")
+    repository.prepare_tool_actions(
+        session.id,
+        turn_id="turn_crashed",
+        model_turn=1,
+        assistant_content="",
+        actions=(
+            ToolActionSpec(
+                tool_call_id="call_read",
+                tool_name="read_file",
+                arguments={"path": "note.txt"},
+                raw_call={
+                    "id": "call_read",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path":"note.txt"}',
+                    },
+                },
+                is_read_only=True,
+                is_idempotent=True,
+            ),
+        ),
+    )
+    repository.start_tool_action(session.id, "call_read")
+    repository.complete_tool_action(
+        session.id,
+        "call_read",
+        content="1: hello",
+        is_error=False,
+    )
+    agent = SettledToolRecoveringAgent()
+
+    async def run() -> None:
+        app = PaiCliApp(
+            agent=agent,
+            cwd=str(workspace),
+            session_repository=repository,
+        )
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+
+    asyncio.run(run())
+
+    assert agent.resumed is True
+    assert repository.list_events(session.id)[-1].type == "turn.completed"
+
+
+def test_restart_preserves_a_durable_denial_without_reasking_or_executing(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(workspace)
+    repository.begin_turn(session.id, turn_id="turn_crashed", user_content="write it")
+    repository.prepare_tool_actions(
+        session.id,
+        turn_id="turn_crashed",
+        model_turn=1,
+        assistant_content="",
+        actions=(
+            ToolActionSpec(
+                tool_call_id="call_write",
+                tool_name="write_file",
+                arguments={"path": "note.txt"},
+                raw_call={"id": "call_write"},
+                is_read_only=False,
+                is_idempotent=False,
+            ),
+        ),
+    )
+    repository.start_tool_action(session.id, "call_write")
+    repository.request_tool_approval(session.id, "call_write")
+    repository.resolve_tool_approval(session.id, "call_write", decision="deny")
+
+    interactive = InteractiveSession(repository, workspace, session_id=session.id)
+    recovery = interactive.prepare_recovery_state()
+
+    assert recovery is not None
+    assert recovery["pending_tool_calls"] == []
+    assert recovery["messages"][-1]["role"] == "tool"
+    assert "was denied by approval policy" in recovery["messages"][-1]["content"]
+    action = repository.list_pending_actions(session.id, include_settled=True)[0]
+    assert action.status == "completed"
+    assert action.approval_status == "deny"
+    interactive.close()
+
+
+def test_restart_reuses_a_durable_approval_for_a_safe_replay(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(workspace)
+    repository.begin_turn(session.id, turn_id="turn_crashed", user_content="inspect it")
+    repository.prepare_tool_actions(
+        session.id,
+        turn_id="turn_crashed",
+        model_turn=1,
+        assistant_content="",
+        actions=(
+            ToolActionSpec(
+                tool_call_id="call_read",
+                tool_name="read_file",
+                arguments={"path": "note.txt"},
+                raw_call={"id": "call_read"},
+                is_read_only=True,
+                is_idempotent=True,
+            ),
+        ),
+    )
+    repository.start_tool_action(session.id, "call_read")
+    repository.request_tool_approval(session.id, "call_read")
+    repository.resolve_tool_approval(session.id, "call_read", decision="approve")
+
+    interactive = InteractiveSession(repository, workspace, session_id=session.id)
+    recovery = interactive.prepare_recovery_state()
+
+    assert recovery is not None
+    assert recovery["approval_decisions"] == {"call_read": "approve"}
+    assert [call["id"] for call in recovery["pending_tool_calls"]] == ["call_read"]
+    interactive.close()
+
+
+def test_approval_request_uses_tool_call_id_for_duplicate_calls(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+    interactive = InteractiveSession(repository, workspace)
+    interactive.begin_turn("write twice")
+    raw_calls = (
+        {"id": "call_1", "function": {"name": "write_file", "arguments": "{}"}},
+        {"id": "call_2", "function": {"name": "write_file", "arguments": "{}"}},
+    )
+    interactive.record_tool_batch(
+        model_turn=1,
+        assistant_content="",
+        reasoning_content=None,
+        actions=[
+            {
+                "tool_call_id": raw["id"],
+                "tool_name": "write_file",
+                "arguments": {},
+                "raw_call": raw,
+                "is_read_only": False,
+                "is_idempotent": False,
+            }
+            for raw in raw_calls
+        ],
+    )
+
+    matched = interactive.request_tool_approval(
+        {"tool_call_id": "call_2", "tool_name": "write_file", "input": {}}
+    )
+
+    assert matched == "call_2"
+    pending = repository.list_pending_actions(interactive.id)
+    assert [action.approval_status for action in pending] == [None, "requested"]
+    interactive.close()
+
+
+def test_tui_persists_inline_tool_approval_decision(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+    decision: str | None = None
+
+    async def run() -> None:
+        nonlocal decision
+        app = PaiCliApp(
+            agent=HistoryAgent(),
+            cwd=str(workspace),
+            session_repository=repository,
+        )
+        async with app.run_test(size=(100, 24)) as pilot:
+            call = {
+                "id": "call_write",
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "arguments": '{"path":"note.txt"}',
+                },
+            }
+            app._interactive_session.begin_turn("write it")
+            app.handle_event(
+                {
+                    "type": "turn_complete",
+                    "turn": 1,
+                    "stop_reason": "tool_use",
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [call],
+                    },
+                    "tool_actions": [
+                        {
+                            "tool_call_id": "call_write",
+                            "tool_name": "write_file",
+                            "arguments": {"path": "note.txt"},
+                            "raw_call": call,
+                            "is_read_only": False,
+                            "is_idempotent": False,
+                        }
+                    ],
+                }
+            )
+            app.handle_event(
+                {
+                    "type": "tool_call",
+                    "tool_call_id": "call_write",
+                    "name": "write_file",
+                    "input": {"path": "note.txt"},
+                }
+            )
+
+            async def request() -> None:
+                nonlocal decision
+                decision = await app.request_approval(
+                    {
+                        "tool_name": "write_file",
+                        "input": {"path": "note.txt"},
+                        "danger_level": "medium",
+                        "description": "Write a file",
+                    }
+                )
+
+            app.run_worker(request())
+            await pilot.pause()
+            await pilot.press("y")
+            await pilot.pause()
+
+    asyncio.run(run())
+
+    assert decision == "approve"
+    pending = repository.list_pending_actions(repository.list_sessions()[0].id)
+    assert pending[0].approval_status == "approve"
 
 
 def test_tui_reset_persists_context_boundary_across_restart(tmp_path: Path) -> None:
