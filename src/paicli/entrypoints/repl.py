@@ -72,7 +72,23 @@ SLASH_COMMANDS = [
 ]
 
 HELP_LINES = [
-    "/session list|new|resume|fork|archive|delete|restore - Manage durable sessions",
+    "会话与后台任务：",
+    "/session list - 查看当前工作区的会话",
+    "/session new [title] - 创建并切换到新会话",
+    "/session resume <session-id> - 恢复指定会话",
+    "/session fork [title] - 从当前边界派生新会话",
+    "/session archive - 归档当前会话",
+    "/session delete - 将当前会话移入回收站",
+    "/session restore <session-id> - 从回收站恢复会话",
+    (
+        "持久化：会话、Runtime thread 和后台任务统一保存在 "
+        "~/.paicli/sessions/sessions.db"
+    ),
+    "后台任务是提交会话的 child Session",
+    "后台任务的对话历史、工具调用状态和待审批状态会持久化",
+    "中断的运行中任务不会自动重试，可使用 /task retry",
+    "状态：queued | running | waiting_approval | completed | failed | canceled",
+    "",
     "可用命令：",
     "/help - 查看命令帮助",
     "/exit - 退出 PaiCLI",
