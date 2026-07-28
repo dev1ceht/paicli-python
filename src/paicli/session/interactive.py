@@ -52,7 +52,13 @@ class InteractiveSession:
     def restore_agent_history(self, agent: Any) -> None:
         agent.replace_history(self.agent_history)
 
-    def prepare_recovery_state(self) -> dict[str, Any] | None:
+    def discard_incomplete_turn(self, *, reason: str) -> bool:
+        if self._active_turn_id is None:
+            return False
+        self.interrupt_turn("", reason=reason)
+        return True
+
+    def prepare_background_task_recovery_state(self) -> dict[str, Any] | None:
         if self._active_turn_id is None:
             return None
         all_actions = [
@@ -341,10 +347,16 @@ class InteractiveSession:
         return self.record
 
     def refresh_lease(self) -> None:
-        self._lease = self.repository.refresh_session_lease(
-            self.id,
-            self._lease.token,
-        )
+        try:
+            self._lease = self.repository.refresh_session_lease(
+                self.id,
+                self._lease.token,
+            )
+        except SessionLeaseConflictError:
+            self._lease = self.repository.acquire_session_lease(
+                self.id,
+                owner_id=self._owner_id,
+            )
 
     def close(self) -> None:
         self.repository.release_session_lease(self.id, self._lease.token)
@@ -392,8 +404,10 @@ class InteractiveSession:
         next_lease: SessionLease | None = None,
     ) -> None:
         if record.id == self.id:
-            if next_lease is not None and next_lease.token != self._lease.token:
-                self.repository.release_session_lease(record.id, next_lease.token)
+            self._lease = next_lease or self.repository.acquire_session_lease(
+                record.id,
+                owner_id=self._owner_id,
+            )
             return
         acquired_lease = next_lease or self.repository.acquire_session_lease(
             record.id, owner_id=self._owner_id

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -234,6 +235,14 @@ class FailingCompletionRepository(SessionRepository):
         )
 
 
+def _expire_session_lease(database: Path, session_id: str) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "update session_leases set expires_at = ? where session_id = ?",
+            ("2000-01-01T00:00:00+00:00", session_id),
+        )
+
+
 def test_tui_resumes_latest_workspace_session_and_restores_model_history(
     tmp_path: Path,
 ) -> None:
@@ -278,6 +287,54 @@ def test_interactive_session_skips_busy_session_and_rejects_explicit_conflict(
     first.close()
     resumed = InteractiveSession(repository, workspace, session_id=first.id)
     assert resumed.id == first.id
+
+
+def test_resume_current_session_reacquires_expired_lease(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    database = tmp_path / "sessions.db"
+    repository = SessionRepository(database)
+    interactive = InteractiveSession(repository, workspace)
+    session_id = interactive.id
+
+    _expire_session_lease(database, session_id)
+
+    interactive.resume_session(session_id)
+    interactive.begin_turn("after resume")
+
+    assert interactive.id == session_id
+
+
+def test_refresh_lease_reacquires_expired_lease(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    database = tmp_path / "sessions.db"
+    repository = SessionRepository(database)
+    interactive = InteractiveSession(repository, workspace)
+
+    _expire_session_lease(database, interactive.id)
+
+    interactive.refresh_lease()
+    interactive.begin_turn("after heartbeat recovery")
+
+
+def test_resume_current_session_does_not_steal_live_replacement_lease(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    database = tmp_path / "sessions.db"
+    repository = SessionRepository(database)
+    interactive = InteractiveSession(repository, workspace)
+    session_id = interactive.id
+
+    _expire_session_lease(database, session_id)
+    replacement = repository.acquire_session_lease(session_id, owner_id="replacement-owner")
+
+    with pytest.raises(SessionLeaseConflictError):
+        interactive.resume_session(session_id)
+
+    repository.refresh_session_lease(session_id, replacement.token)
 
 
 def test_busy_archived_session_is_not_unarchived_before_lease_acquisition(
@@ -488,10 +545,78 @@ def test_tui_restart_interrupts_orphaned_turn_before_accepting_new_input(
         "turn.completed",
     ]
     interrupted = next(event for event in events if event.type == "turn.interrupted")
-    assert interrupted.payload["reason"] == "process_restarted_before_tool_state"
+    assert interrupted.payload["reason"] == "process_restarted"
 
 
-def test_tui_restart_never_reexecutes_an_uncertain_write_action(tmp_path: Path) -> None:
+def test_tui_discards_an_incomplete_turn_before_accepting_new_input(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+
+    async def run() -> str:
+        app = PaiCliApp(
+            agent=CompletingAgent(),
+            cwd=str(workspace),
+            session_repository=repository,
+        )
+        async with app.run_test(size=(80, 24)) as pilot:
+            assert app._interactive_session is not None
+            app._interactive_session.begin_turn("orphaned input")
+
+            app.run_agent_task("persist me")
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            return app.session_id
+
+    session_id = asyncio.run(run())
+
+    boundaries = [
+        event
+        for event in repository.list_events(session_id)
+        if event.type in {"turn.started", "turn.interrupted", "turn.completed"}
+    ]
+    assert [event.type for event in boundaries] == [
+        "turn.started",
+        "turn.interrupted",
+        "turn.started",
+        "turn.completed",
+    ]
+    assert boundaries[1].payload["reason"] == "superseded_by_new_submission"
+
+
+def test_tui_discards_an_incomplete_turn_before_switching_sessions(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+
+    async def run() -> tuple[str, str]:
+        app = PaiCliApp(
+            agent=HistoryAgent(),
+            cwd=str(workspace),
+            session_repository=repository,
+        )
+        async with app.run_test(size=(80, 24)):
+            assert app._interactive_session is not None
+            previous_id = app.session_id
+            app._interactive_session.begin_turn("orphaned input")
+
+            app._handle_slash_command("/session new")
+
+            return previous_id, app.session_id
+
+    previous_id, current_id = asyncio.run(run())
+
+    assert current_id != previous_id
+    boundary = repository.list_events(previous_id)[-1]
+    assert boundary.type == "turn.interrupted"
+    assert boundary.payload["reason"] == "superseded_by_session_command"
+
+
+def test_tui_restart_discards_an_uncertain_write_action(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     repository = SessionRepository(tmp_path / "sessions.db")
@@ -535,13 +660,15 @@ def test_tui_restart_never_reexecutes_an_uncertain_write_action(tmp_path: Path) 
 
     asyncio.run(run())
 
-    assert agent.execution_state is not None
+    assert agent.execution_state is None
     settled = repository.list_pending_actions(session.id, include_settled=True)
     assert settled[0].status == "abandoned"
-    assert repository.list_events(session.id)[-1].type == "turn.completed"
+    terminal = repository.list_events(session.id)[-1]
+    assert terminal.type == "turn.interrupted"
+    assert terminal.payload["reason"] == "process_restarted"
 
 
-def test_tui_restart_resumes_an_idempotent_read_action(tmp_path: Path) -> None:
+def test_tui_restart_discards_an_idempotent_read_action(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     repository = SessionRepository(tmp_path / "sessions.db")
@@ -585,14 +712,17 @@ def test_tui_restart_resumes_an_idempotent_read_action(tmp_path: Path) -> None:
 
     asyncio.run(run())
 
-    assert agent.resumed_calls == 1
+    assert agent.resumed_calls == 0
     settled = repository.list_pending_actions(session.id, include_settled=True)
-    assert settled[0].status == "completed"
+    assert settled[0].status == "abandoned"
     history = repository.rebuild_session_view(session.id).model_messages
-    assert [message.role for message in history] == ["user", "assistant", "tool", "assistant"]
+    assert [message.role for message in history] == ["user", "assistant", "tool"]
+    terminal = repository.list_events(session.id)[-1]
+    assert terminal.type == "turn.interrupted"
+    assert terminal.payload["reason"] == "process_restarted"
 
 
-def test_tui_restart_continues_after_a_durable_tool_result(tmp_path: Path) -> None:
+def test_tui_restart_closes_a_turn_after_a_durable_tool_result(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     repository = SessionRepository(tmp_path / "sessions.db")
@@ -642,8 +772,10 @@ def test_tui_restart_continues_after_a_durable_tool_result(tmp_path: Path) -> No
 
     asyncio.run(run())
 
-    assert agent.resumed is True
-    assert repository.list_events(session.id)[-1].type == "turn.completed"
+    assert agent.resumed is False
+    terminal = repository.list_events(session.id)[-1]
+    assert terminal.type == "turn.interrupted"
+    assert terminal.payload["reason"] == "process_restarted"
 
 
 def test_restart_preserves_a_durable_denial_without_reasking_or_executing(
@@ -675,7 +807,7 @@ def test_restart_preserves_a_durable_denial_without_reasking_or_executing(
     repository.resolve_tool_approval(session.id, "call_write", decision="deny")
 
     interactive = InteractiveSession(repository, workspace, session_id=session.id)
-    recovery = interactive.prepare_recovery_state()
+    recovery = interactive.prepare_background_task_recovery_state()
 
     assert recovery is not None
     assert recovery["pending_tool_calls"] == []
@@ -714,7 +846,7 @@ def test_restart_reuses_a_durable_approval_for_a_safe_replay(tmp_path: Path) -> 
     repository.resolve_tool_approval(session.id, "call_read", decision="approve")
 
     interactive = InteractiveSession(repository, workspace, session_id=session.id)
-    recovery = interactive.prepare_recovery_state()
+    recovery = interactive.prepare_background_task_recovery_state()
 
     assert recovery is not None
     assert recovery["approval_decisions"] == {"call_read": "approve"}
