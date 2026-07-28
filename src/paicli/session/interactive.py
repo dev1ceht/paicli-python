@@ -64,6 +64,10 @@ class InteractiveSession:
             if action.turn_id == self._active_turn_id
         ]
         if not all_actions:
+            self.interrupt_turn(
+                "",
+                reason="process_restarted_before_tool_state",
+            )
             return None
         pending = [
             action for action in all_actions if action.status not in {"completed", "abandoned"}

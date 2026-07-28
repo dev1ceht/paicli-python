@@ -446,6 +446,51 @@ def test_tui_persists_one_partial_message_on_interrupt_without_model_replay(
     asyncio.run(run())
 
 
+def test_tui_restart_interrupts_orphaned_turn_before_accepting_new_input(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(workspace)
+    repository.begin_turn(
+        session.id,
+        turn_id="turn_orphaned",
+        user_content="input before process exit",
+    )
+
+    async def run() -> None:
+        app = PaiCliApp(
+            agent=CompletingAgent(),
+            cwd=str(workspace),
+            session_repository=repository,
+        )
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.run_agent_task("persist me")
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+
+            assert "Session error: session already has an active turn" not in (
+                app.query_one(ChatLog).renderable_text()
+            )
+
+    asyncio.run(run())
+
+    events = repository.list_events(session.id)
+    assert [
+        event.type
+        for event in events
+        if event.type in {"turn.started", "turn.interrupted", "turn.completed"}
+    ] == [
+        "turn.started",
+        "turn.interrupted",
+        "turn.started",
+        "turn.completed",
+    ]
+    interrupted = next(event for event in events if event.type == "turn.interrupted")
+    assert interrupted.payload["reason"] == "process_restarted_before_tool_state"
+
+
 def test_tui_restart_never_reexecutes_an_uncertain_write_action(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
