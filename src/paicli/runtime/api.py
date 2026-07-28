@@ -219,14 +219,7 @@ class RuntimeApiServer:
             cwd=self.cwd,
         )
         try:
-            recovery_state = interactive.prepare_recovery_state()
-            if recovery_state is not None:
-                await self._execute_session_turn(
-                    interactive,
-                    engine,
-                    "",
-                    execution_state=recovery_state,
-                )
+            interactive.discard_incomplete_turn(reason="superseded_by_new_runtime_turn")
             interactive.begin_turn(message)
             text = await self._execute_session_turn(interactive, engine, message)
             return {"thread_id": thread_id, "text": text}
@@ -503,7 +496,7 @@ class RuntimeApiServer:
                 cwd=self.cwd,
                 cancellation_check=cancellation_check,
             )
-            recovery_state = interactive.prepare_recovery_state()
+            recovery_state = interactive.prepare_background_task_recovery_state()
             if recovery_state is None:
                 interactive.begin_turn(prompt)
             active_state = recovery_state or execution_state

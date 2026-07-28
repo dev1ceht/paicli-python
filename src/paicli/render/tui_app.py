@@ -150,12 +150,13 @@ class PaiCliApp(App):
         self._show_restored_session_history()
         if self._interactive_session is not None:
             self.set_interval(20, self._refresh_session_lease)
-            recovery_state = self._interactive_session.prepare_recovery_state()
-            if recovery_state is not None:
+            if self._interactive_session.discard_incomplete_turn(
+                reason="process_restarted",
+            ):
                 self.query_one("#chat-log", ChatLog).add_info(
-                    "[yellow]Recovering interrupted tool execution state[/yellow]"
+                    "[yellow]Previous incomplete turn was marked interrupted; "
+                    "it was not resumed.[/yellow]"
                 )
-                self._run_recovery_task(recovery_state)
         self.call_after_refresh(self.query_one(TextArea).focus)
 
     def on_unmount(self) -> None:
@@ -383,8 +384,17 @@ class PaiCliApp(App):
 
     def run_agent_task(self, message: str) -> None:
         """Launch the agent as a background task."""
-        self._prepare_agent_run()
         chat_log = self.query_one("#chat-log", ChatLog)
+        if self._interactive_session is not None and (
+            self._interactive_session.discard_incomplete_turn(
+                reason="superseded_by_new_submission",
+            )
+        ):
+            chat_log.add_info(
+                "[yellow]Previous incomplete turn was marked interrupted; "
+                "starting the new submission.[/yellow]"
+            )
+        self._prepare_agent_run()
         chat_log.add_user_message(message)
         if self._interactive_session is not None:
             try:
@@ -397,7 +407,6 @@ class PaiCliApp(App):
                 return
         self._launch_agent_run(
             message=message,
-            execution_state=None,
             interruption_reason="agent_stopped",
             error_label="Error",
         )
@@ -420,7 +429,6 @@ class PaiCliApp(App):
         self,
         *,
         message: str,
-        execution_state: dict[str, Any] | None,
         interruption_reason: str,
         error_label: str,
     ) -> None:
@@ -432,11 +440,7 @@ class PaiCliApp(App):
                 if self.agent is None:
                     chat_log.add_info("[red]Agent not initialized[/red]")
                     return
-                run = (
-                    self.agent.run(message, execution_state=execution_state)
-                    if execution_state is not None
-                    else self.agent.run(message)
-                )
+                run = self.agent.run(message)
                 async for event in run:
                     self.handle_event(event)
                     if event.get("type") == "done":
@@ -464,15 +468,6 @@ class PaiCliApp(App):
                 self._update_status_bar()
 
         self._worker = self.run_worker(_run(), exclusive=True)
-
-    def _run_recovery_task(self, execution_state: dict[str, Any]) -> None:
-        self._prepare_agent_run()
-        self._launch_agent_run(
-            message="",
-            execution_state=execution_state,
-            interruption_reason="recovery_stopped",
-            error_label="Recovery error",
-        )
 
     def handle_event(self, event: dict[str, Any]) -> None:
         """Process an agent event and update the UI."""
@@ -1052,6 +1047,15 @@ class PaiCliApp(App):
         subcommand = subcommand or "list"
         value = value.strip()
         try:
+            if subcommand in {"new", "resume", "fork", "archive", "delete", "restore"} and (
+                self._interactive_session.discard_incomplete_turn(
+                    reason="superseded_by_session_command",
+                )
+            ):
+                chat_log.add_info(
+                    "[yellow]Previous incomplete turn was marked interrupted; "
+                    "continuing with the Session command.[/yellow]"
+                )
             if subcommand == "list":
                 lines = []
                 for record in self._interactive_session.list_sessions():

@@ -649,7 +649,11 @@ class SessionRepository:
             raise ValueError("lease ttl_seconds must be positive")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            self._require_leaseable_session(connection, session_id)
+            self._require_leaseable_session(
+                connection,
+                session_id,
+                enforce_lease=False,
+            )
             return SessionLeaseStore.acquire(
                 connection,
                 session_id,
@@ -2263,6 +2267,7 @@ class SessionRepository:
         session_id: str,
         *,
         lease_token: str | None = None,
+        enforce_lease: bool = True,
     ) -> None:
         row = connection.execute(
             "select status from sessions where id = ?",
@@ -2272,6 +2277,8 @@ class SessionRepository:
             raise KeyError(f"session not found: {session_id}")
         if row["status"] == "corrupt":
             raise SessionReadOnlyError(f"session is corrupt and read-only: {session_id}")
+        if not enforce_lease:
+            return
         SessionLeaseStore.require_active_token(
             connection,
             session_id,
