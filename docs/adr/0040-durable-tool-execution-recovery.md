@@ -24,6 +24,11 @@ to continue a valid provider conversation.
 
 ## Restart policy
 
+An active Turn that stopped before producing any durable Tool Action has no executable state to
+resume. On startup PaiCLI appends `turn.interrupted` with the
+`process_restarted_before_tool_state` reason before accepting new input, so the persisted User
+message remains visible without leaving the Session permanently active.
+
 An active Turn with durable tool state is recovered automatically:
 
 - `prepared` means execution had not started and may resume.
