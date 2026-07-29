@@ -15,12 +15,85 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Static
+from textual.widgets import Button, Input, Label, ListItem, ListView, Static
 
 from paicli.render.textual_widgets import status_glyph
+from paicli.session.models import SessionRecord
 
 if TYPE_CHECKING:
     from paicli.plan.executor import ExecutionPlan, PlanReviewDecision
+
+
+class _SessionResumeItem(ListItem):
+    def __init__(self, record: SessionRecord) -> None:
+        self.session_id = record.id
+        model = f"{record.provider}/{record.model}" if record.model else "model unknown"
+        preview = record.latest_user_preview or "(no user messages)"
+        flags = "archived" if record.archived_at else record.status
+        super().__init__(
+            Label(
+                f"{record.title}\n"
+                f"{record.message_count} messages · {record.user_turn_count} turns · "
+                f"{model} · {flags}\n"
+                f"{preview}"
+            )
+        )
+
+
+class SessionResumePicker(ModalScreen[str | None]):
+    """Keyboard-selectable workspace session picker."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
+    DEFAULT_CSS = """
+    SessionResumePicker {
+        align: center middle;
+        background: $background 80%;
+    }
+    SessionResumePicker > Vertical {
+        width: 88;
+        height: 24;
+        background: #0d1117;
+        border: heavy #60d8ff;
+        padding: 1 2;
+    }
+    SessionResumePicker #session-picker-title {
+        height: 2;
+        color: #60d8ff;
+        text-style: bold;
+    }
+    SessionResumePicker ListView {
+        height: 1fr;
+    }
+    SessionResumePicker ListItem {
+        height: 4;
+        padding: 0 1;
+    }
+    SessionResumePicker #session-picker-footer {
+        height: 1;
+        color: $text-muted;
+    }
+    """
+
+    def __init__(self, records: tuple[SessionRecord, ...]) -> None:
+        super().__init__()
+        self.records = records
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static("Resume a session", id="session-picker-title")
+            yield ListView(*(_SessionResumeItem(record) for record in self.records))
+            yield Static("↑/↓ select · Enter resume · Esc cancel", id="session-picker-footer")
+
+    def on_mount(self) -> None:
+        self.query_one(ListView).focus()
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        item = event.item
+        if isinstance(item, _SessionResumeItem):
+            self.dismiss(item.session_id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class InlineApprovalRequest(Static):

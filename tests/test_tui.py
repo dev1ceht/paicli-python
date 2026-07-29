@@ -1575,6 +1575,7 @@ def test_agent_session_persistence_runs_off_ui_thread_in_event_order():
     class RecordingSession:
         def __init__(self) -> None:
             self.calls: list[tuple[str, int]] = []
+            self.context_checkpoint: dict | None = None
 
         def _record(self, name: str) -> None:
             self.calls.append((name, threading.get_ident()))
@@ -1600,8 +1601,14 @@ def test_agent_session_persistence_runs_off_ui_thread_in_event_order():
             assert tool_call_id == "call-1"
             self._record("complete_tool_action")
 
-        def complete_turn(self, assistant_text: str) -> None:
+        def complete_turn(
+            self,
+            assistant_text: str,
+            *,
+            context_checkpoint: dict | None = None,
+        ) -> None:
             assert assistant_text == "done"
+            self.context_checkpoint = context_checkpoint
             self._record("complete_turn")
 
         def interrupt_turn(self, assistant_text: str, *, reason: str) -> None:
@@ -1611,6 +1618,9 @@ def test_agent_session_persistence_runs_off_ui_thread_in_event_order():
             return None
 
     class ToolAgent:
+        def export_session_context(self):
+            return {"checkpoint_id": "ctx_from_agent"}
+
         async def run(self, message: str):
             assert message == "persist"
             yield {
@@ -1656,6 +1666,7 @@ def test_agent_session_persistence_runs_off_ui_thread_in_event_order():
                 "complete_turn",
             ]
             assert all(thread_id != ui_thread_id for _, thread_id in session.calls)
+            assert session.context_checkpoint == {"checkpoint_id": "ctx_from_agent"}
 
     asyncio.run(run())
 

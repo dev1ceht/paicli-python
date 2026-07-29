@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -315,9 +316,122 @@ def _migration_4(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migration_5(connection: sqlite3.Connection) -> None:
+    columns = (
+        "message_count integer not null default 0",
+        "user_turn_count integer not null default 0",
+        "latest_user_preview text",
+        "latest_assistant_preview text",
+        "provider text",
+        "model text",
+        "last_checkpoint_id text",
+        "last_compacted_at text",
+    )
+    for definition in columns:
+        connection.execute(f"alter table sessions add column {definition}")
+    connection.execute(
+        """
+        update sessions
+        set message_count = (
+                select count(*)
+                from session_events
+                where session_events.session_id = sessions.id
+                  and session_events.type in (
+                      'message.user', 'message.assistant',
+                      'message.assistant.partial', 'message.tool'
+                  )
+            ),
+            user_turn_count = (
+                select count(*)
+                from session_events
+                where session_events.session_id = sessions.id
+                  and session_events.type = 'message.user'
+            )
+        """
+    )
+    summaries: dict[str, dict[str, str | None]] = {}
+    rows = connection.execute(
+        """
+        select session_id, type, payload_json, created_at
+        from session_events
+        where type in (
+            'message.user', 'message.assistant', 'message.assistant.partial',
+            'context.compacted', 'context.checkpoint_created', 'context.reset'
+        )
+        order by session_id, sequence
+        """
+    ).fetchall()
+    for row in rows:
+        session_id = str(row["session_id"])
+        summary = summaries.setdefault(
+            session_id,
+            {
+                "latest_user_preview": None,
+                "latest_assistant_preview": None,
+                "provider": None,
+                "model": None,
+                "last_checkpoint_id": None,
+                "last_compacted_at": None,
+            },
+        )
+        event_type = str(row["type"])
+        payload = json.loads(str(row["payload_json"]))
+        if event_type == "message.user":
+            summary["latest_user_preview"] = _migration_message_preview(payload)
+        elif event_type.startswith("message.assistant"):
+            summary["latest_assistant_preview"] = _migration_message_preview(payload)
+        elif event_type == "context.compacted":
+            summary["provider"] = str(payload.get("provider") or "") or None
+            summary["model"] = str(payload.get("model") or "") or None
+            summary["last_compacted_at"] = str(row["created_at"])
+        elif event_type == "context.checkpoint_created":
+            summary["last_checkpoint_id"] = str(payload.get("checkpoint_id") or "") or None
+        elif event_type == "context.reset":
+            summary["provider"] = None
+            summary["model"] = None
+            summary["last_checkpoint_id"] = None
+            summary["last_compacted_at"] = None
+    for session_id, summary in summaries.items():
+        connection.execute(
+            """
+            update sessions
+            set latest_user_preview = ?, latest_assistant_preview = ?,
+                provider = ?, model = ?, last_checkpoint_id = ?, last_compacted_at = ?
+            where id = ?
+            """,
+            (
+                summary["latest_user_preview"],
+                summary["latest_assistant_preview"],
+                summary["provider"],
+                summary["model"],
+                summary["last_checkpoint_id"],
+                summary["last_compacted_at"],
+                session_id,
+            ),
+        )
+
+
+def _migration_message_preview(payload: object, *, limit: int = 160) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    parts = payload.get("parts")
+    if not isinstance(parts, list):
+        return None
+    text = " ".join(
+        str(part.get("content") or "")
+        for part in parts
+        if isinstance(part, dict) and part.get("kind", "text") == "text"
+    )
+    normalized = " ".join(text.split())
+    if not normalized:
+        return None
+    return normalized if len(normalized) <= limit else f"{normalized[: limit - 1]}…"
+
+
 _MIGRATIONS: dict[int, Migration] = {
     1: _migration_1,
     2: _migration_2,
     3: _migration_3,
     4: _migration_4,
+    5: _migration_5,
 }

@@ -1310,6 +1310,7 @@ class SessionRepository:
         *,
         turn_id: str,
         assistant_content: str,
+        context_checkpoint: dict[str, Any] | None = None,
         lease_token: str | None = None,
     ) -> SessionMessage:
         prepared = self._prepare_message(
@@ -1342,7 +1343,60 @@ class SessionRepository:
                 turn_id=turn_id,
                 idempotency_key=f"{turn_id}:completed",
             )
+            if context_checkpoint is not None and not self._checkpoint_is_current(
+                connection,
+                session_id,
+                str(context_checkpoint["checkpoint_id"]),
+            ):
+                checkpoint_id = str(context_checkpoint["checkpoint_id"])
+                self._append_event_in_transaction(
+                    connection,
+                    session_id=session_id,
+                    event_type="context.compacted",
+                    payload={
+                        "checkpoint_id": checkpoint_id,
+                        "summary": str(context_checkpoint["summary"]),
+                        "compaction": dict(context_checkpoint["compaction"]),
+                        "pressure": dict(context_checkpoint.get("pressure") or {}),
+                        "provider": str(context_checkpoint.get("provider") or ""),
+                        "model": str(context_checkpoint.get("model") or ""),
+                    },
+                    turn_id=turn_id,
+                    idempotency_key=f"{turn_id}:context-compacted",
+                )
+                self._append_event_in_transaction(
+                    connection,
+                    session_id=session_id,
+                    event_type="context.checkpoint_created",
+                    payload={
+                        "checkpoint_id": checkpoint_id,
+                        "messages": list(context_checkpoint["messages"]),
+                    },
+                    turn_id=turn_id,
+                    idempotency_key=f"{turn_id}:context-checkpoint",
+                )
         return message_from_event(event, blob_loader=self._load_blob_bytes)
+
+    @staticmethod
+    def _checkpoint_is_current(
+        connection: sqlite3.Connection,
+        session_id: str,
+        checkpoint_id: str,
+    ) -> bool:
+        row = connection.execute(
+            """
+            select payload_json
+            from session_events
+            where session_id = ? and type = 'context.checkpoint_created'
+            order by sequence desc
+            limit 1
+            """,
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        payload = json.loads(str(row["payload_json"]))
+        return isinstance(payload, dict) and payload.get("checkpoint_id") == checkpoint_id
 
     def interrupt_turn(
         self,
@@ -1936,7 +1990,10 @@ class SessionRepository:
             row = connection.execute(
                 """
                 select id, workspace_root, title, status, created_at, updated_at,
-                       archived_at, deleted_at, purge_after, metadata_json
+                       archived_at, deleted_at, purge_after, metadata_json,
+                       message_count, user_turn_count, latest_user_preview,
+                       latest_assistant_preview, provider, model,
+                       last_checkpoint_id, last_compacted_at
                 from sessions
                 where id = ?
                 """,
@@ -1966,7 +2023,10 @@ class SessionRepository:
             rows = connection.execute(
                 f"""
                 select id, workspace_root, title, status, created_at, updated_at,
-                       archived_at, deleted_at, purge_after, metadata_json
+                       archived_at, deleted_at, purge_after, metadata_json,
+                       message_count, user_turn_count, latest_user_preview,
+                       latest_assistant_preview, provider, model,
+                       last_checkpoint_id, last_compacted_at
                 from sessions
                 {where}
                 order by updated_at desc, id desc
@@ -2080,6 +2140,13 @@ class SessionRepository:
                 """,
                 (event_id, ordinal, reference.content_hash, reference.role),
             )
+        self._update_catalog_projection(
+            connection,
+            session_id=session_id,
+            event_type=event_type,
+            payload=payload,
+            timestamp=timestamp,
+        )
         connection.execute(
             """
             update sessions
@@ -2104,6 +2171,82 @@ class SessionRepository:
             source_event_id=source_event_id,
             blob_refs=blob_refs,
         )
+
+    @staticmethod
+    def _update_catalog_projection(
+        connection: sqlite3.Connection,
+        *,
+        session_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        timestamp: str,
+    ) -> None:
+        if event_type.startswith("message."):
+            role = str(payload.get("role") or "")
+            preview = _message_preview(payload)
+            if role == "user":
+                connection.execute(
+                    """
+                    update sessions
+                    set message_count = message_count + 1,
+                        user_turn_count = user_turn_count + 1,
+                        latest_user_preview = ?
+                    where id = ?
+                    """,
+                    (preview, session_id),
+                )
+            elif role == "assistant":
+                connection.execute(
+                    """
+                    update sessions
+                    set message_count = message_count + 1,
+                        latest_assistant_preview = ?
+                    where id = ?
+                    """,
+                    (preview, session_id),
+                )
+            elif role == "tool":
+                connection.execute(
+                    """
+                    update sessions
+                    set message_count = message_count + 1
+                    where id = ?
+                    """,
+                    (session_id,),
+                )
+        elif event_type == "context.compacted":
+            connection.execute(
+                """
+                update sessions
+                set provider = ?, model = ?, last_compacted_at = ?
+                where id = ?
+                """,
+                (
+                    str(payload.get("provider") or "") or None,
+                    str(payload.get("model") or "") or None,
+                    timestamp,
+                    session_id,
+                ),
+            )
+        elif event_type == "context.checkpoint_created":
+            connection.execute(
+                """
+                update sessions
+                set last_checkpoint_id = ?
+                where id = ?
+                """,
+                (str(payload["checkpoint_id"]), session_id),
+            )
+        elif event_type == "context.reset":
+            connection.execute(
+                """
+                update sessions
+                set provider = null, model = null,
+                    last_checkpoint_id = null, last_compacted_at = null
+                where id = ?
+                """,
+                (session_id,),
+            )
 
     def _event_idempotency_key_exists(
         self,
@@ -2307,7 +2450,30 @@ def _session_from_row(row: sqlite3.Row) -> SessionRecord:
         deleted_at=row["deleted_at"],
         purge_after=row["purge_after"],
         metadata=json.loads(row["metadata_json"]),
+        message_count=int(row["message_count"]),
+        user_turn_count=int(row["user_turn_count"]),
+        latest_user_preview=row["latest_user_preview"],
+        latest_assistant_preview=row["latest_assistant_preview"],
+        provider=row["provider"],
+        model=row["model"],
+        last_checkpoint_id=row["last_checkpoint_id"],
+        last_compacted_at=row["last_compacted_at"],
     )
+
+
+def _message_preview(payload: dict[str, Any], *, limit: int = 160) -> str | None:
+    parts = payload.get("parts")
+    if not isinstance(parts, list):
+        return None
+    text = " ".join(
+        str(part.get("content") or "")
+        for part in parts
+        if isinstance(part, dict) and part.get("kind", "text") in {"text", "tool_result"}
+    )
+    normalized = " ".join(text.split())
+    if not normalized:
+        return None
+    return normalized if len(normalized) <= limit else f"{normalized[: limit - 1]}…"
 
 
 def _event_from_row(row: sqlite3.Row) -> SessionEvent:

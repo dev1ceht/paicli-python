@@ -74,8 +74,11 @@ SLASH_COMMANDS = [
 HELP_LINES = [
     "会话与后台任务：",
     "/session list - 查看当前工作区的会话",
+    "/session show [session-id] - 查看会话详情与 catalog 摘要",
+    "/session rename <title> - 重命名当前会话",
     "/session new [title] - 创建并切换到新会话",
-    "/session resume <session-id> - 恢复指定会话",
+    "/session resume [session-id] - 恢复指定会话；省略 ID 时打开选择器",
+    "/session share [session-id] [--include-tool-results] - 导出脱敏 Markdown",
     "/session fork [title] - 从当前边界派生新会话",
     "/session archive - 归档当前会话",
     "/session delete - 将当前会话移入回收站",

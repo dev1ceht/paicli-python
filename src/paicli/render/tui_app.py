@@ -28,7 +28,11 @@ from paicli.render.textual_widgets import (
     StatusBar,
     status_glyph,
 )
-from paicli.render.tui_dialogs import InlineApprovalRequest, InlinePlanReview
+from paicli.render.tui_dialogs import (
+    InlineApprovalRequest,
+    InlinePlanReview,
+    SessionResumePicker,
+)
 from paicli.render.tui_events import UiEvent
 
 
@@ -492,7 +496,25 @@ class PaiCliApp(App):
                     if session is not None and turn_started:
                         assistant_text = "".join(self._session_text_buffer)
                         if completed:
-                            await self._run_session_call(session.complete_turn, assistant_text)
+                            export_context = getattr(
+                                self.agent,
+                                "export_session_context",
+                                None,
+                            )
+                            context_checkpoint = (
+                                export_context() if callable(export_context) else None
+                            )
+                            if context_checkpoint is None:
+                                await self._run_session_call(
+                                    session.complete_turn,
+                                    assistant_text,
+                                )
+                            else:
+                                await self._run_session_call(
+                                    session.complete_turn,
+                                    assistant_text,
+                                    context_checkpoint=context_checkpoint,
+                                )
                         else:
                             await self._run_session_call(
                                 session.interrupt_turn,
@@ -1110,27 +1132,65 @@ class PaiCliApp(App):
         subcommand = subcommand or "list"
         value = value.strip()
         try:
-            if subcommand in {"new", "resume", "fork", "archive", "delete", "restore"} and (
-                self._interactive_session.discard_incomplete_turn(
-                    reason="superseded_by_session_command",
-                )
+            if subcommand in {
+                "new",
+                "resume",
+                "fork",
+                "archive",
+                "delete",
+                "restore",
+            } and self._interactive_session.discard_incomplete_turn(
+                reason="superseded_by_session_command",
             ):
                 chat_log.add_info(
                     "[yellow]Previous incomplete turn was marked interrupted; "
                     "continuing with the Session command.[/yellow]"
                 )
             if subcommand == "list":
-                lines = []
-                for record in self._interactive_session.list_sessions():
-                    flags = [record.status]
-                    if record.id == self._interactive_session.id:
-                        flags.append("current")
-                    if record.archived_at is not None:
-                        flags.append("archived")
-                    if record.deleted_at is not None:
-                        flags.append("deleted")
-                    lines.append(f"{record.id}  {record.title}  [{', '.join(flags)}]")
+                lines = [
+                    self._format_session_summary(
+                        record,
+                        current=record.id == self._interactive_session.id,
+                    )
+                    for record in self._interactive_session.list_sessions()
+                ]
                 chat_log.add_info("\n".join(lines) or "(no sessions)")
+                return
+            if subcommand == "show":
+                record = self._interactive_session.show_session(value or None)
+                chat_log.add_info(self._format_session_details(record))
+                return
+            if subcommand == "rename":
+                if not value:
+                    raise ValueError("Usage: /session rename <title>")
+                record = self._interactive_session.rename_session(value)
+                chat_log.add_info(f"Renamed session {record.id} to {record.title}")
+                self._update_status_bar()
+                return
+            if subcommand == "share":
+                from paicli.session import SessionShareService
+
+                arguments = value.split()
+                include_tool_results = "--include-tool-results" in arguments
+                positional = [item for item in arguments if not item.startswith("--")]
+                unknown = [
+                    item
+                    for item in arguments
+                    if item.startswith("--") and item != "--include-tool-results"
+                ]
+                if unknown or len(positional) > 1:
+                    raise ValueError(
+                        "Usage: /session share [session-id] [--include-tool-results]"
+                    )
+                session_id = positional[0] if positional else self._interactive_session.id
+                record = self._interactive_session.show_session(session_id)
+                path = SessionShareService(
+                    self._interactive_session.repository
+                ).export_markdown(
+                    record.id,
+                    include_tool_results=include_tool_results,
+                )
+                chat_log.add_info(f"Shared session {record.id} to {path}")
                 return
             if subcommand == "new":
                 record = self._interactive_session.new_session(title=value or None)
@@ -1139,7 +1199,15 @@ class PaiCliApp(App):
                 return
             if subcommand == "resume":
                 if not value:
-                    raise ValueError("Usage: /session resume <session-id>")
+                    candidates = self._interactive_session.resume_candidates()
+                    if not candidates:
+                        chat_log.add_info("(no resumable sessions)")
+                        return
+                    self.push_screen(
+                        SessionResumePicker(candidates),
+                        self._resume_session_from_picker,
+                    )
+                    return
                 record = self._interactive_session.resume_session(value)
                 self._activate_interactive_session()
                 chat_log.add_info(f"Resumed session {record.id}")
@@ -1172,6 +1240,47 @@ class PaiCliApp(App):
             chat_log.add_info(f"[red]Session error:[/red] {exc}")
             return
         chat_log.add_info(f"[red]Unknown session command:[/red] {subcommand}")
+
+    def _resume_session_from_picker(self, session_id: str | None) -> None:
+        if session_id is None or self._interactive_session is None:
+            return
+        chat_log = self.query_one("#chat-log", ChatLog)
+        try:
+            record = self._interactive_session.resume_session(session_id)
+            self._activate_interactive_session()
+            chat_log.add_info(f"Resumed session {record.id}")
+        except (KeyError, RuntimeError, ValueError) as exc:
+            chat_log.add_info(f"[red]Session error:[/red] {exc}")
+
+    @staticmethod
+    def _format_session_summary(record: Any, *, current: bool = False) -> str:
+        flags = [record.status]
+        if current:
+            flags.append("current")
+        if record.archived_at is not None:
+            flags.append("archived")
+        if record.deleted_at is not None:
+            flags.append("deleted")
+        model = f"{record.provider}/{record.model}" if record.model else "model unknown"
+        preview = record.latest_user_preview or "(no user messages)"
+        return (
+            f"{record.id}  {record.title}  [{', '.join(flags)}]\n"
+            f"  {record.message_count} messages · {record.user_turn_count} turns · "
+            f"{model} · updated {record.updated_at}\n"
+            f"  user: {preview}"
+        )
+
+    @classmethod
+    def _format_session_details(cls, record: Any) -> str:
+        checkpoint = record.last_checkpoint_id or "none"
+        compacted = record.last_compacted_at or "never"
+        assistant = record.latest_assistant_preview or "(none)"
+        return (
+            f"{cls._format_session_summary(record)}\n"
+            f"  assistant: {assistant}\n"
+            f"  checkpoint: {checkpoint} · compacted: {compacted}\n"
+            f"  workspace: {record.workspace_root}"
+        )
 
     def _activate_interactive_session(self) -> None:
         if self._interactive_session is None:

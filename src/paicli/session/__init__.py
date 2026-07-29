@@ -21,6 +21,7 @@ from paicli.session.models import (
     ToolActionSpec,
 )
 from paicli.session.repository import SessionRepository
+from paicli.session.share import SessionShareService
 
 __all__ = [
     "BlobReference",
@@ -37,6 +38,7 @@ __all__ = [
     "SessionRecord",
     "SessionRelationship",
     "SessionRepository",
+    "SessionShareService",
     "SessionView",
     "StoredBlob",
     "ToolActionSpec",

@@ -46,13 +46,37 @@ class InteractiveSession:
 
     @property
     def agent_history(self) -> list[Message]:
-        return [
+        view = self.repository.rebuild_session_view(self.id)
+        checkpoint = view.context_checkpoint
+        checkpoint_sequence = view.context_checkpoint_sequence
+        if checkpoint is None or checkpoint_sequence is None:
+            return [_agent_message(message) for message in view.model_messages]
+
+        checkpoint_messages = checkpoint.get("messages")
+        if not isinstance(checkpoint_messages, list):
+            raise ValueError("context checkpoint messages must be a list")
+        event_sequences = {
+            event.id: event.sequence for event in self.repository.list_events(self.id)
+        }
+        tail = [
             _agent_message(message)
-            for message in self.repository.rebuild_session_view(self.id).model_messages
+            for message in view.model_messages
+            if event_sequences.get(message.event_id, 0) > checkpoint_sequence
         ]
+        return [
+            _agent_message_from_payload(item)
+            for item in checkpoint_messages
+            if isinstance(item, dict)
+        ] + tail
 
     def restore_agent_history(self, agent: Any) -> None:
-        agent.replace_history(self.agent_history)
+        history = self.agent_history
+        checkpoint = self.repository.rebuild_session_view(self.id).context_checkpoint
+        restore_context = getattr(agent, "restore_session_context", None)
+        if checkpoint is not None and callable(restore_context):
+            restore_context(history, checkpoint)
+            return
+        agent.replace_history(history)
 
     def discard_incomplete_turn(self, *, reason: str) -> bool:
         if self._active_turn_id is None:
@@ -225,12 +249,18 @@ class InteractiveSession:
         self._active_turn_id = turn_id
         return turn_id
 
-    def complete_turn(self, assistant_text: str) -> None:
+    def complete_turn(
+        self,
+        assistant_text: str,
+        *,
+        context_checkpoint: dict[str, Any] | None = None,
+    ) -> None:
         turn_id = self._require_active_turn()
         self.repository.complete_turn(
             self.id,
             turn_id=turn_id,
             assistant_content=assistant_text,
+            context_checkpoint=context_checkpoint,
             lease_token=self._lease.token,
         )
         self._active_turn_id = None
@@ -261,6 +291,34 @@ class InteractiveSession:
                 include_deleted=True,
             )
             if record.workspace_root == self.workspace_root
+        )
+
+    def rename_session(self, title: str) -> SessionRecord:
+        self._require_idle()
+        normalized = " ".join(title.split())
+        if not normalized:
+            raise ValueError("session title must be non-empty")
+        self.record = self.repository.update_session_metadata(
+            self.id,
+            title=normalized,
+            lease_token=self._lease.token,
+        )
+        return self.record
+
+    def show_session(self, session_id: str | None = None) -> SessionRecord:
+        return self._resolve_workspace_session(
+            session_id or self.id,
+            allow_archived=True,
+            allow_deleted=True,
+        )
+
+    def resume_candidates(self) -> tuple[SessionRecord, ...]:
+        return tuple(
+            record
+            for record in self.list_sessions()
+            if record.id != self.id
+            and record.deleted_at is None
+            and record.status != "corrupt"
         )
 
     def new_session(self, *, title: str | None = None) -> SessionRecord:
@@ -543,6 +601,31 @@ def _agent_message(message: SessionMessage) -> Message:
         reasoning_content=(
             str(text_part.metadata["reasoning_content"])
             if text_part is not None and text_part.metadata.get("reasoning_content")
+            else None
+        ),
+    )
+
+
+def _agent_message_from_payload(payload: dict[str, Any]) -> Message:
+    role = str(payload.get("role") or "")
+    if role not in {"system", "user", "assistant", "tool"}:
+        raise ValueError(f"unsupported checkpoint message role: {role}")
+    content = payload.get("content", "")
+    if not isinstance(content, (str, list)):
+        raise TypeError("checkpoint message content must be text or structured content")
+    return Message(
+        role=cast(Role, role),
+        content=content,
+        name=(str(payload["name"]) if payload.get("name") is not None else None),
+        tool_call_id=(
+            str(payload["tool_call_id"]) if payload.get("tool_call_id") is not None else None
+        ),
+        tool_calls=[
+            dict(item) for item in payload.get("tool_calls", []) if isinstance(item, dict)
+        ],
+        reasoning_content=(
+            str(payload["reasoning_content"])
+            if payload.get("reasoning_content") is not None
             else None
         ),
     )
