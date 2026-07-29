@@ -1319,6 +1319,26 @@ class SessionRepository:
             content=assistant_content,
             idempotency_key=f"{turn_id}:assistant",
         )
+        checkpoint_payload: dict[str, Any] | None = None
+        checkpoint_blob_refs: tuple[BlobReference, ...] = ()
+        if context_checkpoint is not None:
+            with self._connect() as checkpoint_connection:
+                checkpoint_is_current = self._checkpoint_is_current(
+                    checkpoint_connection,
+                    session_id,
+                    str(context_checkpoint["checkpoint_id"]),
+                )
+            if checkpoint_is_current:
+                context_checkpoint = None
+            else:
+                context_checkpoint = self._annotate_context_checkpoint_messages(
+                    session_id,
+                    context_checkpoint,
+                    pending_assistant=prepared.payload,
+                )
+                checkpoint_payload, checkpoint_blob_refs = self._prepare_context_checkpoint(
+                    context_checkpoint
+                )
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._require_writable_session(
@@ -1368,12 +1388,10 @@ class SessionRepository:
                     connection,
                     session_id=session_id,
                     event_type="context.checkpoint_created",
-                    payload={
-                        "checkpoint_id": checkpoint_id,
-                        "messages": list(context_checkpoint["messages"]),
-                    },
+                    payload=checkpoint_payload or {},
                     turn_id=turn_id,
                     idempotency_key=f"{turn_id}:context-checkpoint",
+                    blob_refs=checkpoint_blob_refs,
                 )
         return message_from_event(event, blob_loader=self._load_blob_bytes)
 
@@ -2146,6 +2164,7 @@ class SessionRepository:
             event_type=event_type,
             payload=payload,
             timestamp=timestamp,
+            blob_refs=blob_refs,
         )
         connection.execute(
             """
@@ -2172,18 +2191,106 @@ class SessionRepository:
             blob_refs=blob_refs,
         )
 
-    @staticmethod
+    def _prepare_context_checkpoint(
+        self,
+        checkpoint: dict[str, Any],
+    ) -> tuple[dict[str, Any], tuple[BlobReference, ...]]:
+        messages = list(checkpoint["messages"])
+        serialized = _json_dumps(messages).encode("utf-8")
+        if len(serialized) <= INLINE_CONTENT_LIMIT_BYTES:
+            return {
+                "checkpoint_id": str(checkpoint["checkpoint_id"]),
+                "messages": messages,
+            }, ()
+        blob = self.put_blob(
+            serialized,
+            content_type="application/json; charset=utf-8",
+        )
+        return {
+            "checkpoint_id": str(checkpoint["checkpoint_id"]),
+            "messages": [],
+            "messages_content_hash": blob.content_hash,
+            "messages_count": len(messages),
+        }, (
+            BlobReference(
+                content_hash=blob.content_hash,
+                role="context.checkpoint.messages",
+            ),
+        )
+
+    def _annotate_context_checkpoint_messages(
+        self,
+        session_id: str,
+        checkpoint: dict[str, Any],
+        *,
+        pending_assistant: dict[str, Any],
+    ) -> dict[str, Any]:
+        messages = [
+            dict(message)
+            for message in checkpoint["messages"]
+            if isinstance(message, dict)
+        ]
+        candidates = [
+            {
+                "message_id": message.id,
+                "role": message.role,
+                "content": message.content,
+            }
+            for message in self.rebuild_session_view(session_id).model_messages
+        ]
+        candidates.append(
+            {
+                "message_id": str(pending_assistant["message_id"]),
+                "role": str(pending_assistant["role"]),
+                "content": _message_payload_content(
+                    pending_assistant,
+                    blob_loader=self._load_blob_bytes,
+                ),
+            }
+        )
+        upper_bound = len(candidates)
+        for message in reversed(messages):
+            matching_index = next(
+                (
+                    index
+                    for index in range(upper_bound - 1, -1, -1)
+                    if message.get("role") == candidates[index]["role"]
+                    and message.get("content") == candidates[index]["content"]
+                ),
+                None,
+            )
+            if matching_index is None:
+                continue
+            message["source_message_id"] = candidates[matching_index]["message_id"]
+            upper_bound = matching_index
+        return {**checkpoint, "messages": messages}
+
     def _update_catalog_projection(
+        self,
         connection: sqlite3.Connection,
         *,
         session_id: str,
         event_type: str,
         payload: dict[str, Any],
         timestamp: str,
+        blob_refs: tuple[BlobReference, ...],
     ) -> None:
         if event_type.startswith("message."):
             role = str(payload.get("role") or "")
             preview = _message_preview(payload)
+            if preview is None:
+                content_reference = next(
+                    (
+                        reference
+                        for reference in blob_refs
+                        if reference.role == "message.content"
+                    ),
+                    None,
+                )
+                if content_reference is not None:
+                    preview = _text_preview(
+                        self._load_blob_bytes(content_reference.content_hash).decode("utf-8")
+                    )
             if role == "user":
                 connection.execute(
                     """
@@ -2470,10 +2577,42 @@ def _message_preview(payload: dict[str, Any], *, limit: int = 160) -> str | None
         for part in parts
         if isinstance(part, dict) and part.get("kind", "text") in {"text", "tool_result"}
     )
+    return _text_preview(text, limit=limit)
+
+
+def _text_preview(text: str, *, limit: int = 160) -> str | None:
     normalized = " ".join(text.split())
     if not normalized:
         return None
     return normalized if len(normalized) <= limit else f"{normalized[: limit - 1]}…"
+
+
+def _message_payload_content(
+    payload: dict[str, Any],
+    *,
+    blob_loader=None,
+) -> str:
+    parts = payload.get("parts")
+    if not isinstance(parts, list):
+        return ""
+    content: list[str] = []
+    for part in parts:
+        if not isinstance(part, dict) or part.get("kind", "text") not in {
+            "text",
+            "tool_result",
+        }:
+            continue
+        text = str(part.get("content") or "")
+        metadata = part.get("metadata")
+        if (
+            not text
+            and blob_loader is not None
+            and isinstance(metadata, dict)
+            and metadata.get("content_hash")
+        ):
+            text = blob_loader(str(metadata["content_hash"])).decode("utf-8")
+        content.append(text)
+    return "".join(content)
 
 
 def _event_from_row(row: sqlite3.Row) -> SessionEvent:

@@ -497,8 +497,8 @@ class ContextManager:
 
     def restore_durable_state(self, state: dict[str, Any] | None) -> None:
         """Restore state produced by :meth:`export_durable_state`."""
+        self.reset()
         if not state:
-            self.reset()
             return
         compaction_data = dict(state["compaction"])
         pressure_data = dict(state.get("pressure") or {})

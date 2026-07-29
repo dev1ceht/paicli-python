@@ -5,6 +5,7 @@ import hashlib
 import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
+from copy import deepcopy
 from typing import Any
 
 from paicli.cancellation import CancellationCheck, TaskCanceled, raise_if_cancelled
@@ -69,6 +70,8 @@ class Agent:
         self.cancellation_check = cancellation_check
         self.history: list[Message] = []
         self.session_allowed_tools: set[str] = set()
+        self._session_checkpoint_marker: Any = None
+        self._session_checkpoint: dict[str, Any] | None = None
 
         # 初始化上下文管理器
         manager_factory = context_manager_factory or ContextManager
@@ -149,28 +152,40 @@ class Agent:
     def replace_history(self, history: list[Message]) -> None:
         """Replace durable model history and reset derived context state."""
         self.history = list(history)
+        self._session_checkpoint_marker = None
+        self._session_checkpoint = None
         self.context_manager.reset()
 
     def export_session_context(self) -> dict[str, Any] | None:
         """Export model history and compaction state for durable session replay."""
         durable_state = self.context_manager.export_durable_state()
         if durable_state is None:
+            self._session_checkpoint_marker = None
+            self._session_checkpoint = None
             return None
+        marker = self.context_manager.checkpoint_state()[2]
+        if marker is self._session_checkpoint_marker and self._session_checkpoint is not None:
+            return deepcopy(self._session_checkpoint)
+        messages = [_serialize_message(message) for message in self.history]
         identity = {
             "provider": self.config.llm.provider,
             "model": self.config.llm.model,
             "context": durable_state,
+            "messages": messages,
         }
         digest = hashlib.sha256(
             json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).hexdigest()
-        return {
+        checkpoint = {
             "checkpoint_id": f"ctx_{digest[:24]}",
             "provider": self.config.llm.provider,
             "model": self.config.llm.model,
             **durable_state,
-            "messages": [_serialize_message(message) for message in self.history],
+            "messages": messages,
         }
+        self._session_checkpoint_marker = marker
+        self._session_checkpoint = deepcopy(checkpoint)
+        return checkpoint
 
     def restore_session_context(
         self,
@@ -180,6 +195,8 @@ class Agent:
         """Restore a durable compacted history without discarding context metadata."""
         self.history = list(history)
         self.context_manager.restore_durable_state(context_checkpoint)
+        self._session_checkpoint_marker = self.context_manager.checkpoint_state()[2]
+        self._session_checkpoint = deepcopy(context_checkpoint)
 
     def close(self) -> None:
         self.context_manager.close()

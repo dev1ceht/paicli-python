@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
@@ -43,8 +44,19 @@ def rebuild_session_view(
             last_compaction = dict(event.payload)
             continue
         if event.type == "context.checkpoint_created":
+            checkpoint_messages = event.payload.get("messages")
+            messages_content_hash = event.payload.get("messages_content_hash")
+            if messages_content_hash:
+                if blob_loader is None:
+                    raise ValueError("context checkpoint blob requires a blob loader")
+                checkpoint_messages = json.loads(
+                    blob_loader(str(messages_content_hash)).decode("utf-8")
+                )
+            if not isinstance(checkpoint_messages, list):
+                raise TypeError("context checkpoint messages must be a JSON array")
             context_checkpoint = {
                 **event.payload,
+                "messages": checkpoint_messages,
                 "summary": (
                     str(last_compaction.get("summary") or "") if last_compaction else ""
                 ),

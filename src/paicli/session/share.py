@@ -12,7 +12,15 @@ _SECRET_PATTERNS = (
     re.compile(r"\b(?:sk|rk|pk)-[A-Za-z0-9_-]{8,}\b"),
     re.compile(r"\b(?:ghp|github_pat|xox[baprs])_[A-Za-z0-9_-]{8,}\b"),
 )
-_NAMED_SECRET = re.compile(
+_JSON_NAMED_SECRET = re.compile(
+    r'(?i)(["\'](?:api[_-]?key|access[_-]?token|token|password|secret)["\']'
+    r'\s*:\s*)["\'][^"\']*["\']'
+)
+_QUOTED_NAMED_SECRET = re.compile(
+    r"(?i)\b(api[_-]?key|access[_-]?token|token|password|secret)"
+    r"(\s*[:=]\s*)([\"'])[^\"']*\3"
+)
+_PLAIN_NAMED_SECRET = re.compile(
     r"(?i)\b(api[_-]?key|access[_-]?token|token|password|secret)"
     r"(\s*[:=]\s*)[^\s,;]+"
 )
@@ -23,7 +31,7 @@ _POSIX_PRIVATE_PATH = re.compile(
 
 
 class SessionShareService:
-    """Render a durable session as a safely redacted Markdown transcript."""
+    """Render durable Session history as a safely redacted Markdown share."""
 
     def __init__(
         self,
@@ -133,7 +141,9 @@ class SessionShareService:
 
 def redact_text(value: str) -> str:
     result = str(value)
-    result = _NAMED_SECRET.sub(r"\1\2[REDACTED_SECRET]", result)
+    result = _JSON_NAMED_SECRET.sub(r'\1"[REDACTED_SECRET]"', result)
+    result = _QUOTED_NAMED_SECRET.sub(r"\1\2\3[REDACTED_SECRET]\3", result)
+    result = _PLAIN_NAMED_SECRET.sub(r"\1\2[REDACTED_SECRET]", result)
     for pattern in _SECRET_PATTERNS:
         result = pattern.sub("[REDACTED_SECRET]", result)
     result = _WINDOWS_PATH.sub("[REDACTED_PATH]", result)
