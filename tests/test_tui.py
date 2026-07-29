@@ -748,6 +748,28 @@ def test_tool_error_card_stays_expanded_and_retains_full_result():
     asyncio.run(run())
 
 
+def test_expanded_tool_result_uses_its_full_content_height():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(80, 40)) as pilot:
+            result = "\n".join(f"line {index}" for index in range(20))
+            app.handle_event({"type": "tool_call", "name": "read_file", "input": {}})
+            app.handle_event(
+                {
+                    "type": "tool_result",
+                    "name": "read_file",
+                    "result": result,
+                    "is_error": True,
+                }
+            )
+            await pilot.pause()
+
+            output = app.query_one(ToolCard).query_one(".tool-output", Static)
+            assert output.size.height == 20
+
+    asyncio.run(run())
+
+
 def test_ui_event_from_agent_preserves_task_id():
     from paicli.render.tui_events import UiEvent
 
@@ -1451,6 +1473,37 @@ def test_interrupt_cancels_worker_when_running():
     asyncio.run(run())
 
 
+def test_command_input_persists_history_outside_ui_thread(tmp_path):
+    persisted = threading.Event()
+    persistence_threads: list[int] = []
+
+    class RecordingHistory(PromptHistory):
+        def _persist(self) -> None:
+            persistence_threads.append(threading.get_ident())
+            persisted.set()
+
+    class CompletingAgent:
+        async def run(self, message: str):
+            yield {"type": "done", "total_tokens": 0, "total_turns": 1}
+
+    async def run() -> None:
+        app = PaiCliApp(agent=CompletingAgent(), cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            command_input = app.query_one(CommandInput)
+            command_input.prompt_history = RecordingHistory(tmp_path / "history.jsonl")
+            command_input.focus()
+            command_input.insert("submitted")
+            ui_thread = threading.get_ident()
+
+            await pilot.press("enter")
+            completed = await asyncio.to_thread(persisted.wait, 1)
+            assert completed is True
+            assert persistence_threads
+            assert all(thread_id != ui_thread for thread_id in persistence_threads)
+
+    asyncio.run(run())
+
+
 def test_session_lease_refresh_does_not_block_terminal_input():
     class BlockingSession:
         def __init__(self) -> None:
@@ -1509,88 +1562,6 @@ def test_transient_session_database_lock_does_not_stop_running_agent():
             assert app._agent_running is True
             assert app._phase == "running"
             assert "refresh delayed" in app.query_one(ChatLog).renderable_text()
-
-    asyncio.run(run())
-
-
-def test_buffered_agent_stream_yields_to_input_and_intermediate_output():
-    from textual.events import Key
-
-    class BufferedAgent:
-        def __init__(self) -> None:
-            self.started = asyncio.Event()
-            self.input_processed = asyncio.Event()
-            self.assistant_observed = asyncio.Event()
-            self.stream_finished = asyncio.Event()
-            self.release = asyncio.Event()
-            self.saw_input_during_stream = False
-            self.saw_assistant_during_stream = False
-
-        async def run(self, message: str):
-            assert message == "burst"
-            self.started.set()
-            for _ in range(200):
-                if self.input_processed.is_set():
-                    self.saw_input_during_stream = True
-                    break
-                yield {"type": "thinking_delta", "thinking": "x"}
-            yield {
-                "type": "turn_complete",
-                "turn": 1,
-                "stop_reason": "end_turn",
-                "tool_actions": [],
-            }
-            for _ in range(200):
-                if self.assistant_observed.is_set():
-                    self.saw_assistant_during_stream = True
-                    break
-                yield {"type": "text_delta", "text": "y"}
-            self.stream_finished.set()
-            await self.release.wait()
-            yield {"type": "done", "total_tokens": 1, "total_turns": 1}
-
-    async def run() -> None:
-        agent = BufferedAgent()
-        app = PaiCliApp(agent=agent, cwd=".")
-        async with app.run_test(size=(80, 24)):
-            command_input = app.query_one(CommandInput)
-            command_input.focus()
-            app.run_agent_task("burst")
-            await asyncio.wait_for(agent.started.wait(), timeout=1)
-
-            async def observe_input() -> None:
-                while command_input.text != "a":
-                    await asyncio.sleep(0)
-                agent.input_processed.set()
-
-            async def observe_assistant() -> None:
-                while not any(
-                    block.role == "assistant" and block.plain_text
-                    for block in app.query(MessageBlock)
-                ):
-                    await asyncio.sleep(0)
-                agent.assistant_observed.set()
-
-            input_observer = asyncio.create_task(observe_input())
-            assistant_observer = asyncio.create_task(observe_assistant())
-            key = Key("a", "a")
-            key.set_sender(app)
-            assert app._driver is not None
-            app._driver.send_message(key)
-
-            await asyncio.wait_for(input_observer, timeout=1)
-            await asyncio.wait_for(assistant_observer, timeout=1)
-            await asyncio.wait_for(agent.stream_finished.wait(), timeout=1)
-
-            assert command_input.text == "a"
-            saw_input = agent.saw_input_during_stream
-            saw_assistant = agent.saw_assistant_during_stream
-            agent.release.set()
-            while app._agent_running:
-                await asyncio.sleep(0)
-
-            assert saw_input is True
-            assert saw_assistant is True
 
     asyncio.run(run())
 

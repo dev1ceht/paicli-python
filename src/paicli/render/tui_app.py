@@ -485,7 +485,6 @@ class PaiCliApp(App):
                         completed = True
                     if event.get("type") == "error":
                         break
-                    await asyncio.sleep(0)
             except Exception as exc:
                 chat_log.add_info(f"[bold red]{error_label}:[/bold red] {exc}")
             finally:

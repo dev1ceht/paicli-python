@@ -93,6 +93,35 @@ def test_snapshot_excludes_heavy_directories(tmp_path, monkeypatch):
     )
 
 
+def test_snapshot_excludes_generated_workspace_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PAICLI_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    project = tmp_path / "project"
+    project.mkdir()
+    generated_files = [
+        project / "artifacts" / "result.json",
+        project / ".harbor-venv" / "package.py",
+        project / ".mypy_cache" / "cache.json",
+        project / ".worktrees" / "branch" / "note.txt",
+        project / "benchmark" / "runs" / "attempt.json",
+    ]
+    for path in generated_files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("before", encoding="utf-8")
+
+    service = SnapshotService(project)
+    first = service.create("pre-turn")
+    for path in generated_files:
+        path.write_text("changed but skipped", encoding="utf-8")
+
+    service.restore(first.id)
+
+    assert all(
+        path.read_text(encoding="utf-8") == "changed but skipped"
+        for path in generated_files
+    )
+
+
 def test_snapshot_status_reports_side_git_location(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     project = tmp_path / "project"

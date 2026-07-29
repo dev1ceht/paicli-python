@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from typing import Any
@@ -17,6 +18,18 @@ from paicli.tools.registry import ToolRegistry
 from paicli.types import Message, QueryResult
 
 from .query import query
+
+
+async def _run_blocking(callback: Callable[..., Any], *args: Any) -> Any:
+    """Run blocking lifecycle work without freezing the caller's event loop."""
+    task = asyncio.create_task(asyncio.to_thread(callback, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # Cancellation cannot stop a worker thread. Let it settle before the
+        # post-turn snapshot can touch the same side repository.
+        await task
+        raise
 
 
 class Agent:
@@ -58,15 +71,15 @@ class Agent:
         checkpoint_callback=None,
     ) -> AsyncIterator[dict[str, Any]]:
         raise_if_cancelled(self.cancellation_check)
-        snapshot = SnapshotService(self.cwd)
+        snapshot = await _run_blocking(SnapshotService, self.cwd)
         canceled = False
         context_checkpoint = self.context_manager.checkpoint_state()
         context_committed = False
         with suppress(Exception):
-            snapshot.create("pre-turn")
+            await _run_blocking(snapshot.create, "pre-turn")
         try:
-            prompt_sections = self._prompt_sections_for_message(message)
-            system_prompt = prompt_sections.render()
+            prompt_sections = await _run_blocking(self._prompt_sections_for_message, message)
+            system_prompt = await _run_blocking(prompt_sections.render)
             self.system_prompt = system_prompt
             with use_context_scope(context_scope):
                 async for event in query(
@@ -101,7 +114,7 @@ class Agent:
                 self.context_manager.restore_state(context_checkpoint)
             if not canceled:
                 with suppress(Exception):
-                    snapshot.create("post-turn")
+                    await _run_blocking(snapshot.create, "post-turn")
 
     async def run_complete(self, message: str) -> QueryResult:
         text = ""

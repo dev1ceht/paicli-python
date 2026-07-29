@@ -298,9 +298,9 @@ class ActivityRail(Vertical):
         width: 100%;
         height: auto;
         margin: 0 0 1 0;
-        padding: 0 0 0 1;
-        background: #0d1117;
-        border-left: solid #30363d;
+        padding: 0;
+        background: transparent;
+        border: none;
     }
     """
 
@@ -341,11 +341,30 @@ class ThinkingBlock(Static):
     }
     ThinkingBlock .thinking-output {
         color: #8b949e;
-        padding: 0 1;
+        padding: 0;
     }
-    ThinkingBlock .thinking-output-scroll {
-        max-height: 12;
-        overflow-y: auto;
+    ThinkingBlock Collapsible,
+    ToolCard Collapsible {
+        width: 100%;
+        height: auto;
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        border: none;
+    }
+    ThinkingBlock Collapsible:focus-within,
+    ToolCard Collapsible:focus-within {
+        background: transparent;
+    }
+    ThinkingBlock CollapsibleTitle,
+    ToolCard CollapsibleTitle {
+        padding: 0;
+        background: transparent;
+    }
+    ThinkingBlock Collapsible > Contents,
+    ToolCard Collapsible > Contents {
+        height: auto;
+        padding: 0 0 0 2;
     }
     """
 
@@ -376,7 +395,7 @@ class ThinkingBlock(Static):
     def compose(self) -> ComposeResult:
         self._output_widget = Static("", classes="thinking-output")
         self._collapsible = Collapsible(
-            VerticalScroll(self._output_widget, classes="thinking-output-scroll"),
+            self._output_widget,
             title=self._label(),
             collapsed=self._collapsed,
         )
@@ -450,12 +469,7 @@ class ToolCard(Static):
     }
     ToolCard .tool-output {
         color: #c9d1d9;
-        padding: 0 1;
-        overflow-x: hidden;
-    }
-    ToolCard .tool-output-scroll {
-        max-height: 14;
-        overflow-y: auto;
+        padding: 0;
     }
     ToolCard.tool-running {
         color: #60d8ff;
@@ -528,7 +542,7 @@ class ToolCard(Static):
     def compose(self) -> ComposeResult:
         self._output_widget = Static("", classes="tool-output")
         self._collapsible = Collapsible(
-            VerticalScroll(self._output_widget, classes="tool-output-scroll"),
+            self._output_widget,
             title=self._label(),
             collapsed=self._collapsed,
         )
@@ -1058,8 +1072,12 @@ class CommandInput(TextArea):
         """Delegate Enter to the app only from the focused command input."""
         value = self.text.strip()
         self.post_message(self.MessageSubmitted(value))
-        if self.prompt_history and value:
-            self.prompt_history.append(value)
+        if self.prompt_history and self.prompt_history.remember(value):
+            self.run_worker(
+                self.prompt_history.persist_async(),
+                group="prompt-history",
+                exclusive=True,
+            )
         if hasattr(self.app, "action_submit_message"):
             self.app.action_submit_message()
         self.sync_height()
