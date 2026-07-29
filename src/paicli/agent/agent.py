@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from typing import Any
@@ -30,6 +32,17 @@ async def _run_blocking(callback: Callable[..., Any], *args: Any) -> Any:
         # post-turn snapshot can touch the same side repository.
         await task
         raise
+
+
+def _serialize_message(message: Message) -> dict[str, Any]:
+    return {
+        "role": message.role,
+        "content": message.content,
+        "name": message.name,
+        "tool_call_id": message.tool_call_id,
+        "tool_calls": list(message.tool_calls),
+        "reasoning_content": message.reasoning_content,
+    }
 
 
 class Agent:
@@ -137,6 +150,36 @@ class Agent:
         """Replace durable model history and reset derived context state."""
         self.history = list(history)
         self.context_manager.reset()
+
+    def export_session_context(self) -> dict[str, Any] | None:
+        """Export model history and compaction state for durable session replay."""
+        durable_state = self.context_manager.export_durable_state()
+        if durable_state is None:
+            return None
+        identity = {
+            "provider": self.config.llm.provider,
+            "model": self.config.llm.model,
+            "context": durable_state,
+        }
+        digest = hashlib.sha256(
+            json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return {
+            "checkpoint_id": f"ctx_{digest[:24]}",
+            "provider": self.config.llm.provider,
+            "model": self.config.llm.model,
+            **durable_state,
+            "messages": [_serialize_message(message) for message in self.history],
+        }
+
+    def restore_session_context(
+        self,
+        history: list[Message],
+        context_checkpoint: dict[str, Any],
+    ) -> None:
+        """Restore a durable compacted history without discarding context metadata."""
+        self.history = list(history)
+        self.context_manager.restore_durable_state(context_checkpoint)
 
     def close(self) -> None:
         self.context_manager.close()

@@ -14,6 +14,27 @@ def validate_event_payload(event_type: str, payload: dict[str, Any]) -> None:
         if title is not None and (not isinstance(title, str) or not title):
             raise TypeError("session title must be a non-empty string")
         return
+    if event_type == "context.compacted":
+        _require_non_empty_string(payload, "checkpoint_id")
+        _require_non_empty_string(payload, "summary")
+        if not isinstance(payload.get("compaction"), dict):
+            raise TypeError("context compaction must be a JSON object")
+        if not isinstance(payload.get("pressure", {}), dict):
+            raise TypeError("context pressure must be a JSON object")
+        return
+    if event_type == "context.checkpoint_created":
+        _require_non_empty_string(payload, "checkpoint_id")
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            raise TypeError("context checkpoint messages must be a JSON array")
+        for message in messages:
+            if not isinstance(message, dict):
+                raise TypeError("context checkpoint message must be a JSON object")
+            if message.get("role") not in {"system", "user", "assistant", "tool"}:
+                raise ValueError("context checkpoint message has an invalid role")
+            if not isinstance(message.get("content"), (str, list)):
+                raise TypeError("context checkpoint message content must be text or a list")
+        return
     if not event_type.startswith("message."):
         return
 

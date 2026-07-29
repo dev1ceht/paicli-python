@@ -11,6 +11,7 @@ from paicli.config import PaiCliConfig
 from paicli.entrypoints.repl import start_repl
 from paicli.render.textual_widgets import ChatLog
 from paicli.render.tui_app import PaiCliApp
+from paicli.render.tui_dialogs import SessionResumePicker
 from paicli.session import (
     InteractiveSession,
     SessionLeaseConflictError,
@@ -29,6 +30,20 @@ class HistoryAgent:
 
     def replace_history(self, history: list[Message]) -> None:
         self.history = list(history)
+
+
+class ContextRestoringAgent(HistoryAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self.context_checkpoint: dict | None = None
+
+    def restore_session_context(
+        self,
+        history: list[Message],
+        context_checkpoint: dict,
+    ) -> None:
+        self.history = list(history)
+        self.context_checkpoint = dict(context_checkpoint)
 
 
 class CompletingAgent(HistoryAgent):
@@ -268,6 +283,73 @@ def test_tui_resumes_latest_workspace_session_and_restores_model_history(
         ("user", "latest question"),
         ("assistant", "latest answer"),
     ]
+
+
+def test_tui_restores_compacted_context_checkpoint_and_newer_tail(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(workspace, title="Compacted")
+    repository.begin_turn(session.id, turn_id="turn_1", user_content="old question")
+    repository.complete_turn(
+        session.id,
+        turn_id="turn_1",
+        assistant_content="old answer",
+        context_checkpoint={
+            "checkpoint_id": "ctx_123",
+            "summary": "The old conversation established the design.",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "[Previous conversation summary]\n"
+                        "The old conversation established the design."
+                    ),
+                    "name": None,
+                    "tool_call_id": None,
+                    "tool_calls": [],
+                    "reasoning_content": None,
+                }
+            ],
+            "compaction": {
+                "compacted_items": 2,
+                "protected_items": 0,
+                "used_llm": False,
+                "llm_usage": {},
+            },
+            "pressure": {},
+            "provider": "openai",
+            "model": "gpt-test",
+        },
+    )
+    repository.begin_turn(session.id, turn_id="turn_2", user_content="new question")
+    repository.complete_turn(
+        session.id,
+        turn_id="turn_2",
+        assistant_content="new answer",
+    )
+    agent = ContextRestoringAgent()
+
+    app = PaiCliApp(
+        agent=agent,
+        cwd=str(workspace),
+        session_repository=repository,
+        session_id=session.id,
+    )
+
+    assert app.session_id == session.id
+    assert [(message.role, message.content) for message in agent.history] == [
+        (
+            "user",
+            "[Previous conversation summary]\nThe old conversation established the design.",
+        ),
+        ("user", "new question"),
+        ("assistant", "new answer"),
+    ]
+    assert agent.context_checkpoint is not None
+    assert agent.context_checkpoint["checkpoint_id"] == "ctx_123"
 
 
 def test_interactive_session_skips_busy_session_and_rejects_explicit_conflict(
@@ -1181,6 +1263,94 @@ def test_tui_can_create_and_resume_workspace_sessions(tmp_path: Path) -> None:
             assert "resume this history" in app.query_one(ChatLog).renderable_text()
 
     asyncio.run(run())
+
+
+def test_tui_session_rename_show_and_resume_picker(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+    candidate = repository.create_session(workspace, title="Candidate")
+    repository.append_message(candidate.id, role="user", content="pick this session")
+    current = repository.create_session(workspace, title="Current")
+
+    async def run() -> None:
+        app = PaiCliApp(
+            agent=HistoryAgent(),
+            cwd=str(workspace),
+            session_repository=repository,
+            session_id=current.id,
+        )
+        async with app.run_test(size=(100, 30)) as pilot:
+            app._handle_slash_command("/session rename Renamed Current")
+            app._handle_slash_command(f"/session show {candidate.id}")
+            rendered = app.query_one(ChatLog).renderable_text()
+            assert "Renamed Current" in rendered
+            assert "pick this session" in rendered
+            assert "1 messages" in rendered
+
+            app._handle_slash_command("/session resume")
+            await pilot.pause()
+            assert isinstance(app.screen, SessionResumePicker)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.session_id == candidate.id
+
+    asyncio.run(run())
+
+
+def test_tui_session_share_exports_redacted_markdown(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+    current = repository.create_session(workspace, title="Shared")
+    repository.append_message(
+        current.id,
+        role="user",
+        content=r"token=sk-private-token and D:\private\note.txt",
+    )
+
+    async def run() -> None:
+        app = PaiCliApp(
+            agent=HistoryAgent(),
+            cwd=str(workspace),
+            session_repository=repository,
+            session_id=current.id,
+        )
+        async with app.run_test(size=(100, 24)) as pilot:
+            app._handle_slash_command("/session share")
+            await pilot.pause()
+            rendered = app.query_one(ChatLog).renderable_text()
+            assert "Shared session" in rendered
+
+    asyncio.run(run())
+    output = tmp_path / "shares" / f"{current.id}.md"
+    markdown = output.read_text(encoding="utf-8")
+    assert "[REDACTED_SECRET]" in markdown
+    assert "[REDACTED_PATH]" in markdown
+    assert "sk-private-token" not in markdown
+
+
+def test_interactive_session_renames_and_exposes_rich_session_summaries(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+    original = repository.create_session(workspace, title="Original")
+    other = repository.create_session(workspace, title="Other")
+    repository.append_message(other.id, role="user", content="candidate preview")
+    session = InteractiveSession(repository, workspace, session_id=original.id)
+
+    renamed = session.rename_session("Renamed")
+    shown = session.show_session(other.id)
+    candidates = session.resume_candidates()
+
+    assert renamed.title == "Renamed"
+    assert session.record.title == "Renamed"
+    assert shown.id == other.id
+    assert shown.latest_user_preview == "candidate preview"
+    assert [record.id for record in candidates] == [other.id]
+    session.close()
 
 
 def test_tui_session_fork_archive_delete_and_restore_lifecycle(tmp_path: Path) -> None:

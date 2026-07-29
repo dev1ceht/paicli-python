@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -16,7 +17,13 @@ from paicli.session import (
     SessionRepository,
     ToolActionSpec,
 )
-from paicli.session.schema import _migration_1, connect
+from paicli.session.schema import (
+    _migration_1,
+    _migration_2,
+    _migration_3,
+    _migration_4,
+    connect,
+)
 from paicli.session.versions import DATABASE_SCHEMA_VERSION
 
 
@@ -104,10 +111,97 @@ def test_v1_database_is_backed_up_and_migrated_to_current_schema(tmp_path: Path)
                 "select version from schema_migrations order by version"
             ).fetchall()
         ]
-    assert version == DATABASE_SCHEMA_VERSION == 4
+    assert version == DATABASE_SCHEMA_VERSION == 5
     assert "ordinal" in columns
-    assert migrations == [1, 2, 3, 4]
+    assert migrations == [1, 2, 3, 4, 5]
     assert len(list(tmp_path.glob("sessions.backup-v1-*.db"))) == 1
+
+
+def test_v4_catalog_data_is_backfilled_during_migration(tmp_path: Path) -> None:
+    db_path = tmp_path / "sessions.db"
+    with connect(db_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        for version, migration in enumerate(
+            (_migration_1, _migration_2, _migration_3, _migration_4),
+            start=1,
+        ):
+            migration(connection)
+            connection.execute(
+                "insert into schema_migrations(version, applied_at) values (?, 'test')",
+                (version,),
+            )
+        connection.execute(
+            """
+            insert into sessions values (
+                'sess_old', ?, 'Old', 'idle', 'created', 'updated',
+                null, null, null, 4, 3, '{}'
+            )
+            """,
+            (str(tmp_path.resolve()),),
+        )
+        payloads = (
+            (
+                "evt_user",
+                1,
+                "message.user",
+                {
+                    "message_id": "msg_user",
+                    "role": "user",
+                    "parts": [{"kind": "text", "content": "legacy preview", "metadata": {}}],
+                },
+                "created",
+            ),
+            (
+                "evt_compact",
+                2,
+                "context.compacted",
+                {
+                    "checkpoint_id": "ctx_old",
+                    "summary": "summary",
+                    "compaction": {},
+                    "provider": "legacy-provider",
+                    "model": "legacy-model",
+                },
+                "compacted",
+            ),
+            (
+                "evt_checkpoint",
+                3,
+                "context.checkpoint_created",
+                {"checkpoint_id": "ctx_old", "messages": []},
+                "checkpoint",
+            ),
+        )
+        for event_id, sequence, event_type, payload, created_at in payloads:
+            connection.execute(
+                """
+                insert into session_events values (
+                    ?, 'sess_old', ?, null, ?, 1, ?, null, null, ?,
+                    ?, null, null, '[]'
+                )
+                """,
+                (
+                    event_id,
+                    sequence,
+                    event_type,
+                    json.dumps(payload),
+                    f"hash-{sequence}",
+                    created_at,
+                ),
+            )
+        connection.execute("pragma user_version = 4")
+        connection.commit()
+
+    record = SessionRepository(db_path).get_session("sess_old")
+
+    assert record is not None
+    assert record.message_count == 1
+    assert record.user_turn_count == 1
+    assert record.latest_user_preview == "legacy preview"
+    assert record.provider == "legacy-provider"
+    assert record.model == "legacy-model"
+    assert record.last_checkpoint_id == "ctx_old"
+    assert record.last_compacted_at == "compacted"
 
 
 def test_append_event_is_ordered_and_idempotent_within_one_session(tmp_path: Path) -> None:
@@ -195,6 +289,164 @@ def test_replay_keeps_session_history_but_excludes_reset_and_partial_messages(
     assert view.reset_sequence == reset.sequence
     assert partial.status == "partial"
     assert partial.replayable is False
+
+
+def test_completed_turn_persists_latest_context_compaction_checkpoint(
+    tmp_path: Path,
+) -> None:
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(tmp_path)
+    repository.begin_turn(
+        session.id,
+        turn_id="turn_1",
+        user_content="continue the refactor",
+    )
+
+    repository.complete_turn(
+        session.id,
+        turn_id="turn_1",
+        assistant_content="implemented",
+        context_checkpoint={
+            "checkpoint_id": "ctx_123",
+            "summary": "Earlier work established the repository boundary.",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "continue the refactor",
+                    "name": None,
+                    "tool_call_id": None,
+                    "tool_calls": [],
+                    "reasoning_content": None,
+                },
+                {
+                    "role": "assistant",
+                    "content": "implemented",
+                    "name": None,
+                    "tool_call_id": None,
+                    "tool_calls": [],
+                    "reasoning_content": None,
+                },
+            ],
+            "compaction": {
+                "compacted_items": 8,
+                "protected_items": 2,
+                "used_llm": True,
+                "llm_usage": {"input_tokens": 120, "output_tokens": 30},
+            },
+            "pressure": {
+                "tier": "tier1_snip",
+                "pressure_ratio": 0.42,
+                "rendered_tokens": 420,
+                "raw_tokens": 420,
+                "budget_tokens": 1000,
+            },
+            "provider": "openai",
+            "model": "gpt-test",
+        },
+    )
+
+    events = repository.list_events(session.id)
+    assert [event.type for event in events][-4:] == [
+        "message.assistant",
+        "turn.completed",
+        "context.compacted",
+        "context.checkpoint_created",
+    ]
+    view = repository.rebuild_session_view(session.id)
+    assert view.context_checkpoint is not None
+    assert view.context_checkpoint["checkpoint_id"] == "ctx_123"
+    assert view.context_checkpoint["summary"] == (
+        "Earlier work established the repository boundary."
+    )
+    assert view.context_checkpoint["messages"][-1]["content"] == "implemented"
+    assert view.context_checkpoint_sequence == events[-1].sequence
+
+
+def test_unchanged_context_checkpoint_is_not_duplicated(tmp_path):
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(tmp_path, title="checkpoint")
+    checkpoint = {
+        "checkpoint_id": "ctx_same",
+        "summary": "same summary",
+        "compaction": {
+            "summary": "same summary",
+            "compacted_items": 2,
+            "protected_items": 2,
+            "used_llm": False,
+            "llm_usage": {},
+        },
+        "pressure": {},
+        "provider": "fake",
+        "model": "model",
+        "messages": [{"role": "assistant", "content": "summary"}],
+    }
+    repository.begin_turn(session.id, turn_id="turn_1", user_content="one")
+    repository.complete_turn(
+        session.id,
+        turn_id="turn_1",
+        assistant_content="first",
+        context_checkpoint=checkpoint,
+    )
+    repository.begin_turn(session.id, turn_id="turn_2", user_content="two")
+    repository.complete_turn(
+        session.id,
+        turn_id="turn_2",
+        assistant_content="second",
+        context_checkpoint=checkpoint,
+    )
+
+    context_events = [
+        event
+        for event in repository.list_events(session.id)
+        if event.type.startswith("context.")
+    ]
+    assert [event.type for event in context_events] == [
+        "context.compacted",
+        "context.checkpoint_created",
+    ]
+
+
+def test_session_catalog_projects_rich_summary_from_events(tmp_path):
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(tmp_path, title="catalog")
+    repository.begin_turn(
+        session.id,
+        turn_id="turn_catalog",
+        user_content="  explain   the catalog projection  ",
+    )
+    repository.complete_turn(
+        session.id,
+        turn_id="turn_catalog",
+        assistant_content="It keeps list queries fast.",
+        context_checkpoint={
+            "checkpoint_id": "ctx_catalog",
+            "summary": "catalog summary",
+            "compaction": {
+                "summary": "catalog summary",
+                "compacted_items": 4,
+                "protected_items": 2,
+                "used_llm": False,
+                "llm_usage": {},
+            },
+            "pressure": {},
+            "provider": "openai",
+            "model": "gpt-catalog",
+            "messages": [{"role": "assistant", "content": "catalog summary"}],
+        },
+    )
+
+    record = repository.get_session(session.id)
+
+    assert record is not None
+    assert record.message_count == 2
+    assert record.user_turn_count == 1
+    assert record.latest_user_preview == "explain the catalog projection"
+    assert record.latest_assistant_preview == "It keeps list queries fast."
+    assert record.provider == "openai"
+    assert record.model == "gpt-catalog"
+    assert record.last_checkpoint_id == "ctx_catalog"
+    assert record.last_compacted_at is not None
+    assert repository.list_sessions()[0] == record
 
 
 def test_corrupt_event_chain_is_rejected_and_session_becomes_read_only(tmp_path: Path) -> None:

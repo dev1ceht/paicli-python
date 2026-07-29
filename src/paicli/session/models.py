@@ -33,6 +33,14 @@ class SessionRecord:
     deleted_at: str | None = None
     purge_after: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    message_count: int = 0
+    user_turn_count: int = 0
+    latest_user_preview: str | None = None
+    latest_assistant_preview: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    last_checkpoint_id: str | None = None
+    last_compacted_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,3 +139,5 @@ class SessionView:
     session_history: tuple[SessionMessage, ...]
     model_messages: tuple[SessionMessage, ...]
     reset_sequence: int | None = None
+    context_checkpoint: dict[str, Any] | None = None
+    context_checkpoint_sequence: int | None = None

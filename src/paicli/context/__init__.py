@@ -467,6 +467,64 @@ class ContextManager:
     ) -> None:
         self._current_summary, self._last_pressure, self._last_compaction = checkpoint
 
+    def export_durable_state(self) -> dict[str, Any] | None:
+        """Serialize the latest compaction state for a durable session checkpoint."""
+        if not self._current_summary or self._last_compaction is None:
+            return None
+        pressure = self._last_pressure
+        compaction = self._last_compaction
+        return {
+            "summary": self._current_summary,
+            "pressure": (
+                {
+                    "tier": pressure.tier.value,
+                    "pressure_ratio": pressure.pressure_ratio,
+                    "rendered_tokens": pressure.rendered_tokens,
+                    "raw_tokens": pressure.raw_tokens,
+                    "budget_tokens": pressure.budget_tokens,
+                }
+                if pressure is not None
+                else {}
+            ),
+            "compaction": {
+                "summary": compaction.summary,
+                "compacted_items": compaction.compacted_items,
+                "protected_items": compaction.protected_items,
+                "used_llm": compaction.used_llm,
+                "llm_usage": dict(compaction.llm_usage),
+            },
+        }
+
+    def restore_durable_state(self, state: dict[str, Any] | None) -> None:
+        """Restore state produced by :meth:`export_durable_state`."""
+        if not state:
+            self.reset()
+            return
+        compaction_data = dict(state["compaction"])
+        pressure_data = dict(state.get("pressure") or {})
+        pressure = (
+            PressureResult(
+                tier=PressureTier(str(pressure_data["tier"])),
+                pressure_ratio=float(pressure_data["pressure_ratio"]),
+                rendered_tokens=int(pressure_data["rendered_tokens"]),
+                raw_tokens=int(pressure_data["raw_tokens"]),
+                budget_tokens=int(pressure_data["budget_tokens"]),
+            )
+            if pressure_data
+            else None
+        )
+        compaction = CompactionResult(
+            summary=str(compaction_data["summary"]),
+            compacted_items=int(compaction_data["compacted_items"]),
+            protected_items=int(compaction_data["protected_items"]),
+            used_llm=bool(compaction_data["used_llm"]),
+            llm_usage={
+                str(key): int(value)
+                for key, value in dict(compaction_data.get("llm_usage") or {}).items()
+            },
+        )
+        self.restore_state((str(state["summary"]), pressure, compaction))
+
     def pressure_thresholds(self) -> tuple[float, float, float]:
         return (
             self.config.context.tier1_threshold,

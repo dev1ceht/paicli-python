@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 
+from paicli.agent import Agent
 from paicli.config import PaiCliConfig
 from paicli.context import ContextManager
 from paicli.context.assembler import (
@@ -17,12 +18,14 @@ from paicli.context.assembler import (
 from paicli.context.budget import Budget, calculate_budget
 from paicli.context.compaction import (
     LLM_SUMMARY_INPUT_LIMIT,
+    CompactionResult,
     DeltaItem,
     compact_with_llm,
     deterministic_compact,
     extract_delta_items,
 )
 from paicli.context.pressure import (
+    PressureResult,
     PressureTier,
     calculate_pressure,
     calculate_pressure_from_tokens,
@@ -37,6 +40,7 @@ from paicli.context.tool_result import (
 )
 from paicli.llm.openai_compatible import OpenAICompatibleClient
 from paicli.prompt import PromptSections
+from paicli.tools.registry import ToolRegistry
 from paicli.types import Message
 
 
@@ -59,6 +63,108 @@ class SummaryLlm(OpenAICompatibleClient):
         }
         yield {"type": "usage", "usage": {"input_tokens": 10, "output_tokens": 5}}
         yield {"type": "message_end", "stop_reason": "end_turn"}
+
+
+def test_context_manager_exports_and_restores_durable_compaction_state(tmp_path):
+    config = PaiCliConfig()
+    source = ContextManager(config=config, llm_client=SummaryLlm(), cwd=str(tmp_path))
+    source.restore_state(
+        (
+            "durable summary",
+            PressureResult(
+                tier=PressureTier.TIER3_SUMMARY,
+                pressure_ratio=0.97,
+                rendered_tokens=970,
+                raw_tokens=1000,
+                budget_tokens=1000,
+            ),
+            CompactionResult(
+                summary="durable summary",
+                compacted_items=8,
+                protected_items=4,
+                used_llm=True,
+                llm_usage={"input_tokens": 12, "output_tokens": 4},
+            ),
+        )
+    )
+
+    durable_state = source.export_durable_state()
+
+    assert durable_state == {
+        "summary": "durable summary",
+        "pressure": {
+            "tier": "tier3_summary",
+            "pressure_ratio": 0.97,
+            "rendered_tokens": 970,
+            "raw_tokens": 1000,
+            "budget_tokens": 1000,
+        },
+        "compaction": {
+            "summary": "durable summary",
+            "compacted_items": 8,
+            "protected_items": 4,
+            "used_llm": True,
+            "llm_usage": {"input_tokens": 12, "output_tokens": 4},
+        },
+    }
+
+    restored = ContextManager(config=config, llm_client=SummaryLlm(), cwd=str(tmp_path))
+    restored.restore_durable_state(durable_state)
+    assert restored.get_status()["current_summary"] == "durable summary"
+    assert restored.checkpoint_state()[1] is not None
+    assert restored.checkpoint_state()[1].tier == PressureTier.TIER3_SUMMARY
+    assert restored.checkpoint_state()[2] is not None
+    assert restored.checkpoint_state()[2].compacted_items == 8
+
+
+def test_agent_exports_and_restores_session_context(tmp_path):
+    config = PaiCliConfig()
+    source = Agent(
+        llm_client=SummaryLlm(),
+        tool_registry=ToolRegistry(),
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+    )
+    source.history = [
+        Message(role="assistant", content="compacted history", reasoning_content="private"),
+        Message(role="user", content="latest request"),
+    ]
+    source.context_manager.restore_durable_state(
+        {
+            "summary": "durable summary",
+            "pressure": {},
+            "compaction": {
+                "summary": "durable summary",
+                "compacted_items": 6,
+                "protected_items": 2,
+                "used_llm": False,
+                "llm_usage": {},
+            },
+        }
+    )
+
+    checkpoint = source.export_session_context()
+
+    assert checkpoint is not None
+    assert checkpoint["provider"] == config.llm.provider
+    assert checkpoint["model"] == config.llm.model
+    assert checkpoint["messages"][0]["reasoning_content"] == "private"
+    assert checkpoint["checkpoint_id"].startswith("ctx_")
+
+    restored = Agent(
+        llm_client=SummaryLlm(),
+        tool_registry=ToolRegistry(),
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+    )
+    restored.restore_session_context(
+        [Message(role="assistant", content="compacted history")],
+        checkpoint,
+    )
+    assert [message.content for message in restored.history] == ["compacted history"]
+    assert restored.context_manager.get_status()["current_summary"] == "durable summary"
 
 
 def test_oversized_compaction_uses_map_reduce_without_dropping_late_items():

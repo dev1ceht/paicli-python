@@ -17,6 +17,9 @@ def rebuild_session_view(
     session_history: list[SessionMessage] = []
     model_messages: list[SessionMessage] = []
     reset_sequence: int | None = None
+    last_compaction: dict[str, Any] | None = None
+    context_checkpoint: dict[str, Any] | None = None
+    context_checkpoint_sequence: int | None = None
 
     for event in events:
         if event.type == "session.created":
@@ -32,6 +35,31 @@ def rebuild_session_view(
         if event.type == "context.reset":
             model_messages.clear()
             reset_sequence = event.sequence
+            last_compaction = None
+            context_checkpoint = None
+            context_checkpoint_sequence = None
+            continue
+        if event.type == "context.compacted":
+            last_compaction = dict(event.payload)
+            continue
+        if event.type == "context.checkpoint_created":
+            context_checkpoint = {
+                **event.payload,
+                "summary": (
+                    str(last_compaction.get("summary") or "") if last_compaction else ""
+                ),
+                "compaction": (
+                    dict(last_compaction.get("compaction") or {}) if last_compaction else {}
+                ),
+                "pressure": (
+                    dict(last_compaction.get("pressure") or {}) if last_compaction else {}
+                ),
+                "provider": (
+                    str(last_compaction.get("provider") or "") if last_compaction else ""
+                ),
+                "model": str(last_compaction.get("model") or "") if last_compaction else "",
+            }
+            context_checkpoint_sequence = event.sequence
             continue
         if event.type == "message.hidden":
             message_id = str(event.payload.get("message_id") or "")
@@ -54,6 +82,8 @@ def rebuild_session_view(
         session_history=tuple(session_history),
         model_messages=tuple(model_messages),
         reset_sequence=reset_sequence,
+        context_checkpoint=context_checkpoint,
+        context_checkpoint_sequence=context_checkpoint_sequence,
     )
 
 
