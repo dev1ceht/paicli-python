@@ -6,8 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any
+from enum import StrEnum
 
 from paicli.context.budget import Budget
 from paicli.context.token_estimator import estimate_tokens
@@ -15,7 +14,7 @@ from paicli.context.tool_result import apply_tool_result_compression
 from paicli.types import Message
 
 
-class SectionType(str, Enum):
+class SectionType(StrEnum):
     """Section 类型"""
     PREFIX = "prefix"
     MEMORY = "memory"
@@ -102,18 +101,16 @@ class AssembledPrompt:
     
     def get_section(self, section_type: SectionType) -> Section | None:
         """获取指定类型的 section"""
-        for section in self.sections:
-            if section.type == section_type:
-                return section
-        return None
+        return next(
+            (section for section in self.sections if section.type == section_type),
+            None,
+        )
     
     def to_string(self) -> str:
         """转换为字符串"""
-        parts = []
-        for section in self.sections:
-            if section.content.strip():
-                parts.append(section.content)
-        return "\n\n".join(parts)
+        return "\n\n".join(
+            section.content for section in self.sections if section.content.strip()
+        )
 
 
 def allocate_section_budgets(budget: Budget) -> dict[SectionType, int]:
@@ -125,11 +122,10 @@ def allocate_section_budgets(budget: Budget) -> dict[SectionType, int]:
     Returns:
         每个 section 的字符预算
     """
-    allocations = {}
-    for section_type, ratio in SECTION_BUDGET_RATIOS.items():
-        allocations[section_type] = int(budget.prompt_chars * ratio)
-    
-    return allocations
+    return {
+        section_type: int(budget.prompt_chars * ratio)
+        for section_type, ratio in SECTION_BUDGET_RATIOS.items()
+    }
 
 
 def build_history_section(
@@ -248,57 +244,40 @@ def assemble_prompt(
     Returns:
         组装后的 prompt
     """
-    # 分配预算
     allocations = allocate_section_budgets(budget)
-    
-    # 创建 sections
     assembled = AssembledPrompt()
-    
-    # 1. Prefix
-    assembled.add_section(Section(
-        type=SectionType.PREFIX,
-        content=prefix,
-        budget_chars=allocations[SectionType.PREFIX],
-    ))
-    
-    # 2. Memory
-    assembled.add_section(Section(
-        type=SectionType.MEMORY,
-        content=memory,
-        budget_chars=allocations[SectionType.MEMORY],
-    ))
-    
-    # 3. Skills
-    assembled.add_section(Section(
-        type=SectionType.SKILLS,
-        content=skills,
-        budget_chars=allocations[SectionType.SKILLS],
-    ))
-    
-    # 4. Relevant Memory
-    assembled.add_section(Section(
-        type=SectionType.RELEVANT_MEMORY,
-        content=relevant_memory,
-        budget_chars=allocations[SectionType.RELEVANT_MEMORY],
-    ))
-    
-    # 5. History（含工具结果裁剪）
-    history_section = build_history_section(
-        history or [],
-        allocations[SectionType.HISTORY],
-        keep_recent_tool_results=keep_recent_tool_results,
-        max_tool_result_bytes=max_tool_result_bytes,
-        tool_result_preview_chars=tool_result_preview_chars,
-        tool_result_storage_dir=tool_result_storage_dir,
-        session_id=session_id,
+
+    for section_type, content in (
+        (SectionType.PREFIX, prefix),
+        (SectionType.MEMORY, memory),
+        (SectionType.SKILLS, skills),
+        (SectionType.RELEVANT_MEMORY, relevant_memory),
+    ):
+        assembled.add_section(
+            Section(
+                type=section_type,
+                content=content,
+                budget_chars=allocations[section_type],
+            )
+        )
+
+    assembled.add_section(
+        build_history_section(
+            history or [],
+            allocations[SectionType.HISTORY],
+            keep_recent_tool_results=keep_recent_tool_results,
+            max_tool_result_bytes=max_tool_result_bytes,
+            tool_result_preview_chars=tool_result_preview_chars,
+            tool_result_storage_dir=tool_result_storage_dir,
+            session_id=session_id,
+        )
     )
-    assembled.add_section(history_section)
-    
-    # 6. Current Request（不裁剪）
-    assembled.add_section(Section(
-        type=SectionType.CURRENT_REQUEST,
-        content=current_request,
-        budget_chars=allocations[SectionType.CURRENT_REQUEST],
-    ))
-    
+    assembled.add_section(
+        Section(
+            type=SectionType.CURRENT_REQUEST,
+            content=current_request,
+            budget_chars=allocations[SectionType.CURRENT_REQUEST],
+        )
+    )
+
     return assembled

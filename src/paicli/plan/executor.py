@@ -7,7 +7,7 @@ import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Literal
 
 from paicli.cancellation import TaskCanceled
@@ -20,7 +20,7 @@ from paicli.types import Message
 # ---------------------------------------------------------------------------
 
 
-class TaskType(str, Enum):
+class TaskType(StrEnum):
     FILE_READ = "FILE_READ"
     FILE_WRITE = "FILE_WRITE"
     COMMAND = "COMMAND"
@@ -28,7 +28,7 @@ class TaskType(str, Enum):
     VERIFICATION = "VERIFICATION"
 
 
-class TaskStatus(str, Enum):
+class TaskStatus(StrEnum):
     PENDING = "PENDING"
     RUNNING = "RUNNING"
     COMPLETED = "COMPLETED"
@@ -37,7 +37,7 @@ class TaskStatus(str, Enum):
     SKIPPED = "SKIPPED"
 
 
-class PlanStatus(str, Enum):
+class PlanStatus(StrEnum):
     CREATED = "CREATED"
     RUNNING = "RUNNING"
     COMPLETED = "COMPLETED"
@@ -184,10 +184,7 @@ class ExecutionPlan:
             order.append(task_id)
             return True
 
-        for task in self.tasks:
-            if not _dfs(task.id):
-                return False
-        return True
+        return all(_dfs(task.id) for task in self.tasks)
 
     def get_task(self, task_id: str) -> PlanTask | None:
         for task in self.tasks:

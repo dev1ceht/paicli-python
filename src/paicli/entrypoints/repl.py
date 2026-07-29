@@ -1057,7 +1057,7 @@ def _bottom_toolbar(
     model: str,
     stats: dict[str, Any] | None = None,
 ) -> list[tuple[str, str]]:
-    from paicli.render.rich_renderer import format_cost, format_elapsed, format_tokens
+    from paicli.render._common import format_cost, format_elapsed, format_tokens
 
     stats = stats or {}
     has_usage = bool(stats.get("has_usage"))

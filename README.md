@@ -1,78 +1,35 @@
 # PaiCLI Python
 
-PaiCLI Python 是一个运行在终端里的 AI Agent CLI，面向真实项目开发场景：读写文件、搜索代码、执行命令、联网检索、调用 MCP 工具、保存记忆、生成快照、恢复现场，并通过 Runtime API 对外提供线程、turn、事件和后台任务能力。
+PaiCLI 是一个面向真实项目开发的终端 AI Agent。它通过 OpenAI-compatible
+模型理解任务，并在安全策略约束下读取文件、搜索代码、执行命令、调用 MCP
+工具和维护会话状态。
 
-![](https://cdn.paicoding.com/stutymore/best-city-ai-agent-jd-20260708142704.png)
+项目提供交互式 Textual TUI、单次命令模式、Python SDK 和 Runtime HTTP API，
+适合本地编码、自动化任务以及 Agent 工程学习。
 
-这个仓库是 PaiCLI 的 Python 版本。它不是一个空壳 Demo，而是按真实 CLI 产品来做：核心路径有测试覆盖，也经过本地 smoke 和真实终端运行验证。
+## 主要能力
 
-## 配套教程路线
-
-如果你是为了学习 Agent 工程、准备简历或准备面试，可以先看这条教程路线：
-
-[PaiCLI 学习路线：手搓一个 Java 版 Claude Code](https://paicoding.com/paicli-learning-path)
-
-这篇路线不是单纯教你“从第一行源码看到最后一行”，而是按真实学习和求职路径来组织：
-
-- 先把 PaiCLI 在本地跑起来，直观看到 ReAct、工具调用、Plan 模式和联网搜索是怎么工作的
-- 再把项目能力拆成可以写进简历的模块，比如 ReAct、Plan-and-Execute、Memory、RAG、MCP、HITL、多模态和 Runtime API
-- 然后围绕简历里写到的模块去深挖源码，并同步准备对应的 Agent 面试题
-- 最后通过 debug、改 bug、加工具、整理踩坑笔记，把项目真正变成自己的工程经验
-
-教程目录覆盖实战篇、简历篇和面试篇，适合作为学习 PaiCLI Java 版和理解本 Python 版设计取舍的路线图。
-
-## 功能特性
-
-- **交互式 Textual TUI**：基于 Textual 框架的终端用户界面，支持实时流式输出、可折叠工具结果、原生计划审批弹窗
-- 单次 prompt 模式，适合脚本、管道和自动化调用
-- OpenAI-compatible 流式 LLM 客户端，默认面向 DeepSeek 配置
-- 支持 `DEEPSEEK_API_KEY` 等 provider-specific API Key
-- ReAct 工具调用循环，支持 thinking、tool call、tool result、final output 和 usage 事件
-- 内置文件、Shell、grep、glob、记忆、网页搜索、网页抓取、代码搜索等工具
-- HITL 人工确认、命令/路径安全策略和 JSONL 审计日志
-- MCP client，支持 stdio 和 Streamable HTTP MCP server
-- Chrome DevTools MCP 配置助手
-- PaiCLI 自身也可以作为 MCP server 暴露内置工具
-- Runtime API，支持线程、turn、事件日志和持久化后台任务
-- SQLite 长期记忆和本地代码索引
-- Agent run 前后自动创建快照，支持恢复现场
-- 支持本地图片和远程图片输入，并根据模型能力自动降级
-
-## 终端要求
-
-PaiCLI 的 Textual TUI 需要现代终端支持才能获得最佳体验：
-
-### Windows
-
-- **Windows Terminal** (推荐，Windows 11 默认安装)
-- **PowerShell 7** (推荐) 或 PowerShell 5.1
-- 不支持旧版 Windows PowerShell (`powershell.exe` 5.1 可能部分功能受限)
-
-安装 PowerShell 7：
-
-```powershell
-winget install Microsoft.PowerShell
-```
-
-或使用 [PowerShell 官方文档](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows)。
-
-### macOS / Linux
-
-- 任何支持 True Color 的现代终端（如 iTerm2、GNOME Terminal、Konsole）
-- 建议使用 80×24 或更大的窗口尺寸
-
-### 终端配置建议
-
-- 窗口尺寸：至少 80 列 × 24 行
-- 启用 True Color (24-bit)
-- 使用等宽字体（推荐 JetBrains Mono、Fira Code、Cascadia Code）
+- ReAct Agent 循环与流式输出
+- 文件、Shell、grep、glob、代码索引、网页搜索和网页抓取工具
+- Textual TUI、单次 prompt、计划执行与人工审批
+- OpenAI-compatible 模型接入，内置 DeepSeek、OpenAI、通义千问、智谱、
+  Kimi 和阶跃星辰等 provider 配置
+- stdio / Streamable HTTP MCP client，以及 MCP server 模式
+- SQLite 长期记忆、持久化会话与后台任务
+- 工具调用审计、命令/路径保护、重试和取消机制
+- 项目快照、恢复与本地/远程图片输入
+- 上下文预算、工具结果裁剪和会话压缩
 
 ## 环境要求
 
-- Python 3.11 或更新版本
+- Python 3.11+
 - [uv](https://docs.astral.sh/uv/)
-- 可选：`rg`，用于更快的本地搜索
-- 可选：Chrome DevTools MCP 需要 Node.js 20.19.0 LTS 或更新版本、npm/npx 和 Chrome
+- 推荐使用支持 True Color 的现代终端
+- 可选：`rg`，用于加速本地代码搜索
+- 可选：Node.js 20.19+、npm/npx 和 Chrome，用于 Chrome DevTools MCP
+
+Windows 推荐使用 Windows Terminal 和 PowerShell 7；macOS / Linux 可使用
+iTerm2、GNOME Terminal、Konsole 等现代终端。
 
 ## 快速开始
 
@@ -80,39 +37,9 @@ winget install Microsoft.PowerShell
 git clone https://github.com/itwanger/PaiCLI-Python.git
 cd PaiCLI-Python
 uv sync --extra dev
-uv run paicli --help
 ```
 
-启动交互模式：
-
-```bash
-uv run paicli
-```
-
-单次查询：
-
-```bash
-uv run paicli -p "帮我总结这个项目"
-```
-
-检查当前环境：
-
-```bash
-uv run paicli doctor --cwd .
-```
-
-## 配置
-
-PaiCLI 的配置优先级如下：
-
-1. 内置默认配置
-2. `~/.paicli/config.json`
-3. 项目级 `.paicli/config.json`
-4. 项目级 `.env`
-5. CLI 参数
-6. 当前进程环境变量
-
-可以像 Java 项目一样，把 DeepSeek Key 写到项目 `.env` 里：
+在项目根目录创建 `.env`：
 
 ```dotenv
 PAICLI_PROVIDER=deepseek
@@ -120,332 +47,147 @@ PAICLI_MODEL=deepseek-v4-flash
 DEEPSEEK_API_KEY=your_key_here
 ```
 
-也可以使用 PaiCLI 通用 Key：
+启动交互界面：
 
-```dotenv
-PAICLI_PROVIDER=deepseek
-PAICLI_MODEL=deepseek-v4-flash
-PAICLI_API_KEY=your_key_here
+```bash
+uv run paicli
 ```
 
-当前支持的 provider-specific API Key 包括：
+执行一次性任务：
 
-- `DEEPSEEK_API_KEY`
-- `GLM_API_KEY`
-- `STEP_API_KEY`
-- `KIMI_API_KEY`
-- `QWEN_API_KEY`
-- `DASHSCOPE_API_KEY`
+```bash
+uv run paicli -p "总结这个项目的核心模块"
+```
 
-模型调用和只读幂等工具默认对临时错误最多重试 3 次。可以在用户级或项目级
-`config.json` 中覆盖默认策略，并分别调整模型与工具：
+检查本地环境和当前配置：
+
+```bash
+uv run paicli doctor --cwd .
+```
+
+## 配置
+
+配置按以下顺序覆盖，越靠后优先级越高：
+
+1. 内置默认值
+2. `~/.paicli/config.json`
+3. `<project>/.paicli/config.json`
+4. `<project>/.env`
+5. CLI 参数
+6. 当前进程环境变量
+
+常用环境变量：
+
+| 变量 | 说明 |
+| --- | --- |
+| `PAICLI_PROVIDER` | 模型服务商，默认 `deepseek` |
+| `PAICLI_MODEL` | 模型名称，默认 `deepseek-v4-flash` |
+| `PAICLI_API_KEY` | 通用 API Key |
+| `PAICLI_BASE_URL` | 自定义 OpenAI-compatible API 地址 |
+| `PAICLI_MAX_TOKENS` | 单次响应 token 上限 |
+| `PAICLI_CONTEXT_WINDOW` | 覆盖模型上下文窗口 |
+| `PAICLI_TEMPERATURE` | 采样温度 |
+| `PAICLI_HITL` | 审批模式：`always`、`auto` 或 `never` |
+
+除通用 Key 外，也支持 `DEEPSEEK_API_KEY`、`GLM_API_KEY`、
+`STEP_API_KEY`、`KIMI_API_KEY`、`QWEN_API_KEY` 和
+`DASHSCOPE_API_KEY` 等 provider-specific Key。
+
+连接自定义 OpenAI-compatible 服务：
+
+```dotenv
+PAICLI_PROVIDER=openai-compatible
+PAICLI_BASE_URL=http://127.0.0.1:11434/v1
+PAICLI_MODEL=qwen2.5-coder
+PAICLI_API_KEY=local-key
+```
+
+完整 JSON 配置示例：
 
 ```json
 {
   "llm": {
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash",
     "context_window": 64000
   },
-  "retry": {
-    "enabled": true,
-    "default": {
-      "max_retries": 3,
-      "base_delay": 1.0,
-      "max_delay": 8.0,
-      "max_retry_after": 30.0
-    },
-    "llm": {},
-    "tools": {}
+  "policy": {
+    "hitl_mode": "auto"
   },
-  "plan": {
-    "replan_progress_threshold": 0.5,
-    "max_replans": 1
+  "retry": {
+    "enabled": true
   }
 }
 ```
 
-`llm.context_window` 是可选的模型上下文上限覆盖值。未配置且模型不在内置映射中时，
-界面显示 `?`，内部使用 128k 安全预算。
+## 常用交互命令
 
-计划进度只计算成功完成的节点。节点失败后不再调度新节点；成功进度低于阈值时，
-系统最多生成一份剩余工作计划，并再次进入用户审阅。
+进入 `uv run paicli` 后，可使用 slash command：
 
-通过命令行临时覆盖 provider 和 model：
+| 命令 | 用途 |
+| --- | --- |
+| `/help`、`/config`、`/tools` | 查看帮助、配置和工具 |
+| `/clear`、`/reset`、`/context` | 管理界面、会话和上下文 |
+| `/plan <task>`、`/team <task>` | 规划或拆分任务 |
+| `/memory`、`/save <fact>` | 查询或保存长期记忆 |
+| `/index [path]`、`/search <query>` | 建立索引并搜索代码 |
+| `/mcp`、`/skill`、`/model` | 管理扩展与当前模型 |
+| `/task`、`/task add <task>` | 管理后台任务 |
+| `/snapshot`、`/restore <id>` | 创建或恢复项目快照 |
+| `/exit` | 退出 |
 
-```bash
-uv run paicli --provider deepseek --model deepseek-v4-flash
-```
+常用快捷键：
 
-连接本地 OpenAI-compatible 服务：
-
-```bash
-PAICLI_PROVIDER=openai-compatible \
-PAICLI_BASE_URL=http://127.0.0.1:11434/v1 \
-PAICLI_MODEL=qwen2.5-coder \
-uv run paicli -p "解释这个仓库"
-```
-
-## 交互命令
-
-进入 `uv run paicli` 后，可以使用这些 slash commands：
-
-```text
-/help
-/exit
-/clear
-/reset
-/context
-/memory
-/memory list
-/memory search <query>
-/memory delete <id>
-/memory clear
-/save <fact>
-/save --global <fact>
-/config
-/tools
-/hitl on|off|always|auto|never
-/policy
-/audit [N]
-/index [path]
-/search <query>
-/plan <task>
-/team <task>
-/model
-/skill
-/skill show <name>
-/mcp
-/task
-/task add <task>
-/task approve <task_id|N|latest>
-/task deny <task_id|N|latest>
-/task cancel <task_id|N|latest>
-/task retry <task_id|N|latest>
-/task log <task_id|N|latest>
-/snapshot
-/snapshot clean
-/restore <snapshot-id-or-index>
-```
-
-### 键盘快捷键
-
-TUI 界面支持以下快捷键：
-
-| 快捷键 | 功能 |
-|--------|------|
-| `Enter` | 发送消息 |
-| `Shift+Enter` | 插入换行 |
-| `Ctrl+C` | 中断运行中的 Agent（运行中）/ 退出程序（空闲时） |
-| `Ctrl+Q` | 立即退出程序 |
+| 快捷键 | 用途 |
+| --- | --- |
+| `Enter` / `Shift+Enter` | 发送 / 换行 |
+| `Ctrl+C` | 中断运行；空闲时退出 |
+| `Ctrl+Q` | 立即退出 |
 | `Ctrl+L` | 清屏 |
-| `Up/Down` | 浏览历史输入 |
-| `Tab` | 自动补全 slash 命令 |
-
-**计划审批界面快捷键：**
-
-| 快捷键 | 功能 |
-|--------|------|
-| `Enter` | 执行计划 |
-| `Ctrl+O` | 展开/折叠计划详情 |
-| `I` | 添加补充说明 |
-| `Esc` | 取消计划 |
-
-**工具审批界面快捷键：**
-
-| 快捷键 | 功能 |
-|--------|------|
-| `y` | 批准 |
-| `n` / `Esc` | 拒绝 |
-| `a` | 批准所有后续操作（切换到 YOLO 模式） |
-| `s` | 跳过当前操作 |
-
-## 内置工具
-
-PaiCLI 内置了一组 Agent 可以调用的本地工具和联网工具：
-
-- `read_file`
-- `write_file`
-- `list_dir`
-- `glob` / `glob_files`
-- `grep` / `grep_code`
-- `bash` / `execute_command`
-- `web_search`
-- `web_fetch`
-- `save_memory`
-- `load_skill`
-- `search_code`
-- `revert_turn`
-
-写文件、执行命令、远程 MCP 写操作、恢复快照等危险动作，会经过 policy、HITL 和 audit 处理。
-审计日志默认按天写入 `~/.paicli/audit/audit-YYYY-MM-DD.jsonl`。
-
-## 联网工具
-
-`web_search` 使用 DuckDuckGo HTML 搜索，返回标题、URL 和摘要。
-
-`web_fetch` 可以抓取公开 HTTP/HTTPS 页面，并做基础正文提取。它会拒绝 `file://`、loopback、私有网络和内网地址，降低 SSRF 风险。
-
-如果需要登录态、浏览器状态或 JS 渲染页面，建议使用 Chrome DevTools MCP。
+| `Tab` | 补全 slash command |
 
 ## MCP
 
-PaiCLI 可以连接 MCP server，并把远端工具动态注册为：
-
-```text
-mcp__<server-name>__<tool-name>
-```
-
-初始化项目级 Chrome DevTools MCP 配置：
+初始化项目级 Chrome DevTools MCP：
 
 ```bash
 uv run paicli mcp init-chrome --scope project
-```
-
-它会写入 `.paicli/mcp.json`，内容类似：
-
-```json
-{
-  "mcpServers": {
-    "chrome-devtools": {
-      "type": "stdio",
-      "command": "npx",
-      "args": [
-        "-y",
-        "chrome-devtools-mcp@latest",
-        "--no-usage-statistics"
-      ]
-    }
-  }
-}
-```
-
-连接已有 remote-debugging Chrome：
-
-```bash
-uv run paicli mcp init-chrome \
-  --scope project \
-  --browser-url http://127.0.0.1:9222
-```
-
-查看已配置的 MCP server：
-
-```bash
 uv run paicli mcp list
 ```
 
-把 PaiCLI 自身作为 MCP server 暴露：
+将 PaiCLI 作为 MCP server 运行：
 
 ```bash
 uv run paicli mcp serve --transport stdio
 uv run paicli mcp serve --transport http --port 3000
 ```
 
-HTTP smoke：
-
-```bash
-curl -sS -X POST http://127.0.0.1:3000 \
-  -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
-```
-
-Chrome DevTools MCP 会把浏览器页面和 DevTools 状态暴露给 Agent。不要随意把包含个人账号、敏感数据或生产后台的 Chrome 会话授权给 Agent。
+MCP 配置保存在用户级 `~/.paicli/mcp.json` 或项目级
+`.paicli/mcp.json`。不要将包含敏感账号或生产数据的浏览器会话授权给 Agent。
 
 ## Runtime API
 
-PaiCLI 内置轻量 Runtime API，适合外部系统接入线程、turn、事件和后台任务。
-Runtime thread 与后台任务都持久化到 `~/.paicli/sessions/sessions.db`：thread 是可续接的
-Session，后台任务是带父子关系的 child Session。旧 `runtime.db` / `tasks.db` 数据不会迁移。
-
-启动服务：
+Runtime API 提供持久化 thread、turn、事件和后台任务接口。先配置 API Key：
 
 ```bash
-PAICLI_RUNTIME_API_KEY=dev-key \
-uv run paicli serve --http --port 8080
+PAICLI_RUNTIME_API_KEY=dev-key uv run paicli serve --http --port 8080
 ```
 
-创建线程：
+创建 thread 并发送 turn：
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8080/v1/threads \
-  -H 'x-api-key: dev-key'
+curl -X POST http://127.0.0.1:8080/v1/threads \
+  -H "x-api-key: dev-key"
+
+curl -X POST http://127.0.0.1:8080/v1/threads/<thread_id>/turns \
+  -H "content-type: application/json" \
+  -H "x-api-key: dev-key" \
+  -d '{"message":"总结当前项目"}'
 ```
 
-发送 turn：
+运行数据默认保存在 `~/.paicli/sessions/sessions.db`。
 
-```bash
-curl -sS -X POST http://127.0.0.1:8080/v1/threads/<thread_id>/turns \
-  -H 'content-type: application/json' \
-  -H 'x-api-key: dev-key' \
-  -d '{"message":"总结这个项目"}'
-```
-
-读取事件：
-
-```bash
-curl -sS http://127.0.0.1:8080/v1/threads/<thread_id>/events \
-  -H 'x-api-key: dev-key'
-```
-
-创建并查看后台任务：
-
-```bash
-curl -sS -X POST http://127.0.0.1:8080/v1/tasks \
-  -H 'content-type: application/json' \
-  -H 'x-api-key: dev-key' \
-  -d '{"message":"后台总结这个仓库"}'
-
-curl -sS http://127.0.0.1:8080/v1/tasks \
-  -H 'x-api-key: dev-key'
-
-# 查看等待审批任务的脱敏详情，并作出决定
-curl -sS http://127.0.0.1:8080/v1/tasks/<task_id> \
-  -H 'x-api-key: dev-key'
-
-curl -sS -X POST http://127.0.0.1:8080/v1/tasks/<task_id>/approve \
-  -H 'x-api-key: dev-key'
-
-# 使用 /deny 拒绝当前调用，让 Agent 尝试替代方案
-curl -sS -X POST http://127.0.0.1:8080/v1/tasks/<task_id>/deny \
-  -H 'x-api-key: dev-key'
-```
-
-## 图片输入
-
-PaiCLI 支持在 prompt 里引用图片：
-
-```text
-分析这张截图 @image:./screenshots/page.png
-```
-
-也支持绝对路径和远程图片：
-
-```text
-解释这张图 @image:/Users/me/Desktop/diagram.png
-看看这个图片 @image:https://example.com/image.png
-```
-
-本地图片会自动压缩、缩放，并在需要时把透明底铺成白底，再转为 data URL。如果当前 provider/model 不支持多模态输入，PaiCLI 会自动降级为文本元信息，不会把不支持的图片 payload 发给模型。
-
-## 快照
-
-每次 Agent run 都会尽力创建项目快照：
-
-- `pre-turn`
-- `post-turn`
-
-快照通过 Dulwich 维护独立 Side-Git 仓库，保存在
-`~/.paicli/snapshots/<parent_hash>/<project_hash>/.git`，不会写入项目 `.git`，
-也不会为每个 turn 复制一整份项目目录。
-
-REPL 中可以使用：
-
-```text
-/snapshot
-/snapshot status
-/restore 1
-/snapshot clean
-```
-
-## SDK
+## Python SDK
 
 ```python
 from paicli.sdk import create_default_engine
@@ -455,19 +197,34 @@ result = engine.ask_complete("解释这个项目")
 print(result.text)
 ```
 
-## 开发
+## 项目结构
 
-安装开发依赖：
+```text
+src/paicli/
+├── agent/        # Agent 循环与查询引擎
+├── context/      # 上下文预算、组装与压缩
+├── entrypoints/  # CLI 与 REPL
+├── llm/          # OpenAI-compatible 模型客户端
+├── mcp/          # MCP client / server
+├── render/       # TUI、Rich 和纯文本渲染
+├── runtime/      # Runtime API 与后台任务
+├── session/      # 持久化会话、回放与分享
+└── tools/        # 工具注册、执行与内置工具
+```
+
+其他目录：
+
+- `tests/`：单元与集成测试
+- `benchmarks/`：本地编码基准、fixture 和验收脚本
+- `docs/adr/`：关键架构决策
+- `docs/parity.md`：与其他 PaiCLI 实现的能力对齐说明
+
+## 开发
 
 ```bash
 uv sync --extra dev
-```
-
-运行检查：
-
-```bash
-uv run python -m ruff check .
-uv run python -m ruff format --check .
+uv run python -m ruff check src tests
+uv run python -m ruff format --check src tests
 uv run python -m pytest
 uv build
 ```
@@ -478,17 +235,24 @@ uv build
 uv run paicli --version
 uv run paicli --help
 uv run paicli doctor --cwd .
-uv run paicli --plain -p hello
 ```
 
-## 和 Java / TypeScript 版本的关系
+## 安全说明
 
-Python 版覆盖了 Java / TypeScript 版本里公开、开放协议相关的主要 Agent CLI 能力，包括 CLI、REPL、工具调用、MCP、Runtime API、记忆、快照、联网工具和图片输入。
+PaiCLI 会对工作区写入、命令执行、MCP 调用和快照恢复等操作应用审批、
+路径保护与审计策略。审计日志默认写入
+`~/.paicli/audit/audit-YYYY-MM-DD.jsonl`。
 
-Java 版本里还有一个私有的微信 iLink 通道。Python 仓库没有内置这个私有通道，因为它依赖账号、扫码登录和协议凭证，不应该用假实现冒充。
+Agent 工具不是操作系统级沙箱。运行未知命令、连接外部 MCP server 或开放
+Runtime API 前，请确认工作区、权限和网络边界符合预期。
 
-更详细的实现对齐情况见 [docs/parity.md](docs/parity.md)。
+## 进一步阅读
+
+- [架构决策记录](docs/adr/)
+- [实现对齐说明](docs/parity.md)
+- [本地 smoke 基准说明](docs/specs/local-smoke-v1.md)
+- [PaiCLI 学习路线](https://paicoding.com/paicli-learning-path)
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+[MIT](LICENSE)
