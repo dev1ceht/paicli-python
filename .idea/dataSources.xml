@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="DataSourceManagerImpl" format="xml" multifile-model="true">
-    <data-source source="LOCAL" name="runtime.db" uuid="6a7eb9af-aaaf-461c-8b73-de3498ffc604">
+    <data-source source="LOCAL" name="sessions.db" uuid="78d5940d-a540-4166-b1a6-9fae92412670">
       <driver-ref>sqlite.xerial</driver-ref>
       <synchronize>true</synchronize>
       <jdbc-driver>org.sqlite.JDBC</jdbc-driver>
-      <jdbc-url>jdbc:sqlite:$USER_HOME$/.paicli/runtime/runtime.db</jdbc-url>
+      <jdbc-url>jdbc:sqlite:$USER_HOME$/.paicli/sessions/sessions.db</jdbc-url>
       <working-dir>$ProjectFileDir$</working-dir>
     </data-source>
   </component>
