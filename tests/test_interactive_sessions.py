@@ -945,36 +945,36 @@ def test_tui_persists_inline_tool_approval_decision(tmp_path: Path) -> None:
                 },
             }
             app._interactive_session.begin_turn("write it")
-            app.handle_event(
-                {
-                    "type": "turn_complete",
-                    "turn": 1,
-                    "stop_reason": "tool_use",
-                    "message": {
-                        "role": "assistant",
-                        "content": "",
-                        "tool_calls": [call],
-                    },
-                    "tool_actions": [
-                        {
-                            "tool_call_id": "call_write",
-                            "tool_name": "write_file",
-                            "arguments": {"path": "note.txt"},
-                            "raw_call": call,
-                            "is_read_only": False,
-                            "is_idempotent": False,
-                        }
-                    ],
-                }
-            )
-            app.handle_event(
-                {
-                    "type": "tool_call",
-                    "tool_call_id": "call_write",
-                    "name": "write_file",
-                    "input": {"path": "note.txt"},
-                }
-            )
+            turn_event = {
+                "type": "turn_complete",
+                "turn": 1,
+                "stop_reason": "tool_use",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [call],
+                },
+                "tool_actions": [
+                    {
+                        "tool_call_id": "call_write",
+                        "tool_name": "write_file",
+                        "arguments": {"path": "note.txt"},
+                        "raw_call": call,
+                        "is_read_only": False,
+                        "is_idempotent": False,
+                    }
+                ],
+            }
+            await app._persist_session_event(app._interactive_session, turn_event)
+            app.handle_event(turn_event)
+            tool_event = {
+                "type": "tool_call",
+                "tool_call_id": "call_write",
+                "name": "write_file",
+                "input": {"path": "note.txt"},
+            }
+            await app._persist_session_event(app._interactive_session, tool_event)
+            app.handle_event(tool_event)
 
             async def request() -> None:
                 nonlocal decision
