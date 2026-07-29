@@ -1335,6 +1335,7 @@ def test_app_reviews_plan_inline_without_changing_screen():
 
 def test_app_requests_approval_inline_without_changing_screen():
     from paicli.render.tui_dialogs import ApprovalScreen, InlineApprovalRequest
+    from textual.widgets import Button
 
     async def run() -> None:
         app = PaiCliApp(cwd=".")
@@ -1369,6 +1370,10 @@ def test_app_requests_approval_inline_without_changing_screen():
             assert app.query_one(CommandInput).disabled is True
             assert chat_log.scroll_y == 0
             assert chat_log.new_activity_pending is True
+            buttons = list(approval.query(Button))
+            assert len(buttons) == 4
+            assert all(button.size.height == 1 for button in buttons)
+            assert max(button.size.width for button in buttons) < 24
 
             await pilot.press("y")
             await pilot.pause()

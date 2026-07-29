@@ -40,12 +40,12 @@ class InlineApprovalRequest(Static):
         width: 100%;
         height: auto;
         margin: 0 0 1 0;
-        padding: 0 1;
-        background: #16130b;
-        border-left: solid #facc15;
+        padding: 0;
+        background: transparent;
+        border: none;
     }
     InlineApprovalRequest:focus {
-        border-left: double #60d8ff;
+        border: none;
     }
     InlineApprovalRequest .decision-title {
         height: 1;
@@ -63,8 +63,38 @@ class InlineApprovalRequest(Static):
         overflow-y: auto;
     }
     InlineApprovalRequest .decision-actions {
-        height: 3;
+        width: auto;
+        height: 1;
         margin-top: 1;
+    }
+    InlineApprovalRequest .decision-actions Button {
+        width: auto;
+        min-width: 0;
+        height: 1;
+        margin-right: 1;
+        padding: 0 1;
+        border: none !important;
+        background: transparent !important;
+        text-style: bold;
+    }
+    InlineApprovalRequest .decision-actions Button:hover,
+    InlineApprovalRequest .decision-actions Button:focus,
+    InlineApprovalRequest .decision-actions Button.-active {
+        border: none !important;
+        background: transparent !important;
+        text-style: underline bold;
+    }
+    InlineApprovalRequest .approval-approve {
+        color: #a8ff60 !important;
+    }
+    InlineApprovalRequest .approval-deny {
+        color: #ff4d5a !important;
+    }
+    InlineApprovalRequest .approval-allow-session {
+        color: #60d8ff !important;
+    }
+    InlineApprovalRequest .approval-skip {
+        color: #facc15 !important;
     }
     InlineApprovalRequest.resolved {
         height: 1;
@@ -126,10 +156,14 @@ class InlineApprovalRequest(Static):
         yield Static(self._input_summary(), classes="decision-summary")
         yield Static(self._detail_text(), classes="decision-detail")
         with Horizontal(classes="decision-actions"):
-            yield Button("Approve [Y]", variant="success", name="approve")
-            yield Button("Deny [N]", variant="error", name="deny")
-            yield Button("Allow session [A]", name="allow_session")
-            yield Button("Skip [S]", name="skip")
+            yield Button("Approve [Y]", name="approve", classes="approval-approve")
+            yield Button("Deny [N]", name="deny", classes="approval-deny")
+            yield Button(
+                "Allow session [A]",
+                name="allow_session",
+                classes="approval-allow-session",
+            )
+            yield Button("Skip [S]", name="skip", classes="approval-skip")
 
     async def wait(self) -> str:
         return await self._future

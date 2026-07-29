@@ -343,8 +343,7 @@ class ThinkingBlock(Static):
         color: #8b949e;
         padding: 0;
     }
-    ThinkingBlock Collapsible,
-    ToolCard Collapsible {
+    ThinkingBlock Collapsible {
         width: 100%;
         height: auto;
         margin: 0;
@@ -352,17 +351,14 @@ class ThinkingBlock(Static):
         background: transparent;
         border: none;
     }
-    ThinkingBlock Collapsible:focus-within,
-    ToolCard Collapsible:focus-within {
+    ThinkingBlock Collapsible:focus-within {
         background: transparent;
     }
-    ThinkingBlock CollapsibleTitle,
-    ToolCard CollapsibleTitle {
+    ThinkingBlock CollapsibleTitle {
         padding: 0;
         background: transparent;
     }
-    ThinkingBlock Collapsible > Contents,
-    ToolCard Collapsible > Contents {
+    ThinkingBlock Collapsible > Contents {
         height: auto;
         padding: 0 0 0 2;
     }
@@ -470,6 +466,25 @@ class ToolCard(Static):
     ToolCard .tool-output {
         color: #c9d1d9;
         padding: 0;
+    }
+    ToolCard Collapsible {
+        width: 100%;
+        height: auto;
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        border: none;
+    }
+    ToolCard Collapsible:focus-within {
+        background: transparent;
+    }
+    ToolCard CollapsibleTitle {
+        padding: 0;
+        background: transparent;
+    }
+    ToolCard Collapsible > Contents {
+        height: auto;
+        padding: 0 0 0 2;
     }
     ToolCard.tool-running {
         color: #60d8ff;
