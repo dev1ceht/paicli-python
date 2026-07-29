@@ -6,6 +6,7 @@ provides interactive, mouse-driven collapsible tool results.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import sys
@@ -124,6 +125,7 @@ class PaiCliApp(App):
         self._model = ""
         self._agent_running = False
         self._worker = None  # Reference to current agent worker for cancellation
+        self._active_run_state: dict[str, str] | None = None
         self._task_buffers: dict[str, list[str]] = {}
         self._task_thinking_buffers: dict[str, list[str]] = {}
         self._context_usage = ContextUsageState()
@@ -406,26 +408,8 @@ class PaiCliApp(App):
     def run_agent_task(self, message: str) -> None:
         """Launch the agent as a background task."""
         chat_log = self.query_one("#chat-log", ChatLog)
-        if self._interactive_session is not None and (
-            self._interactive_session.discard_incomplete_turn(
-                reason="superseded_by_new_submission",
-            )
-        ):
-            chat_log.add_info(
-                "[yellow]Previous incomplete turn was marked interrupted; "
-                "starting the new submission.[/yellow]"
-            )
         self._prepare_agent_run()
         chat_log.add_user_message(message)
-        if self._interactive_session is not None:
-            try:
-                self._interactive_session.begin_turn(message)
-            except Exception as exc:
-                self._agent_running = False
-                self._phase = "idle"
-                chat_log.add_info(f"[bold red]Session error:[/bold red] {exc}")
-                self._update_status_bar()
-                return
         self._launch_agent_run(
             message=message,
             interruption_reason="agent_stopped",
@@ -454,41 +438,127 @@ class PaiCliApp(App):
         error_label: str,
     ) -> None:
         chat_log = self.query_one("#chat-log", ChatLog)
+        session = self._interactive_session
+        run_state = {"interruption_reason": interruption_reason}
+        self._active_run_state = run_state
 
         async def _run() -> None:
             completed = False
+            turn_started = False
             try:
                 if self.agent is None:
                     chat_log.add_info("[red]Agent not initialized[/red]")
                     return
+                if session is not None:
+                    try:
+                        discarded = await self._run_session_call(
+                            session.discard_incomplete_turn,
+                            reason="superseded_by_new_submission",
+                        )
+                        if discarded:
+                            chat_log.add_info(
+                                "[yellow]Previous incomplete turn was marked interrupted; "
+                                "starting the new submission.[/yellow]"
+                            )
+                        # Mark this optimistically so cancellation during the thread
+                        # call still closes a turn that may already be persisted.
+                        turn_started = True
+                        await self._run_session_call(session.begin_turn, message)
+                    except Exception as exc:
+                        chat_log.add_info(f"[bold red]Session error:[/bold red] {exc}")
+                        return
                 run = self.agent.run(message)
                 async for event in run:
                     self.handle_event(event)
+                    if session is not None:
+                        try:
+                            await self._persist_session_event(session, event)
+                        except Exception as persistence_error:
+                            await self._recover_session_persistence_error(
+                                persistence_error,
+                                chat_log,
+                                session=session,
+                            )
+                            turn_started = False
+                            break
                     if event.get("type") == "done":
                         completed = True
                     if event.get("type") == "error":
                         break
+                    await asyncio.sleep(0)
             except Exception as exc:
                 chat_log.add_info(f"[bold red]{error_label}:[/bold red] {exc}")
             finally:
                 try:
-                    if self._interactive_session is not None:
+                    if session is not None and turn_started:
                         assistant_text = "".join(self._session_text_buffer)
                         if completed:
-                            self._interactive_session.complete_turn(assistant_text)
+                            await self._run_session_call(session.complete_turn, assistant_text)
                         else:
-                            self._interactive_session.interrupt_turn(
+                            await self._run_session_call(
+                                session.interrupt_turn,
                                 assistant_text,
-                                reason=interruption_reason,
+                                reason=run_state["interruption_reason"],
                             )
                 except Exception as persistence_error:
-                    self._recover_session_persistence_error(persistence_error, chat_log)
-                self._agent_running = False
-                self._phase = "idle"
-                self._worker = None
-                self._update_status_bar()
+                    await self._recover_session_persistence_error(
+                        persistence_error,
+                        chat_log,
+                        session=session,
+                    )
+                if self._active_run_state is run_state:
+                    self._agent_running = False
+                    self._phase = "idle"
+                    self._worker = None
+                    self._active_run_state = None
+                    self._update_status_bar()
 
         self._worker = self.run_worker(_run(), exclusive=True)
+
+    @staticmethod
+    async def _run_session_call(callback: Any, *args: Any, **kwargs: Any) -> Any:
+        """Run one ordered Session operation without blocking the Textual loop."""
+        task = asyncio.create_task(asyncio.to_thread(callback, *args, **kwargs))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # A cancelled coroutine cannot stop its worker thread. Wait for the
+            # operation to settle so close() or the next write cannot race it.
+            await task
+            raise
+
+    async def _persist_session_event(self, session: Any, event: dict[str, Any]) -> None:
+        """Persist one stream event before the next event is consumed."""
+        ui_event = UiEvent.from_agent(event)
+        payload = ui_event.payload
+        if ui_event.kind == "turn_complete":
+            tool_actions = payload.get("tool_actions") or []
+            if tool_actions:
+                message = payload.get("message") or {}
+                await self._run_session_call(
+                    session.record_tool_batch,
+                    model_turn=int(payload.get("turn") or 0),
+                    assistant_content=str(message.get("content") or ""),
+                    reasoning_content=(
+                        str(message["reasoning_content"])
+                        if message.get("reasoning_content")
+                        else None
+                    ),
+                    actions=list(tool_actions),
+                )
+                self._session_text_buffer.clear()
+        elif ui_event.kind == "tool_call":
+            await self._run_session_call(
+                session.start_tool_action,
+                str(payload.get("tool_call_id") or ""),
+            )
+        elif ui_event.kind == "tool_result":
+            await self._run_session_call(
+                session.complete_tool_action,
+                str(payload.get("tool_call_id") or ""),
+                content=str(payload.get("result") or ""),
+                is_error=bool(payload.get("is_error")),
+            )
 
     def handle_event(self, event: dict[str, Any]) -> None:
         """Process an agent event and update the UI."""
@@ -559,20 +629,6 @@ class PaiCliApp(App):
             chat_log = self.query_one("#chat-log", ChatLog)
             chat_log.add_info(f"Context reduced: {before}% → {after}% · {actions}")
         elif event_type == "turn_complete":
-            tool_actions = payload.get("tool_actions") or []
-            if self._interactive_session is not None and tool_actions:
-                message = payload.get("message") or {}
-                self._interactive_session.record_tool_batch(
-                    model_turn=int(payload.get("turn") or 0),
-                    assistant_content=str(message.get("content") or ""),
-                    reasoning_content=(
-                        str(message["reasoning_content"])
-                        if message.get("reasoning_content")
-                        else None
-                    ),
-                    actions=list(tool_actions),
-                )
-                self._session_text_buffer.clear()
             self._flush_thinking()
             stop_reason = str(payload.get("stop_reason") or "end_turn")
             if stop_reason != "tool_use" and self._text_buffer:
@@ -580,18 +636,10 @@ class PaiCliApp(App):
             elif stop_reason == "tool_use":
                 self._flush_text("Assistant Output")
         elif event_type == "tool_call":
-            if self._interactive_session is not None:
-                self._interactive_session.start_tool_action(str(payload.get("tool_call_id") or ""))
             self._flush_thinking()
             self._flush_text("Assistant Output")
             self._handle_tool_call(payload)
         elif event_type == "tool_result":
-            if self._interactive_session is not None:
-                self._interactive_session.complete_tool_action(
-                    str(payload.get("tool_call_id") or ""),
-                    content=str(payload.get("result") or ""),
-                    is_error=bool(payload.get("is_error")),
-                )
             self._flush_thinking()
             self._flush_text("Assistant Output")
             self._handle_tool_result(payload)
@@ -1020,21 +1068,13 @@ class PaiCliApp(App):
     def action_interrupt(self) -> None:
         """Cancel running agent if active; otherwise exit."""
         if self._agent_running and self._worker and self._worker.is_running:
-            if self._interactive_session is not None:
-                try:
-                    self._interactive_session.interrupt_turn(
-                        "".join(self._session_text_buffer),
-                        reason="user_interrupt",
-                    )
-                except Exception as persistence_error:
-                    self._recover_session_persistence_error(
-                        persistence_error,
-                        self.query_one("#chat-log", ChatLog),
-                    )
+            if self._active_run_state is not None:
+                self._active_run_state["interruption_reason"] = "user_interrupt"
             self._worker.cancel()
-            self._agent_running = False
-            self._phase = "idle"
-            self._worker = None
+            if self._active_run_state is None:
+                self._agent_running = False
+                self._phase = "idle"
+                self._worker = None
             self._context_usage.apply({"type": "context_scope_clear", "scope": "agent"})
             chat_log = self.query_one("#chat-log", ChatLog)
             chat_log.add_info("[yellow]! Agent interrupted[/yellow]")
@@ -1047,14 +1087,17 @@ class PaiCliApp(App):
 
     # -- Slash command helpers -------------------------------------------
 
-    def _recover_session_persistence_error(
+    async def _recover_session_persistence_error(
         self,
         error: Exception,
         chat_log: ChatLog,
+        *,
+        session: Any,
     ) -> None:
-        if self._interactive_session is not None:
+        if session is not None:
             with suppress(Exception):
-                self._interactive_session.interrupt_turn(
+                await self._run_session_call(
+                    session.interrupt_turn,
                     "",
                     reason="persistence_error",
                 )

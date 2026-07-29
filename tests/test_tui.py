@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1508,5 +1509,295 @@ def test_transient_session_database_lock_does_not_stop_running_agent():
             assert app._agent_running is True
             assert app._phase == "running"
             assert "refresh delayed" in app.query_one(ChatLog).renderable_text()
+
+    asyncio.run(run())
+
+
+def test_buffered_agent_stream_yields_to_input_and_intermediate_output():
+    from textual.events import Key
+
+    class BufferedAgent:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.input_processed = asyncio.Event()
+            self.assistant_observed = asyncio.Event()
+            self.stream_finished = asyncio.Event()
+            self.release = asyncio.Event()
+            self.saw_input_during_stream = False
+            self.saw_assistant_during_stream = False
+
+        async def run(self, message: str):
+            assert message == "burst"
+            self.started.set()
+            for _ in range(200):
+                if self.input_processed.is_set():
+                    self.saw_input_during_stream = True
+                    break
+                yield {"type": "thinking_delta", "thinking": "x"}
+            yield {
+                "type": "turn_complete",
+                "turn": 1,
+                "stop_reason": "end_turn",
+                "tool_actions": [],
+            }
+            for _ in range(200):
+                if self.assistant_observed.is_set():
+                    self.saw_assistant_during_stream = True
+                    break
+                yield {"type": "text_delta", "text": "y"}
+            self.stream_finished.set()
+            await self.release.wait()
+            yield {"type": "done", "total_tokens": 1, "total_turns": 1}
+
+    async def run() -> None:
+        agent = BufferedAgent()
+        app = PaiCliApp(agent=agent, cwd=".")
+        async with app.run_test(size=(80, 24)):
+            command_input = app.query_one(CommandInput)
+            command_input.focus()
+            app.run_agent_task("burst")
+            await asyncio.wait_for(agent.started.wait(), timeout=1)
+
+            async def observe_input() -> None:
+                while command_input.text != "a":
+                    await asyncio.sleep(0)
+                agent.input_processed.set()
+
+            async def observe_assistant() -> None:
+                while not any(
+                    block.role == "assistant" and block.plain_text
+                    for block in app.query(MessageBlock)
+                ):
+                    await asyncio.sleep(0)
+                agent.assistant_observed.set()
+
+            input_observer = asyncio.create_task(observe_input())
+            assistant_observer = asyncio.create_task(observe_assistant())
+            key = Key("a", "a")
+            key.set_sender(app)
+            assert app._driver is not None
+            app._driver.send_message(key)
+
+            await asyncio.wait_for(input_observer, timeout=1)
+            await asyncio.wait_for(assistant_observer, timeout=1)
+            await asyncio.wait_for(agent.stream_finished.wait(), timeout=1)
+
+            assert command_input.text == "a"
+            saw_input = agent.saw_input_during_stream
+            saw_assistant = agent.saw_assistant_during_stream
+            agent.release.set()
+            while app._agent_running:
+                await asyncio.sleep(0)
+
+            assert saw_input is True
+            assert saw_assistant is True
+
+    asyncio.run(run())
+
+
+def test_agent_session_persistence_runs_off_ui_thread_in_event_order():
+    class RecordingSession:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int]] = []
+
+        def _record(self, name: str) -> None:
+            self.calls.append((name, threading.get_ident()))
+
+        def discard_incomplete_turn(self, *, reason: str) -> bool:
+            assert reason == "superseded_by_new_submission"
+            self._record("discard")
+            return False
+
+        def begin_turn(self, message: str) -> None:
+            assert message == "persist"
+            self._record("begin")
+
+        def record_tool_batch(self, **kwargs) -> None:
+            assert kwargs["model_turn"] == 1
+            self._record("record_tool_batch")
+
+        def start_tool_action(self, tool_call_id: str) -> None:
+            assert tool_call_id == "call-1"
+            self._record("start_tool_action")
+
+        def complete_tool_action(self, tool_call_id: str, **kwargs) -> None:
+            assert tool_call_id == "call-1"
+            self._record("complete_tool_action")
+
+        def complete_turn(self, assistant_text: str) -> None:
+            assert assistant_text == "done"
+            self._record("complete_turn")
+
+        def interrupt_turn(self, assistant_text: str, *, reason: str) -> None:
+            self._record("interrupt_turn")
+
+        def close(self) -> None:
+            return None
+
+    class ToolAgent:
+        async def run(self, message: str):
+            assert message == "persist"
+            yield {
+                "type": "turn_complete",
+                "turn": 1,
+                "stop_reason": "tool_use",
+                "message": {"content": "", "reasoning_content": None},
+                "tool_actions": [{"tool_call_id": "call-1"}],
+            }
+            yield {
+                "type": "tool_call",
+                "tool_call_id": "call-1",
+                "name": "read_file",
+                "input": {"path": "a.py"},
+            }
+            yield {
+                "type": "tool_result",
+                "tool_call_id": "call-1",
+                "name": "read_file",
+                "result": "ok",
+                "is_error": False,
+            }
+            yield {"type": "text_delta", "text": "done"}
+            yield {"type": "done", "total_tokens": 1, "total_turns": 1}
+
+    async def run() -> None:
+        session = RecordingSession()
+        app = PaiCliApp(agent=ToolAgent(), cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            app._interactive_session = session
+            ui_thread_id = threading.get_ident()
+
+            app.run_agent_task("persist")
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+
+            assert [name for name, _ in session.calls] == [
+                "discard",
+                "begin",
+                "record_tool_batch",
+                "start_tool_action",
+                "complete_tool_action",
+                "complete_turn",
+            ]
+            assert all(thread_id != ui_thread_id for _, thread_id in session.calls)
+
+    asyncio.run(run())
+
+
+def test_blocked_session_begin_does_not_block_terminal_input():
+    from textual.events import Key
+
+    class BlockingSession:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def discard_incomplete_turn(self, *, reason: str) -> bool:
+            return False
+
+        def begin_turn(self, message: str) -> None:
+            self.started.set()
+            assert self.release.wait(timeout=2)
+
+        def complete_turn(self, assistant_text: str) -> None:
+            return None
+
+        def interrupt_turn(self, assistant_text: str, *, reason: str) -> None:
+            return None
+
+        def close(self) -> None:
+            self.release.set()
+
+    class CompletingAgent:
+        async def run(self, message: str):
+            yield {"type": "done", "total_tokens": 0, "total_turns": 1}
+
+    async def run() -> None:
+        session = BlockingSession()
+        app = PaiCliApp(agent=CompletingAgent(), cwd=".")
+        async with app.run_test(size=(80, 24)):
+            app._interactive_session = session
+            command_input = app.query_one(CommandInput)
+            command_input.focus()
+            app.run_agent_task("persist")
+            try:
+                started = await asyncio.to_thread(session.started.wait, 1)
+                assert started is True
+
+                key = Key("a", "a")
+                key.set_sender(app)
+                assert app._driver is not None
+                app._driver.send_message(key)
+                for _ in range(100):
+                    if command_input.text == "a":
+                        break
+                    await asyncio.sleep(0)
+
+                assert command_input.text == "a"
+                assert app._agent_running is True
+            finally:
+                session.release.set()
+            await app.workers.wait_for_complete()
+
+    asyncio.run(run())
+
+
+def test_blocked_tool_persistence_does_not_delay_assistant_output():
+    class BlockingSession:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def discard_incomplete_turn(self, *, reason: str) -> bool:
+            return False
+
+        def begin_turn(self, message: str) -> None:
+            return None
+
+        def record_tool_batch(self, **kwargs) -> None:
+            self.started.set()
+            assert self.release.wait(timeout=2)
+
+        def complete_turn(self, assistant_text: str) -> None:
+            return None
+
+        def interrupt_turn(self, assistant_text: str, *, reason: str) -> None:
+            return None
+
+        def close(self) -> None:
+            self.release.set()
+
+    class ToolAgent:
+        async def run(self, message: str):
+            yield {"type": "text_delta", "text": "visible before database"}
+            yield {
+                "type": "turn_complete",
+                "turn": 1,
+                "stop_reason": "tool_use",
+                "message": {"content": "visible before database"},
+                "tool_actions": [{"tool_call_id": "call-1"}],
+            }
+            yield {"type": "done", "total_tokens": 1, "total_turns": 1}
+
+    async def run() -> None:
+        session = BlockingSession()
+        app = PaiCliApp(agent=ToolAgent(), cwd=".")
+        async with app.run_test(size=(80, 24)):
+            app._interactive_session = session
+            app.run_agent_task("persist")
+            try:
+                started = await asyncio.to_thread(session.started.wait, 1)
+                assert started is True
+
+                assert app._text_buffer == []
+                assert any(
+                    block.role == "assistant"
+                    and block.plain_text == "visible before database"
+                    for block in app.query(MessageBlock)
+                )
+                assert app._agent_running is True
+            finally:
+                session.release.set()
+            await app.workers.wait_for_complete()
 
     asyncio.run(run())
