@@ -7,6 +7,7 @@ provides interactive, mouse-driven collapsible tool results.
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import time
 from contextlib import suppress
@@ -126,6 +127,7 @@ class PaiCliApp(App):
         self._task_buffers: dict[str, list[str]] = {}
         self._task_thinking_buffers: dict[str, list[str]] = {}
         self._context_usage = ContextUsageState()
+        self._lease_refresh_delayed = False
 
     @property
     def session_id(self) -> str | None:
@@ -163,20 +165,39 @@ class PaiCliApp(App):
         if self._interactive_session is not None:
             self._interactive_session.close()
 
-    def _refresh_session_lease(self) -> None:
-        if self._interactive_session is None:
+    async def _refresh_session_lease(self) -> None:
+        session = self._interactive_session
+        if session is None:
             return
         try:
-            self._interactive_session.refresh_lease()
+            refreshed = await session.refresh_lease_async()
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc).lower():
+                if self._interactive_session is session and not self._lease_refresh_delayed:
+                    self.query_one("#chat-log", ChatLog).add_info(
+                        "[yellow]Session lease refresh delayed by database activity; "
+                        "retrying in the background.[/yellow]"
+                    )
+                    self._lease_refresh_delayed = True
+                return
+            self._handle_session_lease_loss(session, exc)
         except Exception as exc:
-            self.query_one("#chat-log", ChatLog).add_info(
-                f"[bold red]Session lease lost:[/bold red] {exc}"
-            )
-            self._agent_running = False
-            self._phase = "idle"
-            if self._worker is not None and self._worker.is_running:
-                self._worker.cancel()
-            self._update_status_bar()
+            self._handle_session_lease_loss(session, exc)
+        else:
+            if refreshed and self._interactive_session is session:
+                self._lease_refresh_delayed = False
+
+    def _handle_session_lease_loss(self, session: Any, exc: Exception) -> None:
+        if self._interactive_session is not session:
+            return
+        self.query_one("#chat-log", ChatLog).add_info(
+            f"[bold red]Session lease lost:[/bold red] {exc}"
+        )
+        self._agent_running = False
+        self._phase = "idle"
+        if self._worker is not None and self._worker.is_running:
+            self._worker.cancel()
+        self._update_status_bar()
 
     def _show_banner(self) -> None:
         """Display a startup banner in the chat log."""

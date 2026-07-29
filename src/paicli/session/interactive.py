@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import sqlite3
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -346,17 +348,86 @@ class InteractiveSession:
         self._switch_to(restored, next_lease=next_lease)
         return self.record
 
-    def refresh_lease(self) -> None:
+    def _request_refreshed_lease(
+        self,
+        session_id: str,
+        lease_token: str,
+        *,
+        lock_timeout_seconds: float,
+    ) -> SessionLease:
         try:
-            self._lease = self.repository.refresh_session_lease(
-                self.id,
-                self._lease.token,
+            return self.repository.refresh_session_lease(
+                session_id,
+                lease_token,
+                lock_timeout_seconds=lock_timeout_seconds,
             )
         except SessionLeaseConflictError:
-            self._lease = self.repository.acquire_session_lease(
-                self.id,
+            return self.repository.acquire_session_lease(
+                session_id,
                 owner_id=self._owner_id,
+                lock_timeout_seconds=lock_timeout_seconds,
             )
+
+    def refresh_lease(self) -> None:
+        session_id = self.id
+        lease_token = self._lease.token
+        next_lease = self._request_refreshed_lease(
+            session_id,
+            lease_token,
+            lock_timeout_seconds=5.0,
+        )
+        if self.id == session_id and self._lease.token == lease_token:
+            self._lease = next_lease
+
+    async def refresh_lease_async(
+        self,
+        *,
+        retry_delays: tuple[float, ...] = (0.2, 0.5, 1.0),
+        lock_timeout_seconds: float = 0.2,
+    ) -> bool:
+        """Refresh the Session lease without blocking an async caller's event loop."""
+        if lock_timeout_seconds < 0:
+            raise ValueError("lock_timeout_seconds must be non-negative")
+        if any(delay < 0 for delay in retry_delays):
+            raise ValueError("retry delays must be non-negative")
+
+        session_id = self.id
+        lease_token = self._lease.token
+        next_lease: SessionLease | None = None
+        for attempt in range(len(retry_delays) + 1):
+            try:
+                refresh_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        self._request_refreshed_lease,
+                        session_id,
+                        lease_token,
+                        lock_timeout_seconds=lock_timeout_seconds,
+                    )
+                )
+                try:
+                    next_lease = await asyncio.shield(refresh_task)
+                except asyncio.CancelledError:
+                    await asyncio.gather(refresh_task, return_exceptions=True)
+                    raise
+                break
+            except sqlite3.OperationalError as exc:
+                is_locked = "locked" in str(exc).lower()
+                if not is_locked or attempt >= len(retry_delays):
+                    raise
+                await asyncio.sleep(retry_delays[attempt])
+
+        if next_lease is None:  # pragma: no cover - loop either returns a lease or raises
+            return False
+        if self.id != session_id or self._lease.token != lease_token:
+            if next_lease.token != lease_token:
+                await asyncio.to_thread(
+                    self.repository.release_session_lease,
+                    session_id,
+                    next_lease.token,
+                )
+            return False
+        self._lease = next_lease
+        return True
 
     def close(self) -> None:
         self.repository.release_session_lease(self.id, self._lease.token)

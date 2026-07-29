@@ -348,9 +348,9 @@ class RuntimeApiServer:
     ) -> None:
         while True:
             await asyncio.sleep(SESSION_LEASE_REFRESH_SECONDS)
-            interactive.refresh_lease()
+            await interactive.refresh_lease_async()
             if extra_refresh is not None:
-                extra_refresh()
+                await asyncio.to_thread(extra_refresh)
 
     def _worker_loop(self) -> None:
         while not self._stop.is_set():

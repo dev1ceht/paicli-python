@@ -642,12 +642,13 @@ class SessionRepository:
         *,
         owner_id: str,
         ttl_seconds: int = 60,
+        lock_timeout_seconds: float = 5.0,
     ) -> SessionLease:
         if not owner_id:
             raise ValueError("lease owner_id must be non-empty")
         if ttl_seconds <= 0:
             raise ValueError("lease ttl_seconds must be positive")
-        with self._connect() as connection:
+        with self._connect(timeout_seconds=lock_timeout_seconds) as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._require_leaseable_session(
                 connection,
@@ -667,10 +668,11 @@ class SessionRepository:
         token: str,
         *,
         ttl_seconds: int = 60,
+        lock_timeout_seconds: float = 5.0,
     ) -> SessionLease:
         if ttl_seconds <= 0:
             raise ValueError("lease ttl_seconds must be positive")
-        with self._connect() as connection:
+        with self._connect(timeout_seconds=lock_timeout_seconds) as connection:
             connection.execute("BEGIN IMMEDIATE")
             return SessionLeaseStore.refresh(
                 connection,
@@ -2289,8 +2291,8 @@ class SessionRepository:
     def _ensure_schema(self) -> None:
         ensure_schema(self.db_path)
 
-    def _connect(self) -> sqlite3.Connection:
-        return connect(self.db_path)
+    def _connect(self, *, timeout_seconds: float = 5.0) -> sqlite3.Connection:
+        return connect(self.db_path, timeout_seconds=timeout_seconds)
 
 
 def _session_from_row(row: sqlite3.Row) -> SessionRecord:

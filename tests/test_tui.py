@@ -1448,3 +1448,65 @@ def test_interrupt_cancels_worker_when_running():
             assert app._worker is None
 
     asyncio.run(run())
+
+
+def test_session_lease_refresh_does_not_block_terminal_input():
+    class BlockingSession:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def refresh_lease_async(self) -> bool:
+            self.started.set()
+            await self.release.wait()
+            return True
+
+        def close(self) -> None:
+            return None
+
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        session = BlockingSession()
+        async with app.run_test(size=(80, 24)) as pilot:
+            app._interactive_session = session
+            refresh = asyncio.create_task(app._refresh_session_lease())
+            await asyncio.wait_for(session.started.wait(), timeout=1)
+
+            command_input = app.query_one(CommandInput)
+            command_input.focus()
+            await asyncio.wait_for(pilot.press("a"), timeout=1)
+
+            assert command_input.text == "a"
+            assert refresh.done() is False
+
+            session.release.set()
+            await asyncio.wait_for(refresh, timeout=1)
+
+    asyncio.run(run())
+
+
+def test_transient_session_database_lock_does_not_stop_running_agent():
+    import sqlite3
+
+    class LockedSession:
+        async def refresh_lease_async(self) -> bool:
+            raise sqlite3.OperationalError("database is locked")
+
+        def close(self) -> None:
+            return None
+
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        session = LockedSession()
+        async with app.run_test(size=(80, 24)):
+            app._interactive_session = session
+            app._agent_running = True
+            app._phase = "running"
+
+            await app._refresh_session_lease()
+
+            assert app._agent_running is True
+            assert app._phase == "running"
+            assert "refresh delayed" in app.query_one(ChatLog).renderable_text()
+
+    asyncio.run(run())
