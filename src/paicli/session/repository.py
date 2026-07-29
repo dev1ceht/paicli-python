@@ -2056,7 +2056,13 @@ class SessionRepository:
                        last_checkpoint_id, last_compacted_at
                 from sessions
                 {where}
-                order by updated_at desc, id desc
+                order by updated_at desc,
+                         (
+                             select max(event.rowid)
+                             from session_events as event
+                             where event.session_id = sessions.id
+                         ) desc,
+                         id desc
                 """
             ).fetchall()
         return [_session_from_row(row) for row in rows]

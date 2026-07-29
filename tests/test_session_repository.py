@@ -512,6 +512,26 @@ def test_session_timestamps_use_east_eight_without_timezone_or_fraction(tmp_path
     )
 
 
+def test_session_catalog_uses_event_order_when_updates_share_one_second(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "paicli.session.repository._now",
+        lambda: "2026-07-29 16:30:00",
+    )
+    repository = SessionRepository(tmp_path / "sessions.db")
+    first = repository.create_session(tmp_path, title="first")
+    second = repository.create_session(tmp_path, title="second")
+    recent = min((first, second), key=lambda item: item.id)
+    stale = max((first, second), key=lambda item: item.id)
+
+    repository.update_session_metadata(recent.id, title="updated last")
+
+    sessions = repository.list_sessions()
+    assert [session.id for session in sessions[:2]] == [recent.id, stale.id]
+
+
 def test_large_context_checkpoint_messages_use_blob_storage(tmp_path):
     repository = SessionRepository(tmp_path / "sessions.db")
     session = repository.create_session(tmp_path, title="large checkpoint")

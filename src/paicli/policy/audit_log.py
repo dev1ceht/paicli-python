@@ -5,7 +5,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from paicli.clock import east_eight_now, format_timestamp, normalize_timestamp
+from paicli.clock import (
+    east_eight_now,
+    format_timestamp,
+    normalize_timestamp,
+    parse_timestamp,
+)
 
 SENSITIVE_KEYS = ("token", "key", "password", "secret", "authorization", "bearer")
 
@@ -99,6 +104,7 @@ class AuditLog:
                 if isinstance(event, dict) and isinstance(event.get("timestamp"), str):
                     event["timestamp"] = normalize_timestamp(event["timestamp"])
                 events.append(event)
+        events.sort(key=_event_timestamp_sort_key)
         return events[-limit:]
 
     def _path_for_timestamp(self, timestamp: datetime) -> Path:
@@ -125,3 +131,12 @@ class AuditLog:
         if isinstance(value, list):
             return [self._redact(item) for item in value]
         return value
+
+
+def _event_timestamp_sort_key(event: Any) -> tuple[int, float]:
+    if not isinstance(event, dict) or not isinstance(event.get("timestamp"), str):
+        return (0, 0.0)
+    try:
+        return (1, parse_timestamp(event["timestamp"]).timestamp())
+    except ValueError:
+        return (0, 0.0)
