@@ -24,16 +24,11 @@ from paicli.render._common import (
     PI_LOGO as _PI_LOGO,
 )
 from paicli.render._common import (
-    TOOL_LABELS as _TOOL_LABELS,
-)
-from paicli.render._common import (
     diff_ops as _diff_ops,
 )
 from paicli.render._common import (
     estimate_cost,
-    format_cost,
     format_elapsed,
-    format_tokens,
 )
 from paicli.render._common import (
     format_payload as _format_payload,
@@ -304,7 +299,8 @@ class RichRenderer:
                 "  [bold]Enter[/bold]  \u6309\u5f53\u524d\u8ba1\u5212\u6267\u884c\n"
                 "  [bold]Ctrl+O[/bold] \u5c55\u5f00\u5b8c\u6574\u8ba1\u5212\n"
                 "  [bold]ESC[/bold]    \u6298\u53e0\u6216\u53d6\u6d88\u672c\u6b21\u8ba1\u5212\n"
-                "  [bold]I[/bold]      \u8f93\u5165\u8865\u5145\u8981\u6c42\u540e\u91cd\u65b0\u89c4\u5212"
+                "  [bold]I[/bold]      \u8f93\u5165\u8865\u5145\u8981\u6c42\u540e"
+                "\u91cd\u65b0\u89c4\u5212"
             )
         elif event_type == "plan_cancelled":
             self._flush_thinking()
@@ -312,7 +308,8 @@ class RichRenderer:
             self._phase = "idle"
             self._record_run_summary({})
             self.console.print(
-                "[yellow]\u23f9\ufe0f \u5df2\u53d6\u6d88\u672c\u6b21\u8ba1\u5212\u6267\u884c\u3002[/yellow]"
+                "[yellow]\u23f9\ufe0f "
+                "\u5df2\u53d6\u6d88\u672c\u6b21\u8ba1\u5212\u6267\u884c\u3002[/yellow]"
             )
         elif event_type == "plan_started":
             self._flush_thinking()

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 from paicli.config import ContextConfig
 from paicli.context.assembler import (
@@ -16,12 +16,13 @@ from paicli.context.assembler import (
 from paicli.context.budget import Budget
 
 
-class PressureTier(str, Enum):
+class PressureTier(StrEnum):
     """压力等级"""
-    TIER0_OBSERVE = "tier0_observe"      # < 60%: 不处理
-    TIER1_SNIP = "tier1_snip"            # 60-80%: 收紧 relevant_memory
-    TIER2_PRUNE = "tier2_prune"          # 80-95%: tier1 + skills 缩到 50%
-    TIER3_SUMMARY = "tier3_summary"      # >= 95%: 触发 compaction
+
+    TIER0_OBSERVE = "tier0_observe"  # < 60%: 不处理
+    TIER1_SNIP = "tier1_snip"  # 60-80%: 收紧 relevant_memory
+    TIER2_PRUNE = "tier2_prune"  # 80-95%: tier1 + skills 缩到 50%
+    TIER3_SUMMARY = "tier3_summary"  # >= 95%: 触发 compaction
 
 
 @dataclass

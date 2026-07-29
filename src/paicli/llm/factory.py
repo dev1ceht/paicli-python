@@ -43,73 +43,30 @@ def create_llm_client(
     audit_path = retry_audit_path or "~/.paicli/audit"
     reported_context = config.context_window or MODEL_CONTEXT_WINDOWS.get(config.model)
     context = reported_context or UNKNOWN_MODEL_SAFETY_WINDOW
-    context_known = reported_context is not None
+
     if provider == "deepseek":
         base_url = config.base_url or DEEPSEEK_BASE_URL
-        return OpenAICompatibleClient(
-            provider_name="deepseek",
-            model=config.model,
-            api_key=config.api_key,
-            base_url=base_url,
-            max_tokens=config.max_tokens,
-            thinking_budget=config.thinking_budget,
-            temperature=config.temperature,
-            timeout=config.timeout,
-            max_context_window=context,
-            context_window_known=context_known,
-            prompt_cache=True,
-            supports_reasoning_content=True,
-            retry_policy=retry,
-            retry_audit_path=audit_path,
-            retry_cwd=retry_cwd,
-        )
-    if provider in {"openai", "openai-compatible", "compatible"}:
-        return OpenAICompatibleClient(
-            provider_name=provider,
-            model=config.model,
-            api_key=config.api_key,
-            base_url=config.base_url or OPENAI_BASE_URL,
-            max_tokens=config.max_tokens,
-            thinking_budget=config.thinking_budget,
-            temperature=config.temperature,
-            timeout=config.timeout,
-            max_context_window=context,
-            context_window_known=context_known,
-            prompt_cache=False,
-            retry_policy=retry,
-            retry_audit_path=audit_path,
-            retry_cwd=retry_cwd,
-        )
-    if provider in PROVIDER_BASE_URLS:
-        return OpenAICompatibleClient(
-            provider_name=provider,
-            model=config.model,
-            api_key=config.api_key,
-            base_url=config.base_url or PROVIDER_BASE_URLS[provider],
-            max_tokens=config.max_tokens,
-            thinking_budget=config.thinking_budget,
-            temperature=config.temperature,
-            timeout=config.timeout,
-            max_context_window=context,
-            context_window_known=context_known,
-            prompt_cache=False,
-            supports_thinking_budget=provider in {"aliyun", "bailian", "dashscope", "qwen"},
-            retry_policy=retry,
-            retry_audit_path=audit_path,
-            retry_cwd=retry_cwd,
-        )
+    elif provider in {"openai", "openai-compatible", "compatible"}:
+        base_url = config.base_url or OPENAI_BASE_URL
+    elif provider in PROVIDER_BASE_URLS:
+        base_url = config.base_url or PROVIDER_BASE_URLS[provider]
+    else:
+        base_url = config.base_url or DEEPSEEK_BASE_URL
+
     return OpenAICompatibleClient(
         provider_name=provider,
         model=config.model,
         api_key=config.api_key,
-        base_url=config.base_url or DEEPSEEK_BASE_URL,
+        base_url=base_url,
         max_tokens=config.max_tokens,
         thinking_budget=config.thinking_budget,
         temperature=config.temperature,
         timeout=config.timeout,
         max_context_window=context,
-        context_window_known=context_known,
-        prompt_cache=False,
+        context_window_known=reported_context is not None,
+        prompt_cache=provider == "deepseek",
+        supports_reasoning_content=provider == "deepseek",
+        supports_thinking_budget=provider in {"aliyun", "bailian", "dashscope", "qwen"},
         retry_policy=retry,
         retry_audit_path=audit_path,
         retry_cwd=retry_cwd,

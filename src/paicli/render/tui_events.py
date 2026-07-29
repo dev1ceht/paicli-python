@@ -11,7 +11,7 @@ class UiEvent:
     task_id: str | None = None
 
     @classmethod
-    def from_agent(cls, event: dict[str, Any]) -> "UiEvent":
+    def from_agent(cls, event: dict[str, Any]) -> UiEvent:
         task_id = event.get("task_id")
         if task_id is None:
             task = event.get("task")
