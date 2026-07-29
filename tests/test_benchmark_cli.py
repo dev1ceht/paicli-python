@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -152,6 +153,9 @@ def test_benchmark_cli_runs_one_production_turn_with_isolated_configuration(
 
     runtime = json.loads((log_dir / "runtime.json").read_text(encoding="utf-8"))
     assert runtime["status"] == "completed"
+    timestamp_pattern = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"
+    assert re.fullmatch(timestamp_pattern, runtime["started_at"])
+    assert re.fullmatch(timestamp_pattern, runtime["completed_at"])
     assert runtime["provider"] == "openai-compatible"
     assert runtime["model"] == "harbor-model"
     assert runtime["agent_budget"] == {

@@ -4,10 +4,10 @@ import json
 import sqlite3
 import threading
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from paicli.clock import filename_timestamp, now_timestamp, parse_timestamp
 from paicli.session import SessionRepository
 from paicli.session.schema import connect
 
@@ -34,7 +34,7 @@ class TaskRecord:
         end_at = self.finished_at or (_now() if self.status == "running" else None)
         if not end_at:
             return None
-        elapsed = datetime.fromisoformat(end_at) - datetime.fromisoformat(self.started_at)
+        elapsed = parse_timestamp(end_at) - parse_timestamp(self.started_at)
         return max(0.0, elapsed.total_seconds())
 
     def to_dict(self) -> dict[str, str | float | None]:
@@ -316,7 +316,7 @@ class DurableTaskManager:
                 select id, task_id, status, request_json, requested_at, decided_at, decision_source
                 from task_approvals
                 where task_id = ?
-                order by requested_at
+                order by requested_at, rowid
                 """,
                 (task_id,),
             ).fetchall()
@@ -341,7 +341,7 @@ class DurableTaskManager:
                        error, retry_of, session_id, parent_session_id
                 from background_tasks
                 where queue_session_id = ?
-                order by created_at desc
+                order by created_at desc, rowid desc
                 limit ?
                 """,
                 (self.queue_session_id, limit),
@@ -417,7 +417,7 @@ class DurableTaskManager:
                 """
                 select id from task_approvals
                 where task_id = ? and status = 'requested'
-                order by requested_at desc
+                order by requested_at desc, rowid desc
                 limit 1
                 """,
                 (task_id,),
@@ -482,11 +482,11 @@ class DurableTaskManager:
 
 
 def _now() -> str:
-    return datetime.now(UTC).isoformat()
+    return now_timestamp()
 
 
 def _new_id(prefix: str) -> str:
-    return f"{prefix}_{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}"
+    return f"{prefix}_{filename_timestamp()}_{uuid4().hex[:8]}"
 
 
 def _redact(value: object) -> object:

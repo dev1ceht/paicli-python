@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
@@ -38,6 +39,11 @@ def test_durable_task_lifecycle(tmp_path):
     assert completed.result == "done"
     assert completed.finished_at is not None
     assert completed.duration_seconds is not None
+    timestamp_pattern = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"
+    assert re.fullmatch(timestamp_pattern, completed.created_at)
+    assert re.fullmatch(timestamp_pattern, completed.updated_at)
+    assert re.fullmatch(timestamp_pattern, completed.started_at)
+    assert re.fullmatch(timestamp_pattern, completed.finished_at)
 
 
 def test_background_task_is_a_child_session_in_the_shared_store(tmp_path: Path) -> None:

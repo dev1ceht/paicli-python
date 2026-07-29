@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import zlib
-from datetime import UTC, datetime
 from pathlib import Path
 
+from paicli.clock import normalize_timestamp, now_timestamp
 from paicli.session.integrity import stored_blob_is_valid
 from paicli.session.models import BlobReference, StoredBlob
 from paicli.session.schema import connect
@@ -26,7 +26,7 @@ class BlobStore:
         else:
             compression = "none"
             stored_data = data
-        now = datetime.now(UTC).isoformat()
+        now = now_timestamp()
         with connect(self.db_path) as connection:
             connection.execute(
                 """
@@ -75,7 +75,7 @@ class BlobStore:
             original_size=int(row["original_size"]),
             stored_size=int(row["stored_size"]),
             data=data,
-            created_at=str(row["created_at"]),
+            created_at=normalize_timestamp(str(row["created_at"])),
         )
 
     def load_bytes(self, content_hash: str) -> bytes:

@@ -37,6 +37,23 @@ def test_memory_manager_saves_java_style_project_and_global_entries(tmp_path):
     ]
 
 
+def test_memory_timestamps_are_east_eight_without_timezone(tmp_path):
+    storage = tmp_path / "long_term_memory.json"
+    project = tmp_path / "project"
+    project.mkdir()
+    manager = MemoryManager(storage, project_path=project)
+
+    memory_id = manager.save(
+        "Convert legacy UTC time",
+        timestamp=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+    )
+
+    entry = next(item for item in manager.list() if item.id == memory_id)
+    assert entry.timestamp == "2026-01-02 11:04:05"
+    raw = json.loads(storage.read_text(encoding="utf-8"))
+    assert raw[0]["timestamp"] == "2026-01-02 11:04:05"
+
+
 def test_memory_manager_searches_visible_entries_with_relevance_and_budget(tmp_path):
     storage = tmp_path / "long_term_memory.json"
     project = tmp_path / "project"

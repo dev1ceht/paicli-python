@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from paicli.config import PaiCliConfig
 from paicli.prompt import PromptAssembler
 
@@ -24,6 +26,10 @@ def test_prompt_sections_preserve_rendering_and_allow_entry_aware_reduction(
     assert "- lowest" not in sections.drop_least_relevant_memory().render()
     assert "- highest" in sections.drop_least_relevant_memory().render()
     assert sections.without_skills().skills == ""
+    assert re.search(
+        r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\s|$)",
+        sections.render(),
+    )
 
 
 def test_prompt_reduction_removes_a_complete_multiline_memory_entry(tmp_path, monkeypatch):

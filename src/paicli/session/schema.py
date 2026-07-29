@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Callable
-from datetime import UTC, datetime
 from pathlib import Path
 
+from paicli.clock import filename_timestamp, normalize_timestamp, now_timestamp
 from paicli.session.versions import DATABASE_SCHEMA_VERSION
 
 Migration = Callable[[sqlite3.Connection], None]
@@ -52,7 +52,7 @@ def ensure_schema(db_path: Path) -> None:
                     insert into schema_migrations(version, applied_at)
                     values (?, ?)
                     """,
-                    (version, datetime.now(UTC).isoformat()),
+                    (version, now_timestamp()),
                 )
                 connection.execute(f"pragma user_version = {version}")
             except Exception:
@@ -63,7 +63,7 @@ def ensure_schema(db_path: Path) -> None:
 
 
 def _backup_database(db_path: Path, current_version: int) -> Path:
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = filename_timestamp()
     backup_path = db_path.with_name(
         f"{db_path.stem}.backup-v{current_version}-{timestamp}{db_path.suffix}"
     )
@@ -428,10 +428,54 @@ def _migration_message_preview(payload: object, *, limit: int = 160) -> str | No
     return normalized if len(normalized) <= limit else f"{normalized[: limit - 1]}…"
 
 
+def _migration_6(connection: sqlite3.Connection) -> None:
+    timestamp_columns = {
+        "schema_migrations": ("applied_at",),
+        "sessions": (
+            "created_at",
+            "updated_at",
+            "archived_at",
+            "deleted_at",
+            "purge_after",
+            "last_compacted_at",
+        ),
+        "blobs": ("created_at",),
+        "session_leases": ("acquired_at", "refreshed_at", "expires_at"),
+        "pending_actions": ("created_at", "updated_at"),
+        "session_relationships": ("created_at",),
+        "background_tasks": (
+            "created_at",
+            "updated_at",
+            "started_at",
+            "finished_at",
+            "claim_expires_at",
+        ),
+        "task_checkpoints": ("created_at", "updated_at"),
+        "task_approvals": ("requested_at", "decided_at"),
+    }
+    for table, columns in timestamp_columns.items():
+        selected = ", ".join(columns)
+        rows = connection.execute(
+            f"select rowid as migration_rowid, {selected} from {table}"
+        ).fetchall()
+        for row in rows:
+            for column in columns:
+                value = row[column]
+                if value is None:
+                    continue
+                normalized = normalize_timestamp(str(value))
+                if normalized != value:
+                    connection.execute(
+                        f"update {table} set {column} = ? where rowid = ?",
+                        (normalized, int(row["migration_rowid"])),
+                    )
+
+
 _MIGRATIONS: dict[int, Migration] = {
     1: _migration_1,
     2: _migration_2,
     3: _migration_3,
     4: _migration_4,
     5: _migration_5,
+    6: _migration_6,
 }

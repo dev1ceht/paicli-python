@@ -4,11 +4,12 @@ import json
 import math
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from paicli.clock import east_eight_now, format_timestamp, now_timestamp, parse_timestamp
 from paicli.context.telemetry import use_context_scope
 from paicli.llm.base import LlmClient
 from paicli.types import Message
@@ -109,14 +110,27 @@ class MemoryManager:
             return MemorySaveResult("saved", memory_id=self.save(content, scope=scope))
         try:
             response = ""
-            prompt = json.dumps({"fact": content, "candidates": [
-                {"id": item.id, "content": item.content} for item in candidates
-            ]}, ensure_ascii=False)
+            prompt = json.dumps(
+                {
+                    "fact": content,
+                    "candidates": [
+                        {"id": item.id, "content": item.content}
+                        for item in candidates
+                    ],
+                },
+                ensure_ascii=False,
+            )
             with use_context_scope(None):
-                async for event in llm_client.chat([Message(role="user", content=prompt)], [], system_prompt=(
-                    "Classify the fact against candidates. Return JSON only with relationship "
-                    "(duplicate, merge, replace, independent), target_memory_ids, proposed_content, reason."
-                )):
+                system_prompt = (
+                    "Classify the fact against candidates. Return JSON only with "
+                    "relationship (duplicate, merge, replace, independent), "
+                    "target_memory_ids, proposed_content, reason."
+                )
+                async for event in llm_client.chat(
+                    [Message(role="user", content=prompt)],
+                    [],
+                    system_prompt=system_prompt,
+                ):
                     if event.get("type") == "text_delta":
                         response += str(event.get("text") or "")
             result = json.loads(response)
@@ -125,9 +139,14 @@ class MemoryManager:
             if relationship == "duplicate" and targets:
                 return MemorySaveResult("duplicate", memory_id=targets[0])
             if relationship in {"merge", "replace"} and targets:
-                change = self.propose_change(operation=relationship, target_memory_ids=targets,
+                change = self.propose_change(
+                    operation=relationship,
+                    target_memory_ids=targets,
                     proposed_content=str(result.get("proposed_content") or content),
-                    reason=str(result.get("reason") or "Related memory"), source_fact=content, scope=scope)
+                    reason=str(result.get("reason") or "Related memory"),
+                    source_fact=content,
+                    scope=scope,
+                )
                 return MemorySaveResult("pending", change_id=change.id)
         except Exception:
             pass
@@ -382,7 +401,7 @@ def _entry_from_dict(item: dict[str, Any]) -> MemoryEntry | None:
         id=str(item.get("id") or f"fact-{uuid4().hex[:8]}"),
         content=content,
         type=str(item.get("type") or "FACT"),
-        timestamp=str(item.get("timestamp") or datetime.now(UTC).isoformat()),
+        timestamp=_format_timestamp(item.get("timestamp")),
         metadata=clean_metadata,
         tokenCount=(
             int(token_count) if isinstance(token_count, int | float) else estimate_tokens(content)
@@ -407,28 +426,28 @@ def _pending_from_dict(item: dict[str, Any]) -> PendingMemoryChange | None:
         proposed_content=str(item.get("proposed_content") or ""),
         reason=str(item.get("reason") or ""),
         source_fact=str(item.get("source_fact") or ""),
-        timestamp=str(item.get("created_at") or ""),
+        timestamp=_format_timestamp(item.get("created_at")),
         project=str(item.get("project") or ""),
     )
 
 
 def _format_timestamp(value: datetime | str | None) -> str:
     if isinstance(value, datetime):
-        candidate = value if value.tzinfo else value.replace(tzinfo=UTC)
-        return candidate.astimezone(UTC).isoformat()
+        return format_timestamp(value)
     if isinstance(value, str) and value.strip():
-        return value.strip()
-    return datetime.now(UTC).isoformat()
+        try:
+            return format_timestamp(parse_timestamp(value))
+        except ValueError:
+            return value.strip()
+    return now_timestamp()
 
 
 def _recency_decay(timestamp: str) -> float:
     try:
-        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        parsed = parse_timestamp(timestamp)
     except ValueError:
         return 0.5
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    age_hours = (datetime.now(UTC) - parsed.astimezone(UTC)).total_seconds() / 3600
+    age_hours = (east_eight_now() - parsed).total_seconds() / 3600
     return max(0.5, 1.0 - age_hours / 24.0)
 
 

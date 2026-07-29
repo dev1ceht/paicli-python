@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import re
+
+from dulwich.objects import Commit
+from dulwich.repo import Repo
+
 from paicli.snapshot import SnapshotService
 
 
@@ -18,6 +23,14 @@ def test_snapshot_restore_modified_file(tmp_path, monkeypatch):
 
     assert restored.id == first.id
     assert file_path.read_text(encoding="utf-8") == "before"
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}",
+        first.created_at,
+    )
+    commit = Repo(first.path).get_object(first.id.encode("ascii"))
+    assert isinstance(commit, Commit)
+    assert commit.author_timezone == 8 * 60 * 60
+    assert commit.commit_timezone == 8 * 60 * 60
 
 
 def test_snapshot_uses_side_git_repository_instead_of_directory_copies(tmp_path, monkeypatch):
