@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from threading import Event
+from threading import Event, get_ident
 from typing import Any
 
 import httpx
@@ -141,6 +141,78 @@ def test_agent_run_emits_current_context_estimate_before_model_output(tmp_path):
     assert context["estimated"] is True
     assert context["used_tokens"] > 0
     assert context["context_window"] == 128_000
+
+
+def test_agent_snapshot_io_runs_outside_the_event_loop(tmp_path, monkeypatch):
+    snapshot_calls: list[tuple[str, int]] = []
+
+    class RecordingSnapshotService:
+        def __init__(self, project_root):
+            assert project_root == str(tmp_path)
+
+        def create(self, phase: str) -> None:
+            snapshot_calls.append((phase, get_ident()))
+
+    monkeypatch.setattr("paicli.agent.agent.SnapshotService", RecordingSnapshotService)
+    config = load_config(project_root=tmp_path)
+    config.features.memory = False
+    config.features.skill = False
+    client = FakeClient()
+    client.use_tool = False
+    agent = Agent(
+        llm_client=client,
+        tool_registry=ToolRegistry(),
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+    )
+
+    async def run() -> int:
+        event_loop_thread = get_ident()
+        events = [event async for event in agent.run("hello")]
+        assert events[-1]["type"] == "done"
+        return event_loop_thread
+
+    event_loop_thread = asyncio.run(run())
+
+    assert [phase for phase, _ in snapshot_calls] == ["pre-turn", "post-turn"]
+    assert all(thread_id != event_loop_thread for _, thread_id in snapshot_calls)
+
+
+def test_agent_prompt_assembly_runs_outside_the_event_loop(tmp_path, monkeypatch):
+    monkeypatch.setenv("PAICLI_SNAPSHOT_ENABLED", "false")
+    monkeypatch.setenv("PAICLI_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    config = load_config(project_root=tmp_path)
+    config.features.memory = False
+    config.features.skill = False
+    client = FakeClient()
+    client.use_tool = False
+    agent = Agent(
+        llm_client=client,
+        tool_registry=ToolRegistry(),
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+    )
+    prompt_threads: list[int] = []
+    original_build = agent._prompt_sections_for_message
+
+    def recording_build(message: str):
+        prompt_threads.append(get_ident())
+        return original_build(message)
+
+    agent._prompt_sections_for_message = recording_build
+
+    async def run() -> int:
+        event_loop_thread = get_ident()
+        events = [event async for event in agent.run("hello")]
+        assert events[-1]["type"] == "done"
+        return event_loop_thread
+
+    event_loop_thread = asyncio.run(run())
+
+    assert prompt_threads
+    assert all(thread_id != event_loop_thread for thread_id in prompt_threads)
 
 
 def test_agent_run_replaces_context_estimate_with_provider_usage(tmp_path):

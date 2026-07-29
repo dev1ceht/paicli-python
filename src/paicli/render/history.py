@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -41,11 +42,21 @@ class PromptHistory:
         except OSError:
             pass
 
-    def append(self, text: str) -> None:
-        if text and (not self._items or self._items[-1] != text):
+    def remember(self, text: str) -> bool:
+        """Update in-memory history and report whether persistence is needed."""
+        changed = bool(text and (not self._items or self._items[-1] != text))
+        if changed:
             self._items = (self._items + [text])[-self.limit :]
-            self._persist()
         self.reset_cursor()
+        return changed
+
+    async def persist_async(self) -> None:
+        """Persist the current history without blocking the UI event loop."""
+        await asyncio.to_thread(self._persist)
+
+    def append(self, text: str) -> None:
+        if self.remember(text):
+            self._persist()
 
     def previous(self) -> str:
         if not self._items:
