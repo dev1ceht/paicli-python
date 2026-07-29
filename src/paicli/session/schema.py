@@ -10,11 +10,21 @@ from paicli.session.versions import DATABASE_SCHEMA_VERSION
 Migration = Callable[[sqlite3.Connection], None]
 
 
-def connect(db_path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(db_path, isolation_level=None, timeout=5.0)
+def connect(
+    db_path: Path,
+    *,
+    timeout_seconds: float = 5.0,
+) -> sqlite3.Connection:
+    if timeout_seconds < 0:
+        raise ValueError("timeout_seconds must be non-negative")
+    connection = sqlite3.connect(
+        db_path,
+        isolation_level=None,
+        timeout=timeout_seconds,
+    )
     connection.row_factory = sqlite3.Row
     connection.execute("pragma foreign_keys = on")
-    connection.execute("pragma busy_timeout = 5000")
+    connection.execute(f"pragma busy_timeout = {int(timeout_seconds * 1000)}")
     connection.execute("pragma journal_mode = wal")
     connection.execute("pragma synchronous = full")
     connection.execute("pragma secure_delete = on")

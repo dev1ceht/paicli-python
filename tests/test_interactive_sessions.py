@@ -318,6 +318,37 @@ def test_refresh_lease_reacquires_expired_lease(tmp_path: Path) -> None:
     interactive.begin_turn("after heartbeat recovery")
 
 
+def test_refresh_lease_async_retries_transient_database_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+    interactive = InteractiveSession(repository, workspace)
+    attempts = 0
+    original_refresh = repository.refresh_session_lease
+
+    def flaky_refresh(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return original_refresh(*args, **kwargs)
+
+    monkeypatch.setattr(repository, "refresh_session_lease", flaky_refresh)
+
+    refreshed = asyncio.run(
+        interactive.refresh_lease_async(
+            retry_delays=(0, 0),
+            lock_timeout_seconds=0.01,
+        )
+    )
+
+    assert refreshed is True
+    assert attempts == 3
+
+
 def test_resume_current_session_does_not_steal_live_replacement_lease(
     tmp_path: Path,
 ) -> None:

@@ -857,13 +857,14 @@ def test_runtime_execution_refreshes_its_session_lease(
     interactive = InteractiveSession(repository, tmp_path)
     interactive.begin_turn("wait")
     refreshed = asyncio.Event()
-    original_refresh = interactive.refresh_lease
+    original_refresh = interactive.refresh_lease_async
 
-    def refresh_lease() -> None:
-        original_refresh()
+    async def refresh_lease() -> bool:
+        result = await original_refresh()
         refreshed.set()
+        return result
 
-    monkeypatch.setattr(interactive, "refresh_lease", refresh_lease)
+    monkeypatch.setattr(interactive, "refresh_lease_async", refresh_lease)
     monkeypatch.setattr("paicli.runtime.api.SESSION_LEASE_REFRESH_SECONDS", 0.01)
 
     class WaitingEngine:
@@ -895,10 +896,10 @@ def test_lost_session_heartbeat_stops_agent_execution(
     interactive.begin_turn("wait")
     started = asyncio.Event()
 
-    def lose_lease() -> None:
+    async def lose_lease() -> bool:
         raise RuntimeError("lease lost")
 
-    monkeypatch.setattr(interactive, "refresh_lease", lose_lease)
+    monkeypatch.setattr(interactive, "refresh_lease_async", lose_lease)
     monkeypatch.setattr("paicli.runtime.api.SESSION_LEASE_REFRESH_SECONDS", 0.01)
 
     class WaitingEngine:
