@@ -55,19 +55,55 @@ class InteractiveSession:
         checkpoint_messages = checkpoint.get("messages")
         if not isinstance(checkpoint_messages, list):
             raise ValueError("context checkpoint messages must be a list")
-        event_sequences = {
-            event.id: event.sequence for event in self.repository.list_events(self.id)
+        events = self.repository.list_events(self.id)
+        event_sequences = {event.id: event.sequence for event in events}
+        hidden_message_ids = {
+            str(event.payload.get("message_id") or "")
+            for event in events
+            if event.sequence > checkpoint_sequence and event.type == "message.hidden"
         }
+        checkpoint_entries = [
+            (item, _agent_message_from_payload(item))
+            for item in checkpoint_messages
+            if isinstance(item, dict)
+        ]
+        checkpoint_history = [
+            message
+            for payload, message in checkpoint_entries
+            if str(payload.get("source_message_id") or "") not in hidden_message_ids
+        ]
+        annotated_message_ids = {
+            str(payload.get("source_message_id") or "")
+            for payload, _message in checkpoint_entries
+            if payload.get("source_message_id")
+        }
+        messages_by_id = {message.id: message for message in view.session_history}
+        for event in events:
+            if event.sequence <= checkpoint_sequence or event.type != "message.hidden":
+                continue
+            hidden_id = str(event.payload.get("message_id") or "")
+            if hidden_id in annotated_message_ids:
+                continue
+            hidden = messages_by_id.get(hidden_id)
+            if hidden is None or event_sequences.get(hidden.event_id, 0) > checkpoint_sequence:
+                continue
+            hidden_message = _agent_message(hidden)
+            matching_index = next(
+                (
+                    index
+                    for index in range(len(checkpoint_history) - 1, -1, -1)
+                    if checkpoint_history[index] == hidden_message
+                ),
+                None,
+            )
+            if matching_index is not None:
+                checkpoint_history.pop(matching_index)
         tail = [
             _agent_message(message)
             for message in view.model_messages
             if event_sequences.get(message.event_id, 0) > checkpoint_sequence
         ]
-        return [
-            _agent_message_from_payload(item)
-            for item in checkpoint_messages
-            if isinstance(item, dict)
-        ] + tail
+        return checkpoint_history + tail
 
     def restore_agent_history(self, agent: Any) -> None:
         history = self.agent_history
@@ -306,11 +342,13 @@ class InteractiveSession:
         return self.record
 
     def show_session(self, session_id: str | None = None) -> SessionRecord:
-        return self._resolve_workspace_session(
-            session_id or self.id,
-            allow_archived=True,
-            allow_deleted=True,
-        )
+        resolved_id = session_id or self.id
+        record = self.repository.get_session(resolved_id)
+        if record is None:
+            raise KeyError(f"session not found: {resolved_id}")
+        if record.workspace_root != self.workspace_root:
+            raise ValueError(f"session belongs to another workspace: {resolved_id}")
+        return record
 
     def resume_candidates(self) -> tuple[SessionRecord, ...]:
         return tuple(

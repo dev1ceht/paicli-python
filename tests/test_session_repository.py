@@ -406,6 +406,45 @@ def test_unchanged_context_checkpoint_is_not_duplicated(tmp_path):
     ]
 
 
+def test_large_context_checkpoint_messages_use_blob_storage(tmp_path):
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(tmp_path, title="large checkpoint")
+    large_content = "checkpoint content " * 5000
+    repository.begin_turn(session.id, turn_id="turn_large", user_content="compact")
+    repository.complete_turn(
+        session.id,
+        turn_id="turn_large",
+        assistant_content="done",
+        context_checkpoint={
+            "checkpoint_id": "ctx_large",
+            "summary": "large",
+            "compaction": {
+                "summary": "large",
+                "compacted_items": 5,
+                "protected_items": 2,
+                "used_llm": False,
+                "llm_usage": {},
+            },
+            "pressure": {},
+            "provider": "fake",
+            "model": "large",
+            "messages": [{"role": "assistant", "content": large_content}],
+        },
+    )
+
+    event = next(
+        event
+        for event in repository.list_events(session.id)
+        if event.type == "context.checkpoint_created"
+    )
+    assert event.payload["messages"] == []
+    assert event.payload["messages_content_hash"]
+    assert [reference.role for reference in event.blob_refs] == ["context.checkpoint.messages"]
+    checkpoint = repository.rebuild_session_view(session.id).context_checkpoint
+    assert checkpoint is not None
+    assert checkpoint["messages"][0]["content"] == large_content
+
+
 def test_session_catalog_projects_rich_summary_from_events(tmp_path):
     repository = SessionRepository(tmp_path / "sessions.db")
     session = repository.create_session(tmp_path, title="catalog")
@@ -447,6 +486,23 @@ def test_session_catalog_projects_rich_summary_from_events(tmp_path):
     assert record.last_checkpoint_id == "ctx_catalog"
     assert record.last_compacted_at is not None
     assert repository.list_sessions()[0] == record
+
+
+def test_session_catalog_previews_blob_backed_large_messages(tmp_path):
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(tmp_path, title="large preview")
+    repository.append_message(
+        session.id,
+        role="user",
+        content="large preview marker " + ("x" * 70_000),
+    )
+
+    record = repository.get_session(session.id)
+
+    assert record is not None
+    assert record.latest_user_preview is not None
+    assert record.latest_user_preview.startswith("large preview marker")
+    assert len(record.latest_user_preview) == 160
 
 
 def test_corrupt_event_chain_is_rejected_and_session_becomes_read_only(tmp_path: Path) -> None:

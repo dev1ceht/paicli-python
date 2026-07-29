@@ -109,7 +109,9 @@ def test_context_manager_exports_and_restores_durable_compaction_state(tmp_path)
     }
 
     restored = ContextManager(config=config, llm_client=SummaryLlm(), cwd=str(tmp_path))
+    prior_session_id = restored.session_id
     restored.restore_durable_state(durable_state)
+    assert restored.session_id != prior_session_id
     assert restored.get_status()["current_summary"] == "durable summary"
     assert restored.checkpoint_state()[1] is not None
     assert restored.checkpoint_state()[1].tier == PressureTier.TIER3_SUMMARY
@@ -151,6 +153,28 @@ def test_agent_exports_and_restores_session_context(tmp_path):
     assert checkpoint["model"] == config.llm.model
     assert checkpoint["messages"][0]["reasoning_content"] == "private"
     assert checkpoint["checkpoint_id"].startswith("ctx_")
+    source.history.append(Message(role="assistant", content="new event tail"))
+    unchanged_checkpoint = source.export_session_context()
+    assert unchanged_checkpoint is not None
+    assert unchanged_checkpoint["checkpoint_id"] == checkpoint["checkpoint_id"]
+    assert unchanged_checkpoint["messages"] == checkpoint["messages"]
+
+    source.context_manager.restore_durable_state(
+        {
+            "summary": "durable summary",
+            "pressure": {},
+            "compaction": {
+                "summary": "durable summary",
+                "compacted_items": 6,
+                "protected_items": 2,
+                "used_llm": False,
+                "llm_usage": {},
+            },
+        }
+    )
+    next_checkpoint = source.export_session_context()
+    assert next_checkpoint is not None
+    assert next_checkpoint["checkpoint_id"] != checkpoint["checkpoint_id"]
 
     restored = Agent(
         llm_client=SummaryLlm(),

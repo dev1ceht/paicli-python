@@ -352,6 +352,56 @@ def test_tui_restores_compacted_context_checkpoint_and_newer_tail(
     assert agent.context_checkpoint["checkpoint_id"] == "ctx_123"
 
 
+def test_checkpoint_restore_applies_later_message_hidden_events(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(workspace, title="hidden tail")
+    repository.begin_turn(session.id, turn_id="turn_hidden", user_content="hide me")
+    repository.complete_turn(
+        session.id,
+        turn_id="turn_hidden",
+        assistant_content="keep me",
+        context_checkpoint={
+            "checkpoint_id": "ctx_hidden",
+            "summary": "summary",
+            "compaction": {
+                "summary": "summary",
+                "compacted_items": 2,
+                "protected_items": 2,
+                "used_llm": False,
+                "llm_usage": {},
+            },
+            "pressure": {},
+            "provider": "fake",
+            "model": "model",
+            "messages": [
+                {"role": "user", "content": "hide me"},
+                {"role": "assistant", "content": "keep me"},
+            ],
+        },
+    )
+    user_message = next(
+        message
+        for message in repository.rebuild_session_view(session.id).session_history
+        if message.role == "user"
+    )
+    checkpoint_event = next(
+        event
+        for event in repository.list_events(session.id)
+        if event.type == "context.checkpoint_created"
+    )
+    assert checkpoint_event.payload["messages"][0]["source_message_id"] == user_message.id
+    repository.hide_message(session.id, user_message.id)
+
+    interactive = InteractiveSession(repository, workspace, session_id=session.id)
+
+    assert [(message.role, message.content) for message in interactive.agent_history] == [
+        ("assistant", "keep me")
+    ]
+    interactive.close()
+
+
 def test_interactive_session_skips_busy_session_and_rejects_explicit_conflict(
     tmp_path: Path,
 ) -> None:
@@ -1350,6 +1400,22 @@ def test_interactive_session_renames_and_exposes_rich_session_summaries(
     assert shown.id == other.id
     assert shown.latest_user_preview == "candidate preview"
     assert [record.id for record in candidates] == [other.id]
+    session.close()
+
+
+def test_show_session_can_inspect_a_corrupt_catalog_record(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+    current = repository.create_session(workspace, title="Current")
+    corrupt = repository.create_session(workspace, title="Corrupt")
+    repository._mark_session_corrupt(corrupt.id)
+    session = InteractiveSession(repository, workspace, session_id=current.id)
+
+    shown = session.show_session(corrupt.id)
+
+    assert shown.status == "corrupt"
+    assert shown.title == "Corrupt"
     session.close()
 
 
