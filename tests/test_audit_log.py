@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from paicli.policy import AuditLog
 
@@ -25,6 +26,10 @@ def test_audit_log_writes_daily_jsonl_file(tmp_path):
     event = json.loads(files[0].read_text(encoding="utf-8").strip())
     assert event["tool_name"] == "write_file"
     assert event["input"]["api_key"] == "***"
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}",
+        event["timestamp"],
+    )
 
 
 def test_audit_log_tail_reads_across_daily_files(tmp_path):
@@ -44,3 +49,7 @@ def test_audit_log_tail_reads_across_daily_files(tmp_path):
     events = AuditLog(audit_dir).tail(2)
 
     assert [event["tool_name"] for event in events] == ["old", "new"]
+    assert [event["timestamp"] for event in events] == [
+        "2026-07-08 18:00:00",
+        "2026-07-09 18:00:00",
+    ]

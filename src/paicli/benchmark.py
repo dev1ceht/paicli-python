@@ -6,13 +6,13 @@ import json
 import os
 import platform
 from dataclasses import asdict, dataclass, is_dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from paicli import __version__
 from paicli.agent import QueryEngine
 from paicli.bootstrap import build_tool_registry
+from paicli.clock import now_timestamp
 from paicli.config import PaiCliConfig
 from paicli.llm import create_llm_client
 
@@ -90,13 +90,13 @@ async def run_benchmark_prompt(
         safe_text = _sanitize(text, secrets)
         (log_dir / "final.txt").write_text(safe_text + "\n", encoding="utf-8")
         runtime["status"] = "completed"
-        runtime["completed_at"] = datetime.now(UTC).isoformat()
+        runtime["completed_at"] = now_timestamp()
         _write_json(log_dir / "runtime.json", runtime)
         _append_readable(readable_path, {"type": "completed"})
         return safe_text
     except BaseException as exc:
         runtime["status"] = "failed"
-        runtime["completed_at"] = datetime.now(UTC).isoformat()
+        runtime["completed_at"] = now_timestamp()
         runtime["error"] = _sanitize(str(exc), secrets)
         _write_json(log_dir / "runtime.json", runtime)
         _append_jsonl(
@@ -156,7 +156,7 @@ def _runtime_metadata(config, options, tools, manager) -> dict[str, Any]:
     }
     return {
         "schema_version": 1,
-        "started_at": datetime.now(UTC).isoformat(),
+        "started_at": now_timestamp(),
         "paicli_version": __version__,
         "python_version": platform.python_version(),
         "platform": platform.platform(),

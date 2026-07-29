@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from paicli.clock import east_eight_now, format_timestamp, normalize_timestamp
 
 SENSITIVE_KEYS = ("token", "key", "password", "secret", "authorization", "bearer")
 
@@ -24,11 +26,11 @@ class AuditLog:
         decision_source: str | None = None,
         reason: str | None = None,
     ) -> None:
-        timestamp = datetime.now(UTC)
+        timestamp = east_eight_now()
         target = self._path_for_timestamp(timestamp)
         target.parent.mkdir(parents=True, exist_ok=True)
         event = {
-            "timestamp": timestamp.isoformat(),
+            "timestamp": format_timestamp(timestamp),
             "tool_name": tool_name,
             "input": self._redact(input_data),
             "outcome": outcome,
@@ -45,7 +47,7 @@ class AuditLog:
             handle.write(json.dumps(event, ensure_ascii=False) + "\n")
 
     def ensure_available(self) -> None:
-        target = self._path_for_timestamp(datetime.now(UTC))
+        target = self._path_for_timestamp(east_eight_now())
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("a", encoding="utf-8"):
             pass
@@ -63,11 +65,11 @@ class AuditLog:
         cwd: str = "",
         input_data: dict[str, Any] | None = None,
     ) -> None:
-        timestamp = datetime.now(UTC)
+        timestamp = east_eight_now()
         target = self._path_for_timestamp(timestamp)
         target.parent.mkdir(parents=True, exist_ok=True)
         event = {
-            "timestamp": timestamp.isoformat(),
+            "timestamp": format_timestamp(timestamp),
             "event_type": "retry",
             "scope": scope,
             "operation": operation,
@@ -91,9 +93,12 @@ class AuditLog:
         for path in paths:
             for line in path.read_text(encoding="utf-8").splitlines():
                 try:
-                    events.append(json.loads(line))
+                    event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if isinstance(event, dict) and isinstance(event.get("timestamp"), str):
+                    event["timestamp"] = normalize_timestamp(event["timestamp"])
+                events.append(event)
         return events[-limit:]
 
     def _path_for_timestamp(self, timestamp: datetime) -> Path:

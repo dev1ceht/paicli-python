@@ -6,11 +6,19 @@ import os
 import shutil
 import stat
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 from dulwich.objects import Blob, Commit, Tree
 from dulwich.repo import Repo
+
+from paicli.clock import (
+    EAST_EIGHT,
+    EAST_EIGHT_OFFSET_SECONDS,
+    east_eight_now,
+    format_timestamp,
+    now_timestamp,
+)
 
 BRANCH_REF = b"refs/heads/main"
 SNAPSHOT_IDENT = b"PaiCLI Snapshot <snapshot@paicli.local>"
@@ -88,13 +96,13 @@ class SnapshotService:
             return SnapshotRecord(
                 id="disabled",
                 phase=phase,
-                created_at=datetime.now(UTC).isoformat(),
+                created_at=now_timestamp(),
                 path=self.git_dir,
             )
         repo = self._open_repo()
         parent = self._head(repo)
         tree_id = self._write_tree(repo, self.project_root)
-        now = int(datetime.now(UTC).timestamp())
+        now = int(east_eight_now().timestamp())
         commit = Commit()
         commit.tree = tree_id
         commit.parents = [parent] if parent else []
@@ -102,8 +110,8 @@ class SnapshotService:
         commit.committer = SNAPSHOT_IDENT
         commit.author_time = now
         commit.commit_time = now
-        commit.author_timezone = 0
-        commit.commit_timezone = 0
+        commit.author_timezone = EAST_EIGHT_OFFSET_SECONDS
+        commit.commit_timezone = EAST_EIGHT_OFFSET_SECONDS
         commit.message = f"{phase} {now}".encode()
         repo.object_store.add_object(commit)
         repo.refs.set_symbolic_ref(b"HEAD", BRANCH_REF)
@@ -266,7 +274,9 @@ class SnapshotService:
         return SnapshotRecord(
             id=commit.id.decode("ascii"),
             phase=phase,
-            created_at=datetime.fromtimestamp(commit.commit_time, UTC).isoformat(),
+            created_at=format_timestamp(
+                datetime.fromtimestamp(commit.commit_time, EAST_EIGHT)
+            ),
             path=self.git_dir,
         )
 

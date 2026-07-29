@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any
 from uuid import uuid4
 
+from paicli.clock import east_eight_now, format_timestamp, normalize_timestamp
 from paicli.session.errors import SessionLeaseConflictError
 from paicli.session.integrity import canonical_json
 from paicli.session.models import PendingAction, SessionLease, ToolActionSpec
@@ -28,9 +29,9 @@ class SessionLeaseStore:
         owner_id: str,
         ttl_seconds: int,
     ) -> SessionLease:
-        now = datetime.now(UTC)
-        refreshed_at = now.isoformat()
-        expires_at = (now + timedelta(seconds=ttl_seconds)).isoformat()
+        now = east_eight_now()
+        refreshed_at = format_timestamp(now)
+        expires_at = format_timestamp(now + timedelta(seconds=ttl_seconds))
         row = connection.execute(
             """
             select session_id, owner_id, token, acquired_at, refreshed_at, expires_at
@@ -56,7 +57,7 @@ class SessionLeaseStore:
                 session_id=session_id,
                 owner_id=owner_id,
                 token=str(row["token"]),
-                acquired_at=str(row["acquired_at"]),
+                acquired_at=normalize_timestamp(str(row["acquired_at"])),
                 refreshed_at=refreshed_at,
                 expires_at=expires_at,
             )
@@ -92,9 +93,9 @@ class SessionLeaseStore:
         *,
         ttl_seconds: int,
     ) -> SessionLease:
-        now = datetime.now(UTC)
-        refreshed_at = now.isoformat()
-        expires_at = (now + timedelta(seconds=ttl_seconds)).isoformat()
+        now = east_eight_now()
+        refreshed_at = format_timestamp(now)
+        expires_at = format_timestamp(now + timedelta(seconds=ttl_seconds))
         row = connection.execute(
             """
             select owner_id, acquired_at
@@ -117,7 +118,7 @@ class SessionLeaseStore:
             session_id=session_id,
             owner_id=str(row["owner_id"]),
             token=token,
-            acquired_at=str(row["acquired_at"]),
+            acquired_at=normalize_timestamp(str(row["acquired_at"])),
             refreshed_at=refreshed_at,
             expires_at=expires_at,
         )
@@ -302,6 +303,6 @@ def _from_row(row: sqlite3.Row) -> PendingAction:
         approval_status=(
             str(row["approval_status"]) if row["approval_status"] is not None else None
         ),
-        created_at=str(row["created_at"]),
-        updated_at=str(row["updated_at"]),
+        created_at=normalize_timestamp(str(row["created_at"])),
+        updated_at=normalize_timestamp(str(row["updated_at"])),
     )

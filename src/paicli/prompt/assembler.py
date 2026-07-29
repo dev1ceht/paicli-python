@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime
 from importlib.resources import files
 from pathlib import Path
 
+from paicli.clock import now_timestamp
 from paicli.config import PaiCliConfig
 from paicli.prompt.project_memory import ProjectMemoryLoader
 from paicli.skill import SkillRegistry
@@ -163,7 +163,7 @@ def _runtime_context(
     lines = [
         "## 运行时上下文",
         "",
-        f"- 当前时间：{datetime.now().astimezone().isoformat(timespec='seconds')}",
+        f"- 当前时间：{now_timestamp()}",
         f"- 工作目录：{cwd}",
         f"- 当前模型：{model}（{provider}）",
         "",

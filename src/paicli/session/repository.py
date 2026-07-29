@@ -3,11 +3,18 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
+from paicli.clock import (
+    east_eight_now,
+    format_timestamp,
+    normalize_optional_timestamp,
+    normalize_timestamp,
+    now_timestamp,
+)
 from paicli.session.blob_store import BlobStore
 from paicli.session.errors import (
     SessionCorruptError,
@@ -233,7 +240,7 @@ class SessionRepository:
                        result, error, retry_of, session_id, parent_session_id
                 from background_tasks
                 where queue_session_id = ? and status = 'queued'
-                order by created_at
+                order by created_at, rowid
                 limit 1
                 """,
                 (queue_session_id,),
@@ -242,9 +249,9 @@ class SessionRepository:
                 return None
             updated_at = _now()
             claim_token = f"task_claim_{uuid4().hex}"
-            claim_expires_at = (
-                datetime.now(UTC) + timedelta(seconds=ttl_seconds)
-            ).isoformat()
+            claim_expires_at = format_timestamp(
+                east_eight_now() + timedelta(seconds=ttl_seconds)
+            )
             updated = connection.execute(
                 """
                 update background_tasks
@@ -286,7 +293,9 @@ class SessionRepository:
         ttl_seconds: int = 60,
     ) -> bool:
         now = _now()
-        expires_at = (datetime.now(UTC) + timedelta(seconds=ttl_seconds)).isoformat()
+        expires_at = format_timestamp(
+            east_eight_now() + timedelta(seconds=ttl_seconds)
+        )
         with self._connect() as connection:
             updated = connection.execute(
                 """
@@ -1699,9 +1708,9 @@ class SessionRepository:
         retention_days: int = 30,
         lease_token: str | None = None,
     ) -> SessionRecord:
-        now = datetime.now(UTC)
-        deleted_at = now.isoformat()
-        purge_after = (now + timedelta(days=retention_days)).isoformat()
+        now = east_eight_now()
+        deleted_at = format_timestamp(now)
+        purge_after = format_timestamp(now + timedelta(days=retention_days))
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._require_writable_session(
@@ -1799,7 +1808,7 @@ class SessionRepository:
         *,
         as_of: datetime | None = None,
     ) -> tuple[str, ...]:
-        cutoff = (as_of or datetime.now(UTC)).isoformat()
+        cutoff = format_timestamp(as_of or east_eight_now())
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
@@ -2551,11 +2560,11 @@ def _session_from_row(row: sqlite3.Row) -> SessionRecord:
         workspace_root=str(row["workspace_root"]),
         title=str(row["title"]),
         status=str(row["status"]),
-        created_at=str(row["created_at"]),
-        updated_at=str(row["updated_at"]),
-        archived_at=row["archived_at"],
-        deleted_at=row["deleted_at"],
-        purge_after=row["purge_after"],
+        created_at=normalize_timestamp(str(row["created_at"])),
+        updated_at=normalize_timestamp(str(row["updated_at"])),
+        archived_at=normalize_optional_timestamp(row["archived_at"]),
+        deleted_at=normalize_optional_timestamp(row["deleted_at"]),
+        purge_after=normalize_optional_timestamp(row["purge_after"]),
         metadata=json.loads(row["metadata_json"]),
         message_count=int(row["message_count"]),
         user_turn_count=int(row["user_turn_count"]),
@@ -2564,7 +2573,7 @@ def _session_from_row(row: sqlite3.Row) -> SessionRecord:
         provider=row["provider"],
         model=row["model"],
         last_checkpoint_id=row["last_checkpoint_id"],
-        last_compacted_at=row["last_compacted_at"],
+        last_compacted_at=normalize_optional_timestamp(row["last_compacted_at"]),
     )
 
 
@@ -2629,7 +2638,7 @@ def _event_from_row(row: sqlite3.Row) -> SessionEvent:
         type=str(row["type"]),
         payload=payload,
         schema_version=schema_version,
-        created_at=str(row["created_at"]),
+        created_at=normalize_timestamp(str(row["created_at"])),
         previous_event_hash=row["previous_event_hash"],
         event_hash=str(row["event_hash"]),
         turn_id=row["turn_id"],
@@ -2645,7 +2654,7 @@ def _relationship_from_row(row: sqlite3.Row) -> SessionRelationship:
         parent_session_id=str(row["parent_session_id"]),
         child_session_id=str(row["child_session_id"]),
         relation_type=str(row["relation_type"]),
-        created_at=str(row["created_at"]),
+        created_at=normalize_timestamp(str(row["created_at"])),
         metadata=json.loads(row["metadata_json"]),
     )
 
@@ -2681,4 +2690,4 @@ def _event_metadata(
 
 
 def _now() -> str:
-    return datetime.now(UTC).isoformat()
+    return now_timestamp()

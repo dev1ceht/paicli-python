@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Barrier
 
@@ -17,11 +19,13 @@ from paicli.session import (
     SessionRepository,
     ToolActionSpec,
 )
+from paicli.session.integrity import EventHashMaterial, canonical_json
 from paicli.session.schema import (
     _migration_1,
     _migration_2,
     _migration_3,
     _migration_4,
+    _migration_5,
     connect,
 )
 from paicli.session.versions import DATABASE_SCHEMA_VERSION
@@ -111,9 +115,9 @@ def test_v1_database_is_backed_up_and_migrated_to_current_schema(tmp_path: Path)
                 "select version from schema_migrations order by version"
             ).fetchall()
         ]
-    assert version == DATABASE_SCHEMA_VERSION == 5
+    assert version == DATABASE_SCHEMA_VERSION == 6
     assert "ordinal" in columns
-    assert migrations == [1, 2, 3, 4, 5]
+    assert migrations == [1, 2, 3, 4, 5, 6]
     assert len(list(tmp_path.glob("sessions.backup-v1-*.db"))) == 1
 
 
@@ -202,6 +206,84 @@ def test_v4_catalog_data_is_backfilled_during_migration(tmp_path: Path) -> None:
     assert record.model == "legacy-model"
     assert record.last_checkpoint_id == "ctx_old"
     assert record.last_compacted_at == "compacted"
+
+
+def test_v5_utc_timestamps_are_read_as_east_eight_without_rehashing_events(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "sessions.db"
+    legacy_timestamp = "2026-01-02T03:04:05+00:00"
+    payload = {
+        "session_id": "sess_legacy",
+        "title": "Legacy",
+        "workspace_root": str(tmp_path.resolve()),
+    }
+    payload_json = canonical_json(payload)
+    event_hash = EventHashMaterial(
+        event_id="evt_legacy",
+        session_id="sess_legacy",
+        sequence=1,
+        event_type="session.created",
+        payload_json=payload_json,
+        schema_version=1,
+        created_at=legacy_timestamp,
+        previous_event_hash=None,
+        turn_id=None,
+        idempotency_key=None,
+        source_session_id=None,
+        source_event_id=None,
+        blob_refs_json="[]",
+    ).digest()
+    with connect(db_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        for version, migration in enumerate(
+            (_migration_1, _migration_2, _migration_3, _migration_4, _migration_5),
+            start=1,
+        ):
+            migration(connection)
+            connection.execute(
+                "insert into schema_migrations(version, applied_at) values (?, ?)",
+                (version, legacy_timestamp),
+            )
+        connection.execute(
+            """
+            insert into sessions(
+                id, workspace_root, title, status, created_at, updated_at,
+                next_sequence, version, metadata_json
+            ) values (
+                'sess_legacy', ?, 'Legacy', 'idle', ?, ?, 2, 1, '{}'
+            )
+            """,
+            (str(tmp_path.resolve()), legacy_timestamp, legacy_timestamp),
+        )
+        connection.execute(
+            """
+            insert into session_events(
+                id, session_id, sequence, type, schema_version, payload_json,
+                previous_event_hash, event_hash, created_at, blob_refs_json
+            ) values (
+                'evt_legacy', 'sess_legacy', 1, 'session.created', 1, ?,
+                null, ?, ?, '[]'
+            )
+            """,
+            (payload_json, event_hash, legacy_timestamp),
+        )
+        connection.execute("pragma user_version = 5")
+        connection.commit()
+
+    repository = SessionRepository(db_path)
+    record = repository.get_session("sess_legacy")
+    event = repository.list_events("sess_legacy")[0]
+
+    assert record is not None
+    assert record.created_at == "2026-01-02 11:04:05"
+    assert event.created_at == "2026-01-02 11:04:05"
+    repository.verify_session("sess_legacy")
+    with sqlite3.connect(db_path) as connection:
+        raw_event_timestamp = connection.execute(
+            "select created_at from session_events where id = 'evt_legacy'"
+        ).fetchone()[0]
+    assert raw_event_timestamp == legacy_timestamp
 
 
 def test_append_event_is_ordered_and_idempotent_within_one_session(tmp_path: Path) -> None:
@@ -404,6 +486,30 @@ def test_unchanged_context_checkpoint_is_not_duplicated(tmp_path):
         "context.compacted",
         "context.checkpoint_created",
     ]
+
+
+def test_session_timestamps_use_east_eight_without_timezone_or_fraction(tmp_path: Path) -> None:
+    before = (datetime.now(UTC) + timedelta(hours=8)).replace(tzinfo=None)
+    repository = SessionRepository(tmp_path / "sessions.db")
+
+    created = repository.create_session(tmp_path, title="East eight")
+    after = (datetime.now(UTC) + timedelta(hours=8)).replace(tzinfo=None)
+
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", created.created_at)
+    parsed = datetime.strptime(created.created_at, "%Y-%m-%d %H:%M:%S")
+    assert before - timedelta(seconds=2) <= parsed <= after + timedelta(seconds=2)
+    assert created.updated_at == created.created_at
+    assert repository.list_events(created.id)[0].created_at == created.created_at
+    lease = repository.acquire_session_lease(created.id, owner_id="time-test")
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}",
+        lease.expires_at,
+    )
+    blob = repository.put_blob(b"time", content_type="text/plain")
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}",
+        blob.created_at,
+    )
 
 
 def test_large_context_checkpoint_messages_use_blob_storage(tmp_path):
@@ -845,7 +951,7 @@ def test_expired_session_lease_fences_its_previous_owner(
     lease = repository.acquire_session_lease(session.id, owner_id="owner")
     monkeypatch.setattr(
         "paicli.session.repository._now",
-        lambda: "9999-12-31T23:59:59.999999+00:00",
+        lambda: "9999-12-31 23:59:59",
     )
 
     with pytest.raises(SessionLeaseConflictError):
