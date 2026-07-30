@@ -12,14 +12,15 @@ import sqlite3
 import sys
 import time
 from contextlib import suppress
-from typing import Any
+from decimal import Decimal
+from typing import Any, cast
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import TextArea
 
 from paicli.context.telemetry import ContextUsageState, rounded_context_percent
-from paicli.render._common import format_cost, format_elapsed, format_tokens
+from paicli.render._common import estimate_cost, format_cost, format_elapsed, format_tokens
 from paicli.render.textual_widgets import (
     ChatLog,
     CommandInput,
@@ -34,6 +35,7 @@ from paicli.render.tui_dialogs import (
     SessionResumePicker,
 )
 from paicli.render.tui_events import UiEvent
+from paicli.usage import TokenUsage, UsageCost, UsagePurpose, UsageRecord, UsageSource
 
 
 def _format_pressure_tier(tier: object) -> str:
@@ -552,7 +554,61 @@ class PaiCliApp(App):
         """Persist one stream event before the next event is consumed."""
         ui_event = UiEvent.from_agent(event)
         payload = ui_event.payload
-        if ui_event.kind == "turn_complete":
+        if ui_event.kind == "usage":
+            usage = dict(payload.get("usage") or {})
+            prompt_tokens = int(usage.get("input_tokens") or 0)
+            cache_read = int(usage.get("cache_read_tokens") or usage.get("cached_tokens") or 0)
+            cache_write = int(usage.get("cache_write_tokens") or 0)
+            uncached_input = max(0, prompt_tokens - cache_read)
+            provider = str(payload.get("provider") or self._provider)
+            model = str(payload.get("model") or self._model)
+            output_tokens = int(usage.get("output_tokens") or 0)
+            estimated_cost = estimate_cost(
+                provider,
+                uncached_input + cache_write,
+                output_tokens,
+            )
+            await self._run_session_call(
+                session.record_usage,
+                UsageRecord(
+                    usage_id=str(
+                        payload.get("usage_id")
+                        or payload.get("request_id")
+                        or f"usage:{payload.get('purpose') or 'assistant'}"
+                    ),
+                    request_id=(
+                        str(payload["request_id"])
+                        if payload.get("request_id") is not None
+                        else None
+                    ),
+                    provider=provider,
+                    model=model,
+                    purpose=cast(
+                        UsagePurpose,
+                        str(payload.get("purpose") or "assistant"),
+                    ),
+                    tokens=TokenUsage(
+                        input_tokens=uncached_input,
+                        output_tokens=output_tokens,
+                        cache_read_tokens=cache_read,
+                        cache_write_tokens=cache_write,
+                    ),
+                    cost=(
+                        UsageCost(
+                            amount=Decimal(str(estimated_cost)),
+                            currency="CNY",
+                            source="catalog_estimate",
+                        )
+                        if estimated_cost > 0
+                        else None
+                    ),
+                    usage_source=cast(
+                        UsageSource,
+                        str(payload.get("usage_source") or "actual"),
+                    ),
+                ),
+            )
+        elif ui_event.kind == "turn_complete":
             tool_actions = payload.get("tool_actions") or []
             if tool_actions:
                 message = payload.get("message") or {}
@@ -1057,8 +1113,10 @@ class PaiCliApp(App):
             token_detail = " ".join(parts)
         status_bar.token_detail = token_detail
 
-        cost_text = format_cost(self._last_cost)
-        status_bar.cost_text = cost_text
+        status_bar.cost_text = (
+            "" if self._interactive_session is not None else format_cost(self._last_cost)
+        )
+        status_bar.session_text = self._session_status_text()
 
         elapsed = self._last_elapsed
         if self._run_start_time and self._phase in {"running", "plan"}:
@@ -1160,6 +1218,17 @@ class PaiCliApp(App):
                 record = self._interactive_session.show_session(value or None)
                 chat_log.add_info(self._format_session_details(record))
                 return
+            if subcommand == "stats":
+                if value:
+                    raise ValueError("Usage: /session stats")
+                self.run_worker(
+                    self._session_stats_command(
+                        self._interactive_session,
+                        chat_log,
+                    ),
+                    exclusive=False,
+                )
+                return
             if subcommand == "rename":
                 if not value:
                     raise ValueError("Usage: /session rename <title>")
@@ -1179,14 +1248,10 @@ class PaiCliApp(App):
                     if item.startswith("--") and item != "--include-tool-results"
                 ]
                 if unknown or len(positional) > 1:
-                    raise ValueError(
-                        "Usage: /session share [session-id] [--include-tool-results]"
-                    )
+                    raise ValueError("Usage: /session share [session-id] [--include-tool-results]")
                 session_id = positional[0] if positional else self._interactive_session.id
                 record = self._interactive_session.show_session(session_id)
-                path = SessionShareService(
-                    self._interactive_session.repository
-                ).export_markdown(
+                path = SessionShareService(self._interactive_session.repository).export_markdown(
                     record.id,
                     include_tool_results=include_tool_results,
                 )
@@ -1281,6 +1346,88 @@ class PaiCliApp(App):
             f"  checkpoint: {checkpoint} · compacted: {compacted}\n"
             f"  workspace: {record.workspace_root}"
         )
+
+    def _session_status_text(self) -> str:
+        if self._interactive_session is None:
+            return ""
+        stats = getattr(self._interactive_session, "stats_snapshot", None)
+        if stats is None:
+            return ""
+        tokens = stats.actual_tokens
+        parts = [
+            "session",
+            f"↑{format_tokens(tokens.input_tokens)}",
+            f"↓{format_tokens(tokens.output_tokens)}",
+            f"R{format_tokens(tokens.cache_read_tokens)}",
+            f"W{format_tokens(tokens.cache_write_tokens)}",
+        ]
+        estimated = stats.estimated_tokens
+        if estimated.total_tokens:
+            parts.append(
+                "est "
+                f"↑{format_tokens(estimated.input_tokens)} "
+                f"↓{format_tokens(estimated.output_tokens)}"
+            )
+        if stats.cache_hit_rate is not None:
+            parts.append(f"CH{rounded_context_percent(stats.cache_hit_rate)}%")
+        parts.extend(self._format_cost_total(cost) for cost in stats.costs)
+        inherited = stats.inherited_tokens
+        if inherited.total_tokens:
+            parts.append(
+                "inherited "
+                f"↑{format_tokens(inherited.input_tokens)} "
+                f"↓{format_tokens(inherited.output_tokens)}"
+            )
+        if stats.coverage == "partial":
+            parts.append("coverage:partial")
+        return " ".join(parts)
+
+    async def _session_stats_command(self, session: Any, chat_log: ChatLog) -> None:
+        try:
+            stats = await self._run_session_call(session.refresh_stats)
+        except Exception as exc:
+            chat_log.add_info(f"[red]Session error:[/red] {exc}")
+            return
+        if self._interactive_session is not session:
+            return
+        chat_log.add_info(self._format_session_stats(session.id, stats))
+        self._update_status_bar()
+
+    @classmethod
+    def _format_session_stats(cls, session_id: str, stats: Any) -> str:
+        tokens = stats.tokens
+        actual = stats.actual_tokens
+        estimated = stats.estimated_tokens
+        inherited = stats.inherited_tokens
+        cost_text = ", ".join(cls._format_cost_total(cost) for cost in stats.costs) or "none"
+        cache_hit = (
+            f"{rounded_context_percent(stats.cache_hit_rate)}%"
+            if stats.cache_hit_rate is not None
+            else "n/a"
+        )
+        return (
+            f"Session statistics ({session_id})\n"
+            f"  tokens: input {format_tokens(tokens.input_tokens)} · "
+            f"output {format_tokens(tokens.output_tokens)} · "
+            f"cache read {format_tokens(tokens.cache_read_tokens)} · "
+            f"cache write {format_tokens(tokens.cache_write_tokens)}\n"
+            f"  actual: {format_tokens(actual.total_tokens)} total · "
+            f"estimated: {format_tokens(estimated.total_tokens)} total · "
+            f"cache hit {cache_hit}\n"
+            f"  cost: {cost_text}\n"
+            f"  activity: {stats.user_turn_count} turns · "
+            f"{stats.message_count} messages · "
+            f"{stats.tool_call_count} tool calls · "
+            f"{stats.tool_result_count} tool results\n"
+            f"  inherited: {format_tokens(inherited.total_tokens)} tokens · "
+            f"coverage {stats.coverage}"
+        )
+
+    @staticmethod
+    def _format_cost_total(cost: Any) -> str:
+        symbol = "¥" if cost.currency == "CNY" else f"{cost.currency} "
+        marker = "≈" if cost.source == "catalog_estimate" else ""
+        return f"{marker}{symbol}{cost.amount:.4f}"
 
     def _activate_interactive_session(self) -> None:
         if self._interactive_session is None:

@@ -45,6 +45,7 @@ from paicli.session.schema import connect, ensure_schema
 from paicli.session.validation import validate_event_payload
 from paicli.session.verification import SessionIntegrityVerifier
 from paicli.session.versions import EVENT_SCHEMA_VERSION, upcast_event_payload
+from paicli.usage import UsageRecord
 
 INLINE_CONTENT_LIMIT_BYTES = 64 * 1024
 RESERVED_PUBLIC_EVENT_TYPES = {
@@ -249,9 +250,7 @@ class SessionRepository:
                 return None
             updated_at = _now()
             claim_token = f"task_claim_{uuid4().hex}"
-            claim_expires_at = format_timestamp(
-                east_eight_now() + timedelta(seconds=ttl_seconds)
-            )
+            claim_expires_at = format_timestamp(east_eight_now() + timedelta(seconds=ttl_seconds))
             updated = connection.execute(
                 """
                 update background_tasks
@@ -293,9 +292,7 @@ class SessionRepository:
         ttl_seconds: int = 60,
     ) -> bool:
         now = _now()
-        expires_at = format_timestamp(
-            east_eight_now() + timedelta(seconds=ttl_seconds)
-        )
+        expires_at = format_timestamp(east_eight_now() + timedelta(seconds=ttl_seconds))
         with self._connect() as connection:
             updated = connection.execute(
                 """
@@ -1404,6 +1401,23 @@ class SessionRepository:
                 )
         return message_from_event(event, blob_loader=self._load_blob_bytes)
 
+    def record_usage(
+        self,
+        session_id: str,
+        record: UsageRecord,
+        *,
+        turn_id: str,
+        lease_token: str | None = None,
+    ) -> SessionEvent:
+        return self.append_event(
+            session_id,
+            "usage.recorded",
+            record.to_payload(),
+            turn_id=turn_id,
+            idempotency_key=f"{turn_id}:usage:{record.usage_id}",
+            lease_token=lease_token,
+        )
+
     @staticmethod
     def _checkpoint_is_current(
         connection: sqlite3.Connection,
@@ -2241,9 +2255,7 @@ class SessionRepository:
         pending_assistant: dict[str, Any],
     ) -> dict[str, Any]:
         messages = [
-            dict(message)
-            for message in checkpoint["messages"]
-            if isinstance(message, dict)
+            dict(message) for message in checkpoint["messages"] if isinstance(message, dict)
         ]
         candidates = [
             {
@@ -2295,11 +2307,7 @@ class SessionRepository:
             preview = _message_preview(payload)
             if preview is None:
                 content_reference = next(
-                    (
-                        reference
-                        for reference in blob_refs
-                        if reference.role == "message.content"
-                    ),
+                    (reference for reference in blob_refs if reference.role == "message.content"),
                     None,
                 )
                 if content_reference is not None:

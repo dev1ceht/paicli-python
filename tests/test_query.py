@@ -95,6 +95,48 @@ def test_prepared_outbound_request_freezes_exact_payload_and_usage_numerator():
     assert active["input_tokens"] == prepared.estimated_input_tokens
     assert active["pressure_ratio"] == pytest.approx(prepared.estimated_input_tokens / 100)
     assert active["quality_budget_tokens"] == 100
+    usage = next(event for event in events if event.get("type") == "usage")
+    assert usage["usage_source"] == "estimated"
+    assert usage["request_id"] == active["request_id"]
+    assert usage["usage"]["input_tokens"] == prepared.estimated_input_tokens
+
+
+def test_multiple_provider_usage_chunks_emit_one_final_usage_record():
+    chunks = [
+        {
+            "choices": [{"delta": {"content": "done"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 1},
+        },
+        {
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 2},
+        },
+    ]
+    body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
+    body += "data: [DONE]\n\n"
+    client = OpenAICompatibleClient(
+        provider_name="test",
+        model="test-model",
+        api_key="secret",
+        base_url="https://example.test/v1",
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=body.encode())),
+    )
+    prepared = client.prepare_request(
+        [Message(role="user", content="hello")],
+        [],
+        system_prompt="system",
+    )
+
+    async def collect() -> list[dict]:
+        with use_context_scope("agent"):
+            return [event async for event in client.send_prepared(prepared)]
+
+    usage_events = [event for event in asyncio.run(collect()) if event.get("type") == "usage"]
+
+    assert len(usage_events) == 1
+    assert usage_events[0]["usage_source"] == "actual"
+    assert usage_events[0]["usage"]["input_tokens"] == 20
+    assert usage_events[0]["usage"]["output_tokens"] == 2
 
 
 def test_agent_run_emits_current_context_estimate_before_model_output(tmp_path):

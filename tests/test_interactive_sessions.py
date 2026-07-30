@@ -9,7 +9,7 @@ import pytest
 
 from paicli.config import PaiCliConfig
 from paicli.entrypoints.repl import start_repl
-from paicli.render.textual_widgets import ChatLog
+from paicli.render.textual_widgets import ChatLog, StatusBar
 from paicli.render.tui_app import PaiCliApp
 from paicli.render.tui_dialogs import SessionResumePicker
 from paicli.session import (
@@ -1378,6 +1378,58 @@ def test_tui_session_share_exports_redacted_markdown(tmp_path: Path) -> None:
     assert "[REDACTED_SECRET]" in markdown
     assert "[REDACTED_PATH]" in markdown
     assert "sk-private-token" not in markdown
+
+
+def test_tui_persists_usage_and_shows_durable_session_stats(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+
+    async def run() -> None:
+        app = PaiCliApp(
+            agent=HistoryAgent(),
+            cwd=str(workspace),
+            session_repository=repository,
+        )
+        async with app.run_test(size=(110, 26)):
+            session = app._interactive_session
+            assert session is not None
+            app._provider = "qwen"
+            app._model = "qwen-plus"
+            session.begin_turn("measure this")
+            await app._persist_session_event(
+                session,
+                {
+                    "type": "usage",
+                    "request_id": "request-1",
+                    "provider": "qwen",
+                    "model": "qwen-plus",
+                    "usage_source": "actual",
+                    "usage": {
+                        "input_tokens": 120,
+                        "output_tokens": 20,
+                        "cached_tokens": 40,
+                        "cache_write_tokens": 5,
+                    },
+                },
+            )
+            session.complete_turn("measured")
+            app._update_status_bar()
+
+            status = app.query_one(StatusBar)
+            assert "session ↑80 ↓20 R40 W5" in status.session_text
+            assert "CH32%" in status.session_text
+            assert "≈¥" in status.session_text
+
+            app._handle_slash_command("/session stats")
+            await app.workers.wait_for_complete()
+            rendered = app.query_one(ChatLog).renderable_text()
+            assert "Session statistics" in rendered
+            assert "input 80" in rendered
+            assert "cache read 40" in rendered
+            assert "coverage complete" in rendered
+
+    asyncio.run(run())
 
 
 def test_interactive_session_renames_and_exposes_rich_session_summaries(

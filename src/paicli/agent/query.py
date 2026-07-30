@@ -5,6 +5,7 @@ import json
 import time
 from collections.abc import AsyncIterator
 from typing import Any, cast
+from uuid import uuid4
 
 from paicli.cancellation import CancellationCheck, TaskCanceled, raise_if_cancelled
 from paicli.config import PaiCliConfig
@@ -37,6 +38,7 @@ async def query(
     execution_state: dict[str, Any] | None = None,
     checkpoint_callback=None,
 ) -> AsyncIterator[dict[str, Any]]:
+    query_run_id = f"query_{uuid4().hex}"
     restored_state = dict(execution_state or {})
     pending_tool_calls: list[dict[str, Any]]
     if restored_state:
@@ -231,6 +233,10 @@ async def query(
                 usage_output += auxiliary_output
                 yield {
                     "type": "usage",
+                    "usage_id": f"{query_run_id}:context-summary:{turn}",
+                    "provider": llm_client.provider_name,
+                    "model": llm_client.model_name,
+                    "usage_source": "actual",
                     "usage": {
                         "input_tokens": auxiliary_input,
                         "output_tokens": auxiliary_output,
@@ -271,8 +277,14 @@ async def query(
                     usage = event.get("usage") or {}
                     usage_input += int(usage.get("input_tokens") or 0)
                     usage_output += int(usage.get("output_tokens") or 0)
-                    last_actual_usage = usage
-                    yield {"type": "usage", "usage": usage}
+                    if event.get("usage_source") != "estimated":
+                        last_actual_usage = usage
+                    yield {
+                        **event,
+                        "type": "usage",
+                        "usage": usage,
+                        "purpose": str(event.get("purpose") or "assistant"),
+                    }
                 elif event_type in {
                     "retry",
                     "retry_exhausted",

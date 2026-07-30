@@ -124,6 +124,24 @@ _Avoid_: shared credentials, endpoint defaults
 The accumulated conversation messages retained by an Agent across completed submissions; it remains available after a hot model switch.
 _Avoid_: transcript, chat log
 
+**Session usage record**:
+An append-only fact for one model request, recording provider and model identity, purpose,
+actual-or-estimated source, uncached input, output, cache-read and cache-write tokens, and an
+optional currency-qualified cost with an explicit source.
+_Avoid_: context estimate, mutable token counter, billing invoice
+
+**Session statistics**:
+A replay-derived view of a Session's own usage, cost, messages, turns, and tool activity.
+Forked history is reported separately as inherited usage and is not charged to the child
+branch's own totals.
+_Avoid_: status-bar counter, context pressure, inherited cost
+
+**Usage coverage**:
+Whether every billable Session Turn represented in durable history also has durable usage
+evidence. Legacy or interrupted histories without that evidence are partial rather than
+assumed to have zero usage.
+_Avoid_: model context utilization, cache hit rate, billing completeness guarantee
+
 **Pending tool action**:
 A durable tool call that has been accepted from an Assistant model turn but has not yet been paired with a conclusive Tool result. Its local call payload, safety classification, execution status, and approval status support restart recovery without trusting model replay.
 _Avoid_: background task, child Agent, queued task
