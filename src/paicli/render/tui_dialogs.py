@@ -52,13 +52,10 @@ class SessionResumePicker(ModalScreen[str | None]):
     SessionResumePicker > Vertical {
         width: 88;
         height: 24;
-        background: #0d1117;
-        border: heavy #60d8ff;
         padding: 1 2;
     }
     SessionResumePicker #session-picker-title {
         height: 2;
-        color: #60d8ff;
         text-style: bold;
     }
     SessionResumePicker ListView {
@@ -122,17 +119,14 @@ class InlineApprovalRequest(Static):
     }
     InlineApprovalRequest .decision-title {
         height: 1;
-        color: #facc15;
         text-style: bold;
     }
     InlineApprovalRequest .decision-summary {
         height: auto;
-        color: #f0f6fc;
     }
     InlineApprovalRequest .decision-detail {
         height: auto;
         max-height: 8;
-        color: #8b949e;
         overflow-y: auto;
     }
     InlineApprovalRequest .decision-actions {
@@ -157,29 +151,9 @@ class InlineApprovalRequest(Static):
         background: transparent !important;
         text-style: underline bold;
     }
-    InlineApprovalRequest .approval-approve {
-        color: #a8ff60 !important;
-    }
-    InlineApprovalRequest .approval-deny {
-        color: #ff4d5a !important;
-    }
-    InlineApprovalRequest .approval-allow-session {
-        color: #60d8ff !important;
-    }
-    InlineApprovalRequest .approval-skip {
-        color: #facc15 !important;
-    }
     InlineApprovalRequest.resolved {
         height: 1;
         margin: 0;
-        background: #0d1117;
-        border-left: solid #a8ff60;
-    }
-    InlineApprovalRequest.resolved.decision-deny {
-        border-left: solid #ff4d5a;
-    }
-    InlineApprovalRequest.resolved.decision-skip {
-        border-left: solid #facc15;
     }
     InlineApprovalRequest.resolved .decision-summary,
     InlineApprovalRequest.resolved .decision-detail,
@@ -283,26 +257,18 @@ class InlinePlanReview(Static):
         height: auto;
         margin: 0 0 1 0;
         padding: 0 1;
-        background: #120f1a;
-        border-left: solid #c084fc;
-    }
-    InlinePlanReview:focus {
-        border-left: double #60d8ff;
     }
     InlinePlanReview .decision-title {
         height: 1;
-        color: #c084fc;
         text-style: bold;
     }
     InlinePlanReview .plan-summary {
         height: auto;
-        color: #f0f6fc;
     }
     InlinePlanReview .plan-detail {
         display: none;
         height: auto;
         max-height: 12;
-        color: #8b949e;
         overflow-y: auto;
     }
     InlinePlanReview.expanded .plan-detail {
@@ -322,8 +288,6 @@ class InlinePlanReview(Static):
     InlinePlanReview.resolved {
         height: 1;
         margin: 0;
-        background: #0d1117;
-        border-left: solid #a8ff60;
     }
     InlinePlanReview.resolved .plan-summary,
     InlinePlanReview.resolved .plan-detail,
@@ -477,13 +441,10 @@ class PlanReviewScreen(ModalScreen["PlanReviewDecision"]):
         width: 76;
         height: auto;
         max-height: 22;
-        background: #0d1117;
-        border: heavy #60d8ff;
         padding: 1 2;
     }
     PlanReviewScreen #plan-title {
         text-style: bold;
-        color: #60d8ff;
         margin-bottom: 1;
     }
     PlanReviewScreen #plan-body {
@@ -620,13 +581,10 @@ class ApprovalScreen(ModalScreen[str]):
         width: 72;
         height: auto;
         max-height: 18;
-        background: #0d1117;
-        border: heavy #facc15;
         padding: 1 2;
     }
     ApprovalScreen #approval-title {
         text-style: bold;
-        color: #facc15;
         margin-bottom: 1;
     }
     ApprovalScreen #approval-body {

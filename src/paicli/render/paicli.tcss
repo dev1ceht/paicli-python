@@ -1,0 +1,176 @@
+/* pi-inspired Textual palette. Keep core tokens mirrored in tui_theme.PI_DARK. */
+
+Screen {
+    layout: vertical;
+    background: #18181e;
+    color: #d4d4d4;
+}
+
+ChatLog {
+    width: 100%;
+    height: 1fr;
+    overflow-y: scroll;
+    background: #18181e;
+    color: #d4d4d4;
+    padding: 0 1;
+}
+
+MessageBlock {
+    width: 100%;
+    height: auto;
+    margin: 0 0 1 0;
+    padding: 0 1;
+    background: transparent;
+    border: none;
+}
+
+MessageBlock.message-user {
+    background: #343541;
+}
+
+MessageBlock.message-thinking {
+    color: #808080;
+    text-style: italic;
+}
+
+StartupBanner {
+    width: 100%;
+    height: auto;
+    margin: 0 0 1 0;
+    padding: 0 1;
+    background: transparent;
+    border: none;
+}
+
+ThinkingBlock {
+    color: #808080;
+    background: transparent;
+    text-style: italic;
+}
+
+ThinkingBlock .thinking-output {
+    color: #666666;
+}
+
+ToolCard {
+    background: transparent;
+}
+
+ToolCard Collapsible {
+    padding: 0 1;
+}
+
+ToolCard.tool-running Collapsible {
+    background: #282832;
+    color: #d4d4d4;
+}
+
+ToolCard.tool-success Collapsible {
+    background: #283228;
+    color: #d4d4d4;
+}
+
+ToolCard.tool-error Collapsible {
+    background: #3c2828;
+    color: #d4d4d4;
+}
+
+ToolCard .tool-output {
+    color: #808080;
+}
+
+StatusBar {
+    height: 2;
+    background: #18181e;
+    color: #808080;
+    padding: 0 1;
+}
+
+ChatLog .new-activity-indicator {
+    background: #282832;
+    color: #ffff00;
+}
+
+ChatLog .new-activity-indicator:focus {
+    background: #3a3a4a;
+    color: #8abeb7;
+}
+
+SessionResumePicker > Vertical,
+PlanReviewScreen > Vertical,
+ApprovalScreen > Vertical {
+    background: #18181e;
+    border: heavy #505050;
+}
+
+SessionResumePicker #session-picker-title,
+PlanReviewScreen #plan-title {
+    color: #8abeb7;
+}
+
+SessionResumePicker ListItem.-highlight {
+    background: #3a3a4a;
+    color: #8abeb7;
+}
+
+InlineApprovalRequest .decision-title,
+ApprovalScreen #approval-title {
+    color: #ffff00;
+}
+
+ApprovalScreen > Vertical {
+    border: heavy #ffff00;
+}
+
+InlineApprovalRequest .decision-summary,
+InlinePlanReview .plan-summary {
+    color: #d4d4d4;
+}
+
+InlineApprovalRequest .decision-detail,
+InlinePlanReview .plan-detail {
+    color: #808080;
+}
+
+InlineApprovalRequest .approval-approve {
+    color: #b5bd68 !important;
+}
+
+InlineApprovalRequest .approval-deny {
+    color: #cc6666 !important;
+}
+
+InlineApprovalRequest .approval-allow-session {
+    color: #8abeb7 !important;
+}
+
+InlineApprovalRequest .approval-skip {
+    color: #ffff00 !important;
+}
+
+InlineApprovalRequest.resolved,
+InlinePlanReview.resolved {
+    background: #18181e;
+    border-left: solid #b5bd68;
+}
+
+InlineApprovalRequest.resolved.decision-deny {
+    border-left: solid #cc6666;
+}
+
+InlineApprovalRequest.resolved.decision-skip {
+    border-left: solid #ffff00;
+}
+
+InlinePlanReview {
+    background: #282832;
+    border-left: solid #b294bb;
+}
+
+InlinePlanReview:focus {
+    border-left: double #8abeb7;
+}
+
+InlinePlanReview .decision-title {
+    color: #b294bb;
+}
