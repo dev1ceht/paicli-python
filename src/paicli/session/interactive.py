@@ -347,6 +347,15 @@ class InteractiveSession:
             raise RuntimeError("cannot reset context during an active turn")
         self.repository.reset_context(self.id, lease_token=self._lease.token)
 
+    def save_context_checkpoint(self, checkpoint: dict[str, Any]) -> bool:
+        if self._active_turn_id is not None:
+            raise RuntimeError("cannot compact context during an active turn")
+        return self.repository.save_context_checkpoint(
+            self.id,
+            checkpoint,
+            lease_token=self._lease.token,
+        )
+
     def list_sessions(self) -> tuple[SessionRecord, ...]:
         return tuple(
             record

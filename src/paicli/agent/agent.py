@@ -10,7 +10,7 @@ from typing import Any
 
 from paicli.cancellation import CancellationCheck, TaskCanceled, raise_if_cancelled
 from paicli.config import LlmConfig, PaiCliConfig
-from paicli.context import ContextManager
+from paicli.context import ContextBuildResult, ContextManager
 from paicli.context.telemetry import use_context_scope
 from paicli.llm import create_llm_client
 from paicli.llm.base import LlmClient
@@ -148,6 +148,23 @@ class Agent:
 
     def clear_history(self) -> None:
         self.replace_history([])
+
+    async def compact_history(self) -> ContextBuildResult:
+        """Manually summarize eligible Session history and retain recent turns."""
+        history = list(self.history)
+        context_state = self.context_manager.checkpoint_state()
+        try:
+            result = await self.context_manager.compact_now(
+                prompt_sections=self._build_prompt_sections(),
+                messages=history,
+                tools=self.tool_registry.definitions(),
+            )
+        except Exception:
+            self.context_manager.restore_state(context_state)
+            raise
+        if result.compacted:
+            self.history = list(result.messages)
+        return result
 
     def replace_history(self, history: list[Message]) -> None:
         """Replace durable model history and reset derived context state."""

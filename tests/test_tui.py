@@ -556,6 +556,55 @@ def test_tui_context_command_shows_retained_active_calibration_and_unknown_limit
     asyncio.run(run())
 
 
+def test_tui_compact_command_summarizes_history_without_starting_a_turn():
+    class CompactSession:
+        def __init__(self):
+            self.checkpoints = []
+
+        def save_context_checkpoint(self, checkpoint):
+            self.checkpoints.append(checkpoint)
+
+        def close(self):
+            return None
+
+    class CompactAgent:
+        def __init__(self):
+            self.calls = 0
+
+        async def compact_history(self):
+            self.calls += 1
+            return SimpleNamespace(
+                compacted=True,
+                pressure_before=SimpleNamespace(pressure_ratio=0.12),
+                pressure_after=SimpleNamespace(pressure_ratio=0.04),
+            )
+
+        def context_usage_event(self):
+            return None
+
+        def export_session_context(self):
+            return {"checkpoint_id": "ctx_manual"}
+
+    async def run() -> None:
+        agent = CompactAgent()
+        session = CompactSession()
+        app = PaiCliApp(agent=agent, cwd=".")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            app._interactive_session = session
+
+            app._handle_slash_command("/compact")
+            await app.workers.wait_for_complete()
+
+            text = app.query_one(ChatLog).renderable_text()
+            assert agent.calls == 1
+            assert session.checkpoints == [{"checkpoint_id": "ctx_manual"}]
+            assert "12% → 4%" in text
+            assert "Unknown command" not in text
+
+    asyncio.run(run())
+
+
 def test_ctrl_y_toggles_hitl_between_auto_and_unattended():
     config = SimpleNamespace(
         llm=SimpleNamespace(model="test-model", provider="test-provider"),

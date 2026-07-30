@@ -45,7 +45,7 @@ from paicli.session.schema import connect, ensure_schema
 from paicli.session.validation import validate_event_payload
 from paicli.session.verification import SessionIntegrityVerifier
 from paicli.session.versions import EVENT_SCHEMA_VERSION, upcast_event_payload
-from paicli.usage import UsageRecord
+from paicli.usage import TokenUsage, UsageRecord
 
 INLINE_CONTENT_LIMIT_BYTES = 64 * 1024
 RESERVED_PUBLIC_EVENT_TYPES = {
@@ -1374,32 +1374,78 @@ class SessionRepository:
                 session_id,
                 str(context_checkpoint["checkpoint_id"]),
             ):
-                checkpoint_id = str(context_checkpoint["checkpoint_id"])
-                self._append_event_in_transaction(
+                self._append_context_checkpoint_in_transaction(
                     connection,
                     session_id=session_id,
-                    event_type="context.compacted",
-                    payload={
-                        "checkpoint_id": checkpoint_id,
-                        "summary": str(context_checkpoint["summary"]),
-                        "compaction": dict(context_checkpoint["compaction"]),
-                        "pressure": dict(context_checkpoint.get("pressure") or {}),
-                        "provider": str(context_checkpoint.get("provider") or ""),
-                        "model": str(context_checkpoint.get("model") or ""),
-                    },
+                    checkpoint=context_checkpoint,
+                    checkpoint_payload=checkpoint_payload or {},
+                    checkpoint_blob_refs=checkpoint_blob_refs,
                     turn_id=turn_id,
-                    idempotency_key=f"{turn_id}:context-compacted",
-                )
-                self._append_event_in_transaction(
-                    connection,
-                    session_id=session_id,
-                    event_type="context.checkpoint_created",
-                    payload=checkpoint_payload or {},
-                    turn_id=turn_id,
-                    idempotency_key=f"{turn_id}:context-checkpoint",
-                    blob_refs=checkpoint_blob_refs,
+                    idempotency_prefix=turn_id,
                 )
         return message_from_event(event, blob_loader=self._load_blob_bytes)
+
+    def save_context_checkpoint(
+        self,
+        session_id: str,
+        checkpoint: dict[str, Any],
+        *,
+        lease_token: str | None = None,
+    ) -> bool:
+        """Persist a context checkpoint without creating a Session Turn."""
+        checkpoint_id = str(checkpoint["checkpoint_id"])
+        with self._connect() as connection:
+            if self._checkpoint_is_current(connection, session_id, checkpoint_id):
+                return False
+
+        annotated = self._annotate_context_checkpoint_messages(
+            session_id,
+            checkpoint,
+            pending_assistant=None,
+        )
+        operation_id = f"compact_{checkpoint_id}"
+        compaction = dict(annotated["compaction"])
+        llm_usage = dict(compaction.get("llm_usage") or {})
+        checkpoint_payload, checkpoint_blob_refs = self._prepare_context_checkpoint(
+            annotated
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_writable_session(
+                connection,
+                session_id,
+                lease_token=lease_token,
+            )
+            if self._checkpoint_is_current(connection, session_id, checkpoint_id):
+                return False
+            usage_record = None
+            if compaction.get("used_llm"):
+                usage_record = UsageRecord(
+                    usage_id=f"context-summary:{checkpoint_id}",
+                    request_id=None,
+                    provider=str(annotated.get("provider") or ""),
+                    model=str(annotated.get("model") or ""),
+                    purpose="context_summary",
+                    tokens=TokenUsage(
+                        input_tokens=int(llm_usage.get("input_tokens") or 0),
+                        output_tokens=int(llm_usage.get("output_tokens") or 0),
+                        cache_read_tokens=int(llm_usage.get("cache_read_tokens") or 0),
+                        cache_write_tokens=int(llm_usage.get("cache_write_tokens") or 0),
+                    ),
+                    cost=None,
+                    usage_source="actual",
+                )
+            self._append_context_checkpoint_in_transaction(
+                connection,
+                session_id=session_id,
+                checkpoint=annotated,
+                checkpoint_payload=checkpoint_payload,
+                checkpoint_blob_refs=checkpoint_blob_refs,
+                turn_id=operation_id,
+                idempotency_prefix=checkpoint_id,
+                usage_record=usage_record,
+            )
+        return True
 
     def record_usage(
         self,
@@ -1438,6 +1484,53 @@ class SessionRepository:
             return False
         payload = json.loads(str(row["payload_json"]))
         return isinstance(payload, dict) and payload.get("checkpoint_id") == checkpoint_id
+
+    def _append_context_checkpoint_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        session_id: str,
+        checkpoint: dict[str, Any],
+        checkpoint_payload: dict[str, Any],
+        checkpoint_blob_refs: tuple[BlobReference, ...],
+        turn_id: str,
+        idempotency_prefix: str,
+        usage_record: UsageRecord | None = None,
+    ) -> None:
+        checkpoint_id = str(checkpoint["checkpoint_id"])
+        self._append_event_in_transaction(
+            connection,
+            session_id=session_id,
+            event_type="context.compacted",
+            payload={
+                "checkpoint_id": checkpoint_id,
+                "summary": str(checkpoint["summary"]),
+                "compaction": dict(checkpoint["compaction"]),
+                "pressure": dict(checkpoint.get("pressure") or {}),
+                "provider": str(checkpoint.get("provider") or ""),
+                "model": str(checkpoint.get("model") or ""),
+            },
+            turn_id=turn_id,
+            idempotency_key=f"{idempotency_prefix}:context-compacted",
+        )
+        if usage_record is not None:
+            self._append_event_in_transaction(
+                connection,
+                session_id=session_id,
+                event_type="usage.recorded",
+                payload=usage_record.to_payload(),
+                turn_id=turn_id,
+                idempotency_key=f"{idempotency_prefix}:context-summary-usage",
+            )
+        self._append_event_in_transaction(
+            connection,
+            session_id=session_id,
+            event_type="context.checkpoint_created",
+            payload=checkpoint_payload,
+            turn_id=turn_id,
+            idempotency_key=f"{idempotency_prefix}:context-checkpoint",
+            blob_refs=checkpoint_blob_refs,
+        )
 
     def interrupt_turn(
         self,
@@ -2252,7 +2345,7 @@ class SessionRepository:
         session_id: str,
         checkpoint: dict[str, Any],
         *,
-        pending_assistant: dict[str, Any],
+        pending_assistant: dict[str, Any] | None,
     ) -> dict[str, Any]:
         messages = [
             dict(message) for message in checkpoint["messages"] if isinstance(message, dict)
@@ -2265,16 +2358,17 @@ class SessionRepository:
             }
             for message in self.rebuild_session_view(session_id).model_messages
         ]
-        candidates.append(
-            {
-                "message_id": str(pending_assistant["message_id"]),
-                "role": str(pending_assistant["role"]),
-                "content": _message_payload_content(
-                    pending_assistant,
-                    blob_loader=self._load_blob_bytes,
-                ),
-            }
-        )
+        if pending_assistant is not None:
+            candidates.append(
+                {
+                    "message_id": str(pending_assistant["message_id"]),
+                    "role": str(pending_assistant["role"]),
+                    "content": _message_payload_content(
+                        pending_assistant,
+                        blob_loader=self._load_blob_bytes,
+                    ),
+                }
+            )
         upper_bound = len(candidates)
         for message in reversed(messages):
             matching_index = next(

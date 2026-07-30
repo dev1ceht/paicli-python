@@ -45,13 +45,13 @@ from paicli.types import Message
 
 
 class SummaryLlm(OpenAICompatibleClient):
-    def __init__(self):
+    def __init__(self, *, max_context_window: int = 2_000):
         super().__init__(
             provider_name="fake",
             model="summary-model",
             api_key="secret",
             base_url="https://example.test/v1",
-            max_context_window=2_000,
+            max_context_window=max_context_window,
         )
         self.calls = 0
 
@@ -63,6 +63,74 @@ class SummaryLlm(OpenAICompatibleClient):
         }
         yield {"type": "usage", "usage": {"input_tokens": 10, "output_tokens": 5}}
         yield {"type": "message_end", "stop_reason": "end_turn"}
+
+
+def test_agent_can_manually_compact_history_below_pressure_threshold(tmp_path):
+    config = PaiCliConfig()
+    config.context.protected_turns = 2
+    llm = SummaryLlm(max_context_window=128_000)
+    agent = Agent(
+        llm_client=llm,
+        tool_registry=ToolRegistry(),
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+    )
+    agent.history = [
+        Message(role="user", content="old question one"),
+        Message(role="assistant", content="old answer one"),
+        Message(role="user", content="old question two"),
+        Message(role="assistant", content="old answer two"),
+        Message(role="user", content="recent question one"),
+        Message(role="assistant", content="recent answer one"),
+        Message(role="user", content="recent question two"),
+        Message(role="assistant", content="recent answer two"),
+    ]
+
+    result = asyncio.run(agent.compact_history())
+
+    assert result.compacted is True
+    assert result.pressure_before is not None
+    assert result.pressure_before.pressure_ratio < config.context.tier1_threshold
+    assert llm.calls == 1
+    assert agent.history[0].role == "system"
+    assert "Summarized old context" in str(agent.history[0].content)
+    assert [(message.role, message.content) for message in agent.history[1:]] == [
+        ("user", "recent question one"),
+        ("assistant", "recent answer one"),
+        ("user", "recent question two"),
+        ("assistant", "recent answer two"),
+    ]
+    checkpoint = agent.export_session_context()
+    assert checkpoint is not None
+    assert checkpoint["compaction"]["compacted_items"] == 4
+
+
+def test_agent_manual_compaction_is_a_noop_when_only_protected_turns_exist(tmp_path):
+    config = PaiCliConfig()
+    config.context.protected_turns = 2
+    llm = SummaryLlm(max_context_window=128_000)
+    agent = Agent(
+        llm_client=llm,
+        tool_registry=ToolRegistry(),
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+    )
+    agent.history = [
+        Message(role="user", content="question"),
+        Message(role="assistant", content="answer"),
+    ]
+
+    result = asyncio.run(agent.compact_history())
+
+    assert result.compacted is False
+    assert llm.calls == 0
+    assert [(message.role, message.content) for message in agent.history] == [
+        ("user", "question"),
+        ("assistant", "answer"),
+    ]
+    assert agent.export_session_context() is None
 
 
 def test_context_manager_exports_and_restores_durable_compaction_state(tmp_path):
