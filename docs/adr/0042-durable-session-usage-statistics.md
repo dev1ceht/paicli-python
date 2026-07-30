@@ -7,12 +7,16 @@ currency-qualified cost with its own source.
 
 ## Live and durable views
 
-The TUI keeps the existing request-scoped context window, compression pressure, latest token
-reading, and elapsed time on the first status line. A second line reads an in-memory snapshot
-of durable Session totals. Persisting a usage event refreshes that snapshot off the UI thread;
-ordinary status refreshes never scan SQLite. `/session stats` performs an explicit complete
-aggregation off the UI thread and shows token, cache, cost, activity, inherited-history, and
-coverage details.
+The TUI uses two stable status lines. The first shows shortened workspace, Git branch, Session
+title, execution phase, and elapsed time. The second combines an in-memory snapshot of durable
+Session token, cache, and cost totals with the live request-scoped context window, compression
+pressure, provider, and model. It does not repeat the latest request's input, output, or cached
+token reading. Narrow terminals truncate both sides while preserving some cumulative usage and
+live context information.
+
+Persisting a usage event refreshes the durable snapshot off the UI thread; ordinary status
+refreshes never scan SQLite. `/session stats` performs an explicit complete aggregation off the
+UI thread and shows token, cache, cost, activity, inherited-history, and coverage details.
 
 Provider token counts are facts. When a provider reports prompt tokens that include cache
 reads, PaiCLI stores uncached input separately by subtracting cache reads. The existing local

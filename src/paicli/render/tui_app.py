@@ -13,14 +13,18 @@ import sys
 import time
 from contextlib import suppress
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, cast
 
+from dulwich.errors import NotGitRepository
+from dulwich.repo import Repo
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.css.query import NoMatches
 from textual.widgets import TextArea
 
 from paicli.context.telemetry import ContextUsageState, rounded_context_percent
-from paicli.render._common import estimate_cost, format_cost, format_elapsed, format_tokens
+from paicli.render._common import estimate_cost, format_elapsed, format_tokens, shorten_home
 from paicli.render.textual_widgets import (
     ChatLog,
     CommandInput,
@@ -45,6 +49,23 @@ def _format_pressure_tier(tier: object) -> str:
         "tier2_prune": "T2",
         "tier3_summary": "T3",
     }.get(str(tier), "—")
+
+
+def _git_branch_name(cwd: str) -> str:
+    try:
+        repository = Repo.discover(cwd)
+    except (NotGitRepository, OSError):
+        return ""
+    try:
+        head = repository.refs.read_ref(b"HEAD")
+        branch_prefix = b"ref: refs/heads/"
+        if head and head.startswith(branch_prefix):
+            return head.removeprefix(branch_prefix).decode("utf-8", errors="replace")
+        return repository.head().decode("ascii")[:7]
+    except (KeyError, OSError):
+        return ""
+    finally:
+        repository.close()
 
 
 class PaiCliApp(App):
@@ -90,6 +111,10 @@ class PaiCliApp(App):
         self.agent = agent
         self.config = config
         self.cwd = cwd
+        workspace = str(Path(cwd).expanduser().resolve())
+        self._workspace_path = workspace
+        self._workspace_text = shorten_home(workspace)
+        self._git_branch = _git_branch_name(workspace)
         self.registry = registry
         self.mcp_manager = mcp_manager
         self._handle_slash = handle_slash
@@ -156,6 +181,8 @@ class PaiCliApp(App):
             if context_event:
                 self._context_usage.apply(context_event)
         self._update_status_bar()
+        self.set_interval(0.1, self._refresh_elapsed_status)
+        self.set_interval(2.0, self._refresh_git_branch)
         self._show_banner()
         self._show_restored_session_history()
         if self._interactive_session is not None:
@@ -172,6 +199,20 @@ class PaiCliApp(App):
     def on_unmount(self) -> None:
         if self._interactive_session is not None:
             self._interactive_session.close()
+
+    def _refresh_elapsed_status(self) -> None:
+        if self._phase not in {"running", "plan"} or self._run_start_time is None:
+            return
+        with suppress(NoMatches):
+            self._update_status_bar()
+
+    def _refresh_git_branch(self) -> None:
+        branch = _git_branch_name(self._workspace_path)
+        if branch == self._git_branch:
+            return
+        self._git_branch = branch
+        with suppress(NoMatches):
+            self._update_status_bar()
 
     async def _refresh_session_lease(self) -> None:
         session = self._interactive_session
@@ -1032,12 +1073,21 @@ class PaiCliApp(App):
 
     def _update_status_bar(self) -> None:
         status_bar = self.query_one("#status-bar", StatusBar)
-        status_bar.model = self._model
+        status_bar.workspace_text = self._workspace_text
+        status_bar.git_branch = self._git_branch
+        session = self._interactive_session
+        status_bar.session_title = (
+            str(session.record.title)
+            if session is not None and getattr(session, "record", None) is not None
+            else ""
+        )
+        status_bar.model = (
+            f"{self._provider}/{self._model}" if self._provider and self._model else self._model
+        )
         status_bar.phase = self._phase
 
         reading = self._context_usage.current
         if reading is not None:
-            reading_state = str(reading.get("state") or "")
             used_tokens = int(reading.get("used_tokens") or 0)
             context_window = reading.get("context_window")
             estimate_marker = "~" if reading.get("estimated") else ""
@@ -1094,34 +1144,6 @@ class PaiCliApp(App):
                 f"pressure {pressure_marker}{rounded_context_percent(float(pressure_ratio))}%"
             )
 
-        token_detail = ""
-        reading_state = str(reading.get("state") or "") if reading is not None else ""
-        if reading is not None and reading_state != "retained":
-            in_tok = int(reading.get("input_tokens") or 0)
-            out_tok = int(reading.get("output_tokens") or 0)
-            cached = int(reading.get("cached_tokens") or 0)
-            estimate_marker = "~" if reading.get("estimated") else ""
-            parts = [
-                f"in:{estimate_marker}{format_tokens(in_tok)}",
-                f"out:{estimate_marker}{format_tokens(out_tok)}",
-            ]
-            if cached:
-                parts.append(f"cached:{format_tokens(cached)}")
-            token_detail = " ".join(parts)
-        elif self._last_has_usage:
-            last_prefix = "last " if reading_state == "retained" or self._phase == "idle" else ""
-            parts = [
-                f"{last_prefix}in:{format_tokens(self._last_input_tokens)}",
-                f"out:{format_tokens(self._last_output_tokens)}",
-            ]
-            if self._last_cached_tokens:
-                parts.append(f"cached:{format_tokens(self._last_cached_tokens)}")
-            token_detail = " ".join(parts)
-        status_bar.token_detail = token_detail
-
-        status_bar.cost_text = (
-            "" if self._interactive_session is not None else format_cost(self._last_cost)
-        )
         status_bar.session_text = self._session_status_text()
 
         elapsed = self._last_elapsed
@@ -1359,33 +1381,24 @@ class PaiCliApp(App):
         stats = getattr(self._interactive_session, "stats_snapshot", None)
         if stats is None:
             return ""
-        tokens = stats.actual_tokens
+        tokens = stats.tokens
+        estimate_marker = "~" if stats.estimated_tokens.total_tokens else ""
         parts = [
-            "session",
-            f"↑{format_tokens(tokens.input_tokens)}",
-            f"↓{format_tokens(tokens.output_tokens)}",
+            f"{estimate_marker}↑{format_tokens(tokens.input_tokens)}",
+            f"{estimate_marker}↓{format_tokens(tokens.output_tokens)}",
             f"R{format_tokens(tokens.cache_read_tokens)}",
             f"W{format_tokens(tokens.cache_write_tokens)}",
         ]
-        estimated = stats.estimated_tokens
-        if estimated.total_tokens:
-            parts.append(
-                "est "
-                f"↑{format_tokens(estimated.input_tokens)} "
-                f"↓{format_tokens(estimated.output_tokens)}"
-            )
         if stats.cache_hit_rate is not None:
-            parts.append(f"CH{rounded_context_percent(stats.cache_hit_rate)}%")
-        parts.extend(self._format_cost_total(cost) for cost in stats.costs)
-        inherited = stats.inherited_tokens
-        if inherited.total_tokens:
-            parts.append(
-                "inherited "
-                f"↑{format_tokens(inherited.input_tokens)} "
-                f"↓{format_tokens(inherited.output_tokens)}"
-            )
-        if stats.coverage == "partial":
-            parts.append("coverage:partial")
+            parts.append(f"CH{stats.cache_hit_rate * 100:.1f}%")
+        else:
+            parts.append("CH—")
+        if stats.costs:
+            parts.extend(self._format_status_cost_total(cost) for cost in stats.costs)
+        elif tokens.total_tokens:
+            parts.append("cost—")
+        else:
+            parts.append("≈¥0.00")
         return " ".join(parts)
 
     async def _session_stats_command(self, session: Any, chat_log: ChatLog) -> None:
@@ -1407,9 +1420,7 @@ class PaiCliApp(App):
         inherited = stats.inherited_tokens
         cost_text = ", ".join(cls._format_cost_total(cost) for cost in stats.costs) or "none"
         cache_hit = (
-            f"{rounded_context_percent(stats.cache_hit_rate)}%"
-            if stats.cache_hit_rate is not None
-            else "n/a"
+            f"{stats.cache_hit_rate * 100:.1f}%" if stats.cache_hit_rate is not None else "n/a"
         )
         return (
             f"Session statistics ({session_id})\n"
@@ -1434,6 +1445,13 @@ class PaiCliApp(App):
         symbol = "¥" if cost.currency == "CNY" else f"{cost.currency} "
         marker = "≈" if cost.source == "catalog_estimate" else ""
         return f"{marker}{symbol}{cost.amount:.4f}"
+
+    @staticmethod
+    def _format_status_cost_total(cost: Any) -> str:
+        symbol = "¥" if cost.currency == "CNY" else f"{cost.currency} "
+        marker = "≈" if cost.source == "catalog_estimate" else ""
+        precision = 2 if cost.amount >= Decimal("0.01") else 4
+        return f"{marker}{symbol}{cost.amount:.{precision}f}"
 
     def _activate_interactive_session(self) -> None:
         if self._interactive_session is None:

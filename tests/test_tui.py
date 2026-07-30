@@ -5,6 +5,7 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+from dulwich.repo import Repo
 from rich.panel import Panel
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -140,7 +141,6 @@ def test_tui_updates_status_bar_from_plan_usage_events():
             assert status_bar.phase == "plan"
             assert status_bar.context_text == "ctx 13/1.0k (1%)"
             assert status_bar.pressure_text == "pressure ~60%"
-            assert status_bar.token_detail == "in:13 out:17 cached:3"
 
             app.handle_event({"type": "plan_completed", "results": {}})
             assert app._last_total_tokens == 48
@@ -229,7 +229,6 @@ def test_tui_starts_with_the_agent_base_context_estimate():
 
             status = app.query_one(StatusBar)
             assert status.context_text == "ctx ~42/1.0k (4%)"
-            assert status.token_detail == ""
 
     asyncio.run(run())
 
@@ -295,7 +294,7 @@ def test_startup_banner_keeps_its_adaptive_height_after_first_submission():
     asyncio.run(run())
 
 
-def test_tui_distinguishes_live_estimates_from_last_actual_usage():
+def test_tui_keeps_context_estimate_without_showing_last_request_tokens():
     async def run() -> None:
         app = PaiCliApp(cwd=".")
         async with app.run_test(size=(80, 24)) as pilot:
@@ -329,7 +328,6 @@ def test_tui_distinguishes_live_estimates_from_last_actual_usage():
                 }
             )
             status = app.query_one(StatusBar)
-            assert status.token_detail == "in:~90 out:~10"
 
             app.handle_event(
                 {
@@ -351,11 +349,8 @@ def test_tui_distinguishes_live_estimates_from_last_actual_usage():
                     "context_window": 1_000,
                 }
             )
-            assert status.token_detail == "in:120 out:5 cached:40"
-
             app.handle_event({"type": "context_request_finished", "request_id": "request-a"})
             assert status.context_text == "ctx ~80/1.0k (8%)"
-            assert status.token_detail == "last in:120 out:5 cached:40"
 
     asyncio.run(run())
 
@@ -1197,22 +1192,117 @@ def test_tui_mounted_input_uses_persisted_prompt_history(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
-def test_status_bar_render_uses_exact_phase_and_cost_colors():
+def test_status_bar_renders_workspace_session_and_runtime_on_two_lines():
     status_bar = StatusBar()
+    status_bar.workspace_text = "~/project"
+    status_bar.git_branch = "main"
+    status_bar.session_title = "refactor-session"
     status_bar.phase = "running"
-    status_bar.model = "test-model"
-    status_bar.context_text = "ctx 12%"
-    status_bar.cost_text = "$0.1234"
-    status_bar.session_text = "session ↑80 ↓20 R40 W5 CH32% ≈¥0.1250"
+    status_bar.elapsed_text = "4.2s"
+    status_bar.model = "qwen/qwen3.7"
+    status_bar.context_text = "ctx ~62.0k/128.0k 48%"
+    status_bar.pressure_text = "p55%"
+    status_bar.session_text = "↑120.0k ↓8.0k R70.0k W5.0k CH36.5% ≈¥0.42"
 
     rendered = status_bar.render()
+    plain = getattr(rendered, "plain", str(rendered))
+    lines = plain.splitlines()
 
-    assert "\nsession ↑80 ↓20 R40 W5 CH32% ≈¥0.1250" in rendered
-    assert "[bold #60d8ff]● running[/bold #60d8ff]" in rendered
-    assert "[bold #facc15]$0.1234[/bold #facc15]" in rendered
+    assert len(lines) == 2
+    assert lines[0].startswith("~/project (main) · refactor-session")
+    assert lines[0].endswith("● running · 4.2s")
+    assert lines[1].startswith("↑120.0k ↓8.0k R70.0k W5.0k CH36.5% ≈¥0.42")
+    assert lines[1].endswith("ctx ~62.0k/128.0k 48% · p55%   qwen/qwen3.7")
+    assert "last " not in plain
+    assert "coverage:" not in plain
 
     status_bar.phase = "plan"
-    assert "[bold #c084fc]◆ plan[/bold #c084fc]" in status_bar.render()
+    plan = status_bar.render()
+    assert "◆ plan" in getattr(plan, "plain", str(plan))
+
+
+def test_status_bar_truncates_each_line_to_narrow_terminal_width():
+    async def run() -> None:
+        app = PaiCliApp(cwd=".")
+        async with app.run_test(size=(52, 20)) as pilot:
+            await pilot.pause()
+            status = app.query_one(StatusBar)
+            status.workspace_text = "~/a/very/long/workspace/path"
+            status.git_branch = "feature/very-long-branch-name"
+            status.session_title = "a very long refactoring session title"
+            status.model = "qwen/qwen3.7-plus"
+            status.session_text = "↑120.0k ↓8.0k R70.0k W5.0k CH36.5% ≈¥0.42"
+            status.context_text = "ctx ~62.0k/128.0k (48%)"
+            status.pressure_text = "pressure 55%"
+
+            rendered = status.render()
+            assert all(line.cell_len <= 50 for line in rendered.split("\n"))
+            assert "↑" in rendered.plain.splitlines()[1]
+            assert "ctx" in rendered.plain.splitlines()[1]
+
+    asyncio.run(run())
+
+
+def test_tui_status_bar_reads_current_git_branch(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = Repo.init(workspace)
+    repository.refs.set_symbolic_ref(b"HEAD", b"refs/heads/feature/status-layout")
+    repository.close()
+
+    async def run() -> None:
+        app = PaiCliApp(cwd=str(workspace))
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause()
+            status = app.query_one(StatusBar)
+            assert status.git_branch == "feature/status-layout"
+            assert status.workspace_text == str(workspace)
+
+    asyncio.run(run())
+
+
+def test_tui_status_bar_refreshes_git_branch_without_stream_reads(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = Repo.init(workspace)
+    repository.refs.set_symbolic_ref(b"HEAD", b"refs/heads/main")
+
+    async def run() -> None:
+        app = PaiCliApp(cwd=str(workspace))
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause()
+            assert app.query_one(StatusBar).git_branch == "main"
+
+            repository.refs.set_symbolic_ref(b"HEAD", b"refs/heads/feature/refreshed")
+            app._refresh_git_branch()
+
+            assert app.query_one(StatusBar).git_branch == "feature/refreshed"
+
+    try:
+        asyncio.run(run())
+    finally:
+        repository.close()
+
+
+def test_running_status_elapsed_updates_without_stream_events():
+    class SlowAgent:
+        async def run(self, _message: str):
+            await asyncio.sleep(0.35)
+            yield {"type": "done", "total_tokens": 0, "total_turns": 1}
+
+    async def run() -> None:
+        app = PaiCliApp(agent=SlowAgent(), cwd=".")
+        async with app.run_test(size=(80, 20)) as pilot:
+            app.run_agent_task("wait")
+            await pilot.pause()
+            first = app.query_one(StatusBar).elapsed_text
+            await asyncio.sleep(0.22)
+            second = app.query_one(StatusBar).elapsed_text
+            assert second
+            assert second != first
+            await app.workers.wait_for_complete()
+
+    asyncio.run(run())
 
 
 def test_status_glyph_uses_single_width_unicode_with_ascii_fallback():
