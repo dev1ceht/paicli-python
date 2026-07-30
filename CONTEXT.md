@@ -56,13 +56,18 @@ _Avoid_: typing, draft
 The adaptive session introduction displayed throughout the PaiCLI TUI session; it presents application identity and current capabilities without shrinking after submission.
 _Avoid_: splash screen, chat area
 
-**Restrained Aurora visual language**:
-PaiCLI's calm, professional terminal aesthetic: neutral dark surfaces carry content, while Aurora green, cyan, purple, yellow, and red are reserved for focus, state, and key actions.
+**Restrained pi visual language**:
+PaiCLI's calm, professional terminal aesthetic adapted from pi: neutral dark surfaces carry
+content, user submissions use a low-contrast surface, and accent colors are reserved for focus,
+state, and key actions.
 _Avoid_: cyberpunk theme, neon-heavy UI, decorative color
 
-**Aurora semantic colors**:
-The fixed status vocabulary within the restrained Aurora visual language: cyan means focus or active work, green success, blue user input, purple reasoning or planning, yellow warning or approval, and red error or high risk.
-_Avoid_: decorative accents, role-dependent recoloring, rainbow status
+**Pi semantic colors**:
+The fixed status vocabulary within the restrained pi visual language: teal means focus or
+active work, green success, muted gray background identifies user input, muted italic gray
+identifies model thinking, purple planning, yellow warning or approval, and red error or high
+risk.
+_Avoid_: decorative accents, color-only status, rainbow status
 
 **Terminal-safe status glyph**:
 A single-cell Unicode status symbol with a textual label and an ASCII fallback, chosen to preserve alignment across supported terminals and fonts.

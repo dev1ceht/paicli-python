@@ -27,6 +27,7 @@ from textual.widgets import Collapsible, Static, TextArea
 from paicli.render._common import TOOL_LABELS as _TOOL_LABELS
 from paicli.render._common import format_elapsed
 from paicli.render.history import PromptHistory
+from paicli.render.tui_theme import PI_DARK
 
 _STATUS_GLYPHS: dict[str, tuple[str, str]] = {
     "idle": ("○", "o"),
@@ -58,16 +59,13 @@ class MessageBlock(Static):
         height: auto;
         margin: 0 0 1 0;
         padding: 0 1;
-        background: #0d1117;
         border: none;
     }
     MessageBlock.message-user {
-        background: #111827;
-        border-left: solid #60a5fa;
+        border-left: none;
     }
     MessageBlock.message-thinking {
-        color: #c084fc;
-        border-left: solid #6d28d9;
+        border-left: none;
     }
     """
 
@@ -91,23 +89,26 @@ class MessageBlock(Static):
         del collapsed
         self.update(self._renderable())
 
-    def _title(self) -> Text:
+    def _title(self) -> Text | None:
         prefix = f"[{self.task_id}] " if self.task_id else ""
-        if self.role == "user":
-            return Text(f"{prefix}You", style="bold #60a5fa")
         if self.role == "thinking":
-            return Text(f"{prefix}Thinking", style="bold #c084fc")
-        return Text(f"{prefix}Assistant Output", style="bold #8b949e")
+            return Text(f"{prefix}Thinking", style=f"italic {PI_DARK.thinking}")
+        if prefix:
+            return Text(prefix.rstrip(), style=PI_DARK.dim)
+        return None
 
     def _body(self) -> Text | Markdown:
         if self.role == "assistant":
             return Markdown(self._content)
         if self.role == "user":
-            return Text(self._content, style="bold #ffffff")
-        return Text(self._content, style="dim")
+            return Text(self._content, style=PI_DARK.text)
+        return Text(self._content, style=f"italic {PI_DARK.thinking}")
 
-    def _renderable(self) -> Group:
-        return Group(self._title(), self._body())
+    def _renderable(self) -> Group | Text | Markdown:
+        title = self._title()
+        if title is None:
+            return self._body()
+        return Group(title, self._body())
 
 
 class InfoBlock(Static):
@@ -132,46 +133,14 @@ class StartupBanner(Vertical):
         height: auto;
         margin: 0 0 1 0;
         padding: 0 1;
-        background: #0d1117;
-        border-left: solid #60d8ff;
+        border-left: none;
     }
-    StartupBanner .banner-compact {
-        display: none;
+    StartupBanner .banner-content {
         width: 100%;
-        height: 3;
-    }
-    StartupBanner .banner-main {
-        width: 100%;
-        height: 4;
-    }
-    StartupBanner .banner-wordmark,
-    StartupBanner .banner-pills,
-    StartupBanner .banner-capabilities,
-    StartupBanner .banner-workspace {
-        width: 100%;
-        height: 1;
-    }
-    StartupBanner .banner-wordmark {
-        color: #f0f6fc;
-        text-style: bold;
-    }
-    StartupBanner .banner-pill {
-        width: auto;
-        height: 1;
-        margin-right: 2;
-        padding: 0;
-    }
-    StartupBanner .banner-workspace {
-        color: #8b949e;
+        height: auto;
     }
     StartupBanner.compact {
         height: 3;
-    }
-    StartupBanner.compact .banner-main {
-        display: none;
-    }
-    StartupBanner.compact .banner-compact {
-        display: block;
     }
     """
 
@@ -232,57 +201,49 @@ class StartupBanner(Vertical):
             return
         self._compact = compact
         self.set_class(compact, "compact")
+        if self.is_mounted:
+            self._refresh_content()
 
     def update_hitl(self, hitl: str) -> None:
         """Refresh the HITL summary without changing the banner's position."""
         self._hitl = hitl
-        self.query_one("#banner-hitl", Static).update(Text(hitl, style="#60d8ff"))
-        self.query_one(".banner-compact", Static).update(self._compact_text())
+        self._refresh_content()
 
     def update_model(self, model: str, provider: str) -> None:
         """Refresh the active endpoint without replacing the banner."""
         self._model = model
         self._provider = provider
-        self.query_one("#banner-model", Static).update(Text(model, style="#f0f6fc"))
-        self.query_one("#banner-provider", Static).update(Text(provider, style="#60d8ff"))
-        self.query_one(".banner-compact", Static).update(self._compact_text())
+        self._refresh_content()
+
+    def _refresh_content(self) -> None:
+        self.query_one(".banner-content", Static).update(self._banner_renderable())
+
+    def _banner_renderable(self) -> Text:
+        text = Text()
+        text.append("PAICLI", style=f"bold {PI_DARK.accent}")
+        text.append(f"  v{self._version}", style=PI_DARK.muted)
+        text.append(" — Ready to build", style=PI_DARK.text)
+        text.append("\n")
+        text.append(self._model, style=PI_DARK.text)
+        text.append(f" · {self._provider} · {self._hitl}", style=PI_DARK.accent)
+        text.append("\n")
+        text.append(
+            f"Tools: {self._tools} · Skills: {self._skills} · MCP: {self._mcp_servers}",
+            style=PI_DARK.muted,
+        )
+        if self._compact:
+            text.append(f" · {self._cwd}", style=PI_DARK.muted)
+        else:
+            text.append(" servers")
+            text.append("\n")
+            text.append(self._cwd, style=PI_DARK.muted)
+            text.append(" · ", style=PI_DARK.muted)
+            text.append("/help", style=PI_DARK.accent)
+            text.append(" commands", style=PI_DARK.muted)
+        return text
 
     def compose(self) -> ComposeResult:
-        yield Static(self._compact_text(), classes="banner-compact")
-        with Vertical(classes="banner-main"):
-            yield Static(
-                Text.assemble(
-                    ("PAICLI", "bold #f0f6fc"),
-                    (f"  v{self._version}", "#8b949e"),
-                    (" — Ready to build", "#f0f6fc"),
-                ),
-                classes="banner-wordmark",
-            )
-            with Horizontal(classes="banner-pills"):
-                yield Static(
-                    Text(self._model, style="#f0f6fc"), id="banner-model", classes="banner-pill"
-                )
-                yield Static(
-                    Text(self._provider, style="#60d8ff"),
-                    id="banner-provider",
-                    classes="banner-pill",
-                )
-                yield Static(
-                    Text(self._hitl, style="#60d8ff"), id="banner-hitl", classes="banner-pill"
-                )
-            with Horizontal(classes="banner-capabilities"):
-                yield Static(Text(f"Tools: {self._tools}"), classes="banner-pill")
-                yield Static(Text(f"Skills: {self._skills}"), classes="banner-pill")
-                yield Static(Text(f"MCP: {self._mcp_servers} servers"), classes="banner-pill")
-            yield Static(
-                Text.assemble(
-                    (self._cwd, "#8b949e"),
-                    (" · ", "#8b949e"),
-                    ("/help", "#a8ff60"),
-                    (" commands", "#8b949e"),
-                ),
-                classes="banner-workspace",
-            )
+        yield Static(self._banner_renderable(), classes="banner-content")
 
 
 # ---------------------------------------------------------------------------
@@ -336,11 +297,8 @@ class ThinkingBlock(Static):
     ThinkingBlock {
         width: 100%;
         height: auto;
-        color: #c084fc;
-        background: #0d1117;
     }
     ThinkingBlock .thinking-output {
-        color: #8b949e;
         padding: 0;
     }
     ThinkingBlock Collapsible {
@@ -460,11 +418,9 @@ class ToolCard(Static):
         height: auto;
         margin: 0;
         padding: 0;
-        background: #0d1117;
         border: none;
     }
     ToolCard .tool-output {
-        color: #c9d1d9;
         padding: 0;
     }
     ToolCard Collapsible {
@@ -486,15 +442,8 @@ class ToolCard(Static):
         height: auto;
         padding: 0 0 0 2;
     }
-    ToolCard.tool-running {
-        color: #60d8ff;
-    }
-    ToolCard.tool-success {
-        color: #a8ff60;
-    }
     ToolCard.tool-error {
-        color: #ff4d5a;
-        border-left: solid #ff4d5a;
+        border-left: none;
     }
     """
 
@@ -686,8 +635,6 @@ class ChatLog(VerticalScroll):
         width: 100%;
         height: 1fr;
         overflow-y: scroll;
-        background: #0d1117;
-        color: #60d8ff;
         padding: 0 1;
     }
     ChatLog .new-activity-indicator {
@@ -696,16 +643,10 @@ class ChatLog(VerticalScroll):
         width: auto;
         height: 1;
         padding: 0 1;
-        background: #16130b;
-        color: #facc15;
         text-style: bold;
     }
     ChatLog.new-activity .new-activity-indicator {
         display: block;
-    }
-    ChatLog .new-activity-indicator:focus {
-        background: #1b2430;
-        color: #60d8ff;
     }
     """
 
@@ -938,8 +879,6 @@ class StatusBar(Static):
     DEFAULT_CSS = """
     StatusBar {
         height: 2;
-        background: #0d1117;
-        color: #a8ff60;
         padding: 0 1;
     }
     """
@@ -959,44 +898,45 @@ class StatusBar(Static):
     session_text: reactive[str] = reactive("")
 
     def render(self) -> Text:
-        workspace = Text(self.workspace_text, style="dim")
+        width = self.size.width or 120
+        workspace = Text(self.workspace_text, style=PI_DARK.dim)
         if self.git_branch:
-            workspace.append(f" ({self.git_branch})", style="#8b949e")
+            workspace.append(f" ({self.git_branch})", style=PI_DARK.muted)
         if self.session_title:
             workspace.append(" · ", style="dim")
-            workspace.append(self.session_title, style="bold #f0f6fc")
+            workspace.append(self.session_title, style=f"bold {PI_DARK.text}")
 
         phase_icon = status_glyph(self.phase)
         phase_color = {
-            "idle": "#8b949e",
-            "running": "#60d8ff",
-            "plan": "#c084fc",
-        }.get(self.phase, "#8b949e")
+            "idle": PI_DARK.muted,
+            "running": PI_DARK.accent,
+            "plan": PI_DARK.planning,
+        }.get(self.phase, PI_DARK.muted)
         runtime = Text(f"{phase_icon} {self.phase}", style=f"bold {phase_color}")
         if self.elapsed_text:
             runtime.append(" · ", style="dim")
             runtime.append(self.elapsed_text, style="dim")
 
-        usage = Text(self.session_text, style="#a8ff60")
+        usage = Text(_responsive_usage_text(self.session_text, width), style=PI_DARK.muted)
         live = Text()
         model = self.model or ""
         context_color = {
-            "normal": "#a8ff60",
-            "yellow": "#facc15",
-            "orange": "#fb923c",
-            "red": "#ef4444",
-            "neutral": "#94a3b8",
-        }.get(self.context_level, "#94a3b8")
+            "normal": PI_DARK.success,
+            "yellow": PI_DARK.warning,
+            "orange": PI_DARK.warning_high,
+            "red": PI_DARK.error,
+            "neutral": PI_DARK.muted,
+        }.get(self.context_level, PI_DARK.muted)
         if self.context_text:
-            live.append(_compact_context_text(self.context_text), style=context_color)
-        if self.pressure_text:
+            live.append(_responsive_context_text(self.context_text, width), style=context_color)
+        if self.pressure_text and width > 60:
             if live:
                 live.append(" · ", style="dim")
             live.append(_compact_pressure_text(self.pressure_text), style="dim")
         if model:
             if live:
                 live.append("   ")
-            live.append(model, style="bold #f0f6fc")
+            live.append(model, style=f"bold {PI_DARK.text}")
 
         first = self._aligned_line(workspace, runtime)
         second = self._aligned_line(usage, live)
@@ -1033,10 +973,48 @@ def _compact_context_text(value: str) -> str:
     return value.replace(" (", " ").replace(")", "")
 
 
+def _responsive_context_text(value: str, width: int) -> str:
+    compact = _compact_context_text(value)
+    if width > 60:
+        return compact
+    percentages = re.findall(r"~?\d+(?:\.\d+)?%", compact)
+    return f"ctx {percentages[-1]}" if percentages else compact
+
+
 def _compact_pressure_text(value: str) -> str:
     if value.startswith("pressure "):
         return f"p{value.removeprefix('pressure ')}"
     return value
+
+
+def _responsive_usage_text(value: str, width: int) -> str:
+    """Drop secondary usage fields before truncating narrow footer rows."""
+    if not value or width <= 0 or width > 90:
+        return value
+    parts = value.split()
+    if width <= 60:
+        prefixes = ("in", "↑")
+        primary = ""
+        for index, part in enumerate(parts):
+            if part.startswith(prefixes):
+                if part in prefixes and index + 1 < len(parts):
+                    primary = f"{part} {parts[index + 1]}"
+                else:
+                    primary = part
+                break
+        primary = primary or (parts[0] if parts else "")
+        cost = next(
+            (
+                part
+                for part in reversed(parts)
+                if any(symbol in part for symbol in ("¥", "$", "CNY", "USD", "EUR"))
+            ),
+            "",
+        )
+        return " ".join(part for part in (primary, cost) if part)
+    return " ".join(
+        part for part in parts if not part.startswith(("W", "CH", "cache-write", "cache-hit"))
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1050,19 +1028,19 @@ class InputBar(Horizontal):
     DEFAULT_CSS = """
     InputBar {
         height: 2;
-        background: #0d1117;
+        background: #18181e;
         padding: 0 1;
     }
     InputBar TextArea {
         width: 1fr;
         height: 2;
-        background: #0d1117;
-        color: #f0f6fc;
+        background: #18181e;
+        color: #d4d4d4;
         border: none;
-        border-top: solid #30363d;
+        border-top: solid #505050;
     }
     InputBar TextArea:focus {
-        border-top: solid #60d8ff;
+        border-top: solid #8abeb7;
     }
     """
 

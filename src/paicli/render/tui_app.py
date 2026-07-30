@@ -39,6 +39,7 @@ from paicli.render.tui_dialogs import (
     SessionResumePicker,
 )
 from paicli.render.tui_events import UiEvent
+from paicli.render.tui_theme import PI_DARK
 from paicli.usage import TokenUsage, UsageCost, UsagePurpose, UsageRecord, UsageSource
 
 
@@ -73,12 +74,7 @@ class PaiCliApp(App):
 
     TITLE = "PaiCLI"
     AUTO_FOCUS = "#input-bar TextArea"
-    CSS = """
-    Screen {
-        layout: vertical;
-        background: #0d1117;
-    }
-    """
+    CSS_PATH = Path(__file__).with_name("paicli.tcss")
 
     BINDINGS = [
         Binding("ctrl+c", "interrupt", "Interrupt", show=True),
@@ -784,7 +780,8 @@ class PaiCliApp(App):
             self._phase = "plan"
             chat_log = self.query_one("#chat-log", ChatLog)
             chat_log.add_info(
-                f"[bold #c084fc]{status_glyph('plan')} 使用 Plan-and-Execute 模式[/bold #c084fc]"
+                f"[bold {PI_DARK.planning}]{status_glyph('plan')} 使用 Plan-and-Execute 模式"
+                f"[/bold {PI_DARK.planning}]"
             )
             chat_log.add_info(f"  \u6b63\u5728\u89c4\u5212\u4efb\u52a1: {payload.get('goal')}")
         elif event_type == "plan_thinking":
@@ -879,7 +876,8 @@ class PaiCliApp(App):
             self._task_thinking_buffers[task_id] = []
             chat_log = self.query_one("#chat-log", ChatLog)
             chat_log.add_info(
-                f"{status_glyph('running')} [bold #60d8ff]执行任务:[/bold #60d8ff] "
+                f"{status_glyph('running')} [bold {PI_DARK.accent}]执行任务:"
+                f"[/bold {PI_DARK.accent}] "
                 f"{task_id} [dim][{task_type}][/dim]"
             )
         elif event_type == "task_completed":
