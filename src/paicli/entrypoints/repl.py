@@ -75,6 +75,7 @@ HELP_LINES = [
     "会话与后台任务：",
     "/session list - 查看当前工作区的会话",
     "/session show [session-id] - 查看会话详情与 catalog 摘要",
+    "/session stats - 查看当前会话的持久化用量与活动统计",
     "/session rename <title> - 重命名当前会话",
     "/session new [title] - 创建并切换到新会话",
     "/session resume <session-id> - 恢复指定会话",
@@ -84,10 +85,7 @@ HELP_LINES = [
     "/session archive - 归档当前会话",
     "/session delete - 将当前会话移入回收站",
     "/session restore <session-id> - 从回收站恢复会话",
-    (
-        "持久化：会话、Runtime thread 和后台任务统一保存在 "
-        "~/.paicli/sessions/sessions.db"
-    ),
+    ("持久化：会话、Runtime thread 和后台任务统一保存在 ~/.paicli/sessions/sessions.db"),
     "后台任务是提交会话的 child Session",
     "后台任务的对话历史、工具调用状态和待审批状态会持久化",
     "中断的运行中任务不会自动重试，可使用 /task retry",

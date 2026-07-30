@@ -128,12 +128,12 @@ class OpenAICompatibleClient:
         cooldown_key = (self.provider_name, self.model, self.base_url)
         logical_call_id = f"llm_{uuid4().hex}"
         context_scope = current_context_scope()
-        estimated_input = 0
+        estimated_input = prepared.estimated_input_tokens
         streamed_output = ""
         last_context_update = time.monotonic()
         provider_usage_received = False
+        provider_usage_event: dict[str, Any] | None = None
         if context_scope:
-            estimated_input = prepared.estimated_input_tokens
             yield self._context_usage_payload(
                 state="active",
                 scope=context_scope,
@@ -201,9 +201,19 @@ class OpenAICompatibleClient:
                             fragment = _context_output_fragment(parsed)
                             if fragment:
                                 streamed_output += fragment
-                            yield parsed
-                            if parsed.get("type") == "usage" and context_scope:
+                            if parsed.get("type") == "usage":
                                 provider_usage_received = True
+                                parsed = {
+                                    **parsed,
+                                    "request_id": logical_call_id,
+                                    "provider": self.provider_name,
+                                    "model": self.model,
+                                    "usage_source": "actual",
+                                }
+                                provider_usage_event = parsed
+                            else:
+                                yield parsed
+                            if parsed.get("type") == "usage" and context_scope:
                                 usage = dict(parsed.get("usage") or {})
                                 actual_input = int(usage.get("input_tokens") or 0)
                                 actual_output = int(usage.get("output_tokens") or 0)
@@ -228,9 +238,7 @@ class OpenAICompatibleClient:
                                 and fragment
                                 and time.monotonic() - last_context_update >= 0.25
                             ):
-                                estimated_output = self.context_estimator.estimate(
-                                    streamed_output
-                                )
+                                estimated_output = self.context_estimator.estimate(streamed_output)
                                 yield self._context_usage_payload(
                                     state="active",
                                     scope=context_scope,
@@ -241,6 +249,23 @@ class OpenAICompatibleClient:
                                     prepared=prepared,
                                 )
                                 last_context_update = time.monotonic()
+                if provider_usage_event is not None:
+                    yield provider_usage_event
+                else:
+                    estimated_output = self.context_estimator.estimate(streamed_output)
+                    yield {
+                        "type": "usage",
+                        "usage_id": logical_call_id,
+                        "request_id": logical_call_id,
+                        "provider": self.provider_name,
+                        "model": self.model,
+                        "usage_source": "estimated",
+                        "usage": {
+                            "input_tokens": estimated_input,
+                            "output_tokens": estimated_output,
+                            "total_tokens": estimated_input + estimated_output,
+                        },
+                    }
                 if context_scope:
                     yield {
                         "type": "context_request_finished",
@@ -396,9 +421,7 @@ class OpenAICompatibleClient:
             event["request_id"] = request_id
         return event
 
-    def _format_messages(
-        self, messages: list[Message], system_prompt: str
-    ) -> list[dict[str, Any]]:
+    def _format_messages(self, messages: list[Message], system_prompt: str) -> list[dict[str, Any]]:
         formatted: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         for message in messages:
             if message.role == "tool":

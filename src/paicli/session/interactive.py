@@ -9,7 +9,9 @@ from uuid import uuid4
 from paicli.session.errors import SessionLeaseConflictError
 from paicli.session.models import SessionLease, SessionMessage, SessionRecord, ToolActionSpec
 from paicli.session.repository import SessionRepository
+from paicli.session.stats import SessionStats, calculate_session_stats
 from paicli.types import Message, Role
+from paicli.usage import UsageRecord
 
 
 def default_session_database_path() -> Path:
@@ -31,6 +33,7 @@ class InteractiveSession:
         self._owner_id = f"interactive_{uuid4().hex}"
         self.record, self._lease = self._open_session(session_id)
         self._active_turn_id = self._find_active_turn_id()
+        self._stats_snapshot = self.refresh_stats()
 
     @property
     def id(self) -> str:
@@ -43,6 +46,19 @@ class InteractiveSession:
     @property
     def session_history(self) -> tuple[SessionMessage, ...]:
         return self.repository.rebuild_session_view(self.id).session_history
+
+    @property
+    def stats(self) -> SessionStats:
+        return self.refresh_stats()
+
+    @property
+    def stats_snapshot(self) -> SessionStats:
+        return self._stats_snapshot
+
+    def refresh_stats(self) -> SessionStats:
+        stats = calculate_session_stats(self.repository.list_events(self.id))
+        self._stats_snapshot = stats
+        return stats
 
     @property
     def agent_history(self) -> list[Message]:
@@ -236,6 +252,16 @@ class InteractiveSession:
             lease_token=self._lease.token,
         )
 
+    def record_usage(self, record: UsageRecord) -> None:
+        turn_id = self._require_active_turn()
+        self.repository.record_usage(
+            self.id,
+            record,
+            turn_id=turn_id,
+            lease_token=self._lease.token,
+        )
+        self.refresh_stats()
+
     def request_tool_approval(self, request: dict[str, Any]) -> str:
         requested_call_id = str(request.get("tool_call_id") or "")
         tool_name = str(request.get("tool_name") or "")
@@ -300,6 +326,7 @@ class InteractiveSession:
             lease_token=self._lease.token,
         )
         self._active_turn_id = None
+        self.refresh_stats()
 
     def interrupt_turn(self, assistant_text: str, *, reason: str) -> None:
         if self._active_turn_id is None:
@@ -313,6 +340,7 @@ class InteractiveSession:
             lease_token=self._lease.token,
         )
         self._active_turn_id = None
+        self.refresh_stats()
 
     def reset_context(self) -> None:
         if self._active_turn_id is not None:
@@ -354,9 +382,7 @@ class InteractiveSession:
         return tuple(
             record
             for record in self.list_sessions()
-            if record.id != self.id
-            and record.deleted_at is None
-            and record.status != "corrupt"
+            if record.id != self.id and record.deleted_at is None and record.status != "corrupt"
         )
 
     def new_session(self, *, title: str | None = None) -> SessionRecord:
@@ -584,6 +610,7 @@ class InteractiveSession:
         self.record = record
         self._lease = acquired_lease
         self._active_turn_id = self._find_active_turn_id()
+        self.refresh_stats()
         self.repository.release_session_lease(previous_id, previous_token)
 
     def _find_active_turn_id(self) -> str | None:
@@ -658,9 +685,7 @@ def _agent_message_from_payload(payload: dict[str, Any]) -> Message:
         tool_call_id=(
             str(payload["tool_call_id"]) if payload.get("tool_call_id") is not None else None
         ),
-        tool_calls=[
-            dict(item) for item in payload.get("tool_calls", []) if isinstance(item, dict)
-        ],
+        tool_calls=[dict(item) for item in payload.get("tool_calls", []) if isinstance(item, dict)],
         reasoning_content=(
             str(payload["reasoning_content"])
             if payload.get("reasoning_content") is not None

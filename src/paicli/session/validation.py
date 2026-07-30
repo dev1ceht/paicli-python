@@ -6,6 +6,11 @@ from typing import Any
 def validate_event_payload(event_type: str, payload: dict[str, Any]) -> None:
     """Validate event-specific invariants at write and replay boundaries."""
 
+    if event_type == "usage.recorded":
+        from paicli.usage import UsageRecord
+
+        UsageRecord.from_payload(payload)
+        return
     if event_type == "message.hidden":
         _require_non_empty_string(payload, "message_id")
         return

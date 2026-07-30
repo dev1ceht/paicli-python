@@ -22,9 +22,11 @@ from paicli.session.models import (
 )
 from paicli.session.repository import SessionRepository
 from paicli.session.share import SessionShareService
+from paicli.session.stats import CostTotal, SessionStats, calculate_session_stats
 
 __all__ = [
     "BlobReference",
+    "CostTotal",
     "MessagePart",
     "PendingAction",
     "InteractiveSession",
@@ -39,8 +41,10 @@ __all__ = [
     "SessionRelationship",
     "SessionRepository",
     "SessionShareService",
+    "SessionStats",
     "SessionView",
     "StoredBlob",
     "ToolActionSpec",
+    "calculate_session_stats",
     "default_session_database_path",
 ]

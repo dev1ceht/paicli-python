@@ -937,7 +937,7 @@ class StatusBar(Static):
 
     DEFAULT_CSS = """
     StatusBar {
-        height: 1;
+        height: 2;
         background: #0d1117;
         color: #a8ff60;
         padding: 0 1;
@@ -955,6 +955,7 @@ class StatusBar(Static):
     token_detail: reactive[str] = reactive("")
     cost_text: reactive[str] = reactive("")
     elapsed_text: reactive[str] = reactive("")
+    session_text: reactive[str] = reactive("")
 
     def render(self) -> str:
         parts: list[str] = []
@@ -989,7 +990,10 @@ class StatusBar(Static):
         # Elapsed
         if self.elapsed_text:
             parts.append(f"  [dim]{self.elapsed_text}[/dim]")
-        return " ".join(parts)
+        operational = " ".join(parts)
+        if not self.session_text:
+            return operational
+        return f"{operational}\n{self.session_text}"
 
 
 # ---------------------------------------------------------------------------

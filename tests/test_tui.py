@@ -241,7 +241,7 @@ def test_command_dock_has_no_persistent_shortcut_footer():
             await pilot.pause()
 
             assert len(app.query(Footer)) == 0
-            assert app.query_one(StatusBar).styles.height.value == 1
+            assert app.query_one(StatusBar).styles.height.value == 2
             children = list(app.screen.children)
             assert children.index(app.query_one(InputBar)) < children.index(
                 app.query_one(StatusBar)
@@ -1147,9 +1147,11 @@ def test_status_bar_render_uses_exact_phase_and_cost_colors():
     status_bar.model = "test-model"
     status_bar.context_text = "ctx 12%"
     status_bar.cost_text = "$0.1234"
+    status_bar.session_text = "session ↑80 ↓20 R40 W5 CH32% ≈¥0.1250"
 
     rendered = status_bar.render()
 
+    assert "\nsession ↑80 ↓20 R40 W5 CH32% ≈¥0.1250" in rendered
     assert "[bold #60d8ff]● running[/bold #60d8ff]" in rendered
     assert "[bold #facc15]$0.1234[/bold #facc15]" in rendered
 
@@ -1334,8 +1336,9 @@ def test_app_reviews_plan_inline_without_changing_screen():
 
 
 def test_app_requests_approval_inline_without_changing_screen():
-    from paicli.render.tui_dialogs import ApprovalScreen, InlineApprovalRequest
     from textual.widgets import Button
+
+    from paicli.render.tui_dialogs import ApprovalScreen, InlineApprovalRequest
 
     async def run() -> None:
         app = PaiCliApp(cwd=".")
@@ -1778,8 +1781,7 @@ def test_blocked_tool_persistence_does_not_delay_assistant_output():
 
                 assert app._text_buffer == []
                 assert any(
-                    block.role == "assistant"
-                    and block.plain_text == "visible before database"
+                    block.role == "assistant" and block.plain_text == "visible before database"
                     for block in app.query(MessageBlock)
                 )
                 assert app._agent_running is True
