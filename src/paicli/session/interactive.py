@@ -356,6 +356,24 @@ class InteractiveSession:
             lease_token=self._lease.token,
         )
 
+    def save_context_summary_usage(
+        self,
+        *,
+        provider: str,
+        model: str,
+        records: list[dict[str, Any]],
+    ) -> None:
+        if self._active_turn_id is not None:
+            raise RuntimeError("cannot record manual compaction during an active turn")
+        self.repository.save_context_summary_usage(
+            self.id,
+            provider=provider,
+            model=model,
+            records=records,
+            lease_token=self._lease.token,
+        )
+        self.refresh_stats()
+
     def list_sessions(self) -> tuple[SessionRecord, ...]:
         return tuple(
             record

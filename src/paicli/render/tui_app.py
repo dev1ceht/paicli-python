@@ -1457,20 +1457,44 @@ class PaiCliApp(App):
         if self.agent is None:
             chat_log.add_info("[red]Agent not initialized[/red]")
             return
-        try:
-            result = await self.agent.compact_history()
-            if not result.compacted:
-                chat_log.add_info("[yellow]没有可压缩的较早历史。[/yellow]")
-                return
+        save_checkpoint = getattr(
+            self._interactive_session,
+            "save_context_checkpoint",
+            None,
+        )
+        save_usage = getattr(
+            self._interactive_session,
+            "save_context_summary_usage",
+            None,
+        )
+        if not callable(save_checkpoint) or not callable(save_usage):
+            chat_log.add_info("[red]上下文压缩失败：当前 Session 不可持久化。[/red]")
+            return
 
-            checkpoint = self.agent.export_session_context()
-            save_checkpoint = getattr(
-                self._interactive_session,
-                "save_context_checkpoint",
-                None,
+        async def persist_checkpoint(checkpoint: dict[str, Any]) -> None:
+            await self._run_session_call(save_checkpoint, checkpoint)
+
+        async def persist_usage(records: list[dict[str, Any]]) -> None:
+            await self._run_session_call(
+                save_usage,
+                provider=self.agent.llm_client.provider_name,
+                model=self.agent.llm_client.model_name,
+                records=records,
             )
-            if checkpoint is not None and callable(save_checkpoint):
-                await self._run_session_call(save_checkpoint, checkpoint)
+
+        try:
+            result = await self.agent.compact_history(
+                checkpoint_callback=persist_checkpoint,
+                usage_callback=persist_usage,
+            )
+            if not result.compacted:
+                message = (
+                    "没有可压缩的较早历史。"
+                    if result.compaction_reason == "insufficient_history"
+                    else "摘要未能减少上下文，已保留原历史。"
+                )
+                chat_log.add_info(f"[yellow]{message}[/yellow]")
+                return
 
             before = float(result.pressure_before.pressure_ratio) * 100
             after = float(result.pressure_after.pressure_ratio) * 100

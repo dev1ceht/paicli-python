@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from paicli.context.token_estimator import estimate_tokens
 from paicli.llm.base import LlmClient
@@ -32,6 +33,7 @@ class CompactionResult:
     protected_items: int
     used_llm: bool
     llm_usage: dict[str, int] = field(default_factory=dict)
+    llm_usage_records: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def summary_tokens(self) -> int:
@@ -180,30 +182,32 @@ async def compact_with_llm(
 
     input_text = _build_llm_input(delta_items, prior_summary)
 
-    # 构建 prompt
-    system_prompt = _build_compaction_prompt()
-
-    # 调用 LLM
-    messages = [Message(role="user", content=input_text)]
-
-    llm_usage = {"input_tokens": 0, "output_tokens": 0}
-    response_text = ""
-
-    async for event in llm_client.chat(messages, [], system_prompt=system_prompt):
-        if event.get("type") == "text_delta":
-            response_text += event.get("text", "")
-        elif event.get("type") == "usage":
-            usage = event.get("usage", {})
-            llm_usage["input_tokens"] = usage.get("input_tokens", 0)
-            llm_usage["output_tokens"] = usage.get("output_tokens", 0)
-
-    # 解析响应
-    summary = _parse_llm_summary(response_text)
+    usage_record = _new_usage_record(input_text)
+    try:
+        summary, _usage = await _summarize_llm(
+            input_text,
+            llm_client,
+            usage_record=usage_record,
+        )
+    except Exception:
+        llm_usage = _aggregate_usage([usage_record])
+        return deterministic_compact(
+            delta_items,
+            prior_summary,
+            llm_usage=llm_usage,
+            llm_usage_records=[usage_record],
+        )
+    llm_usage = _aggregate_usage([usage_record])
 
     # 验证摘要
     if not _validate_llm_summary(summary):
         # 摘要无效，回退到确定性摘要
-        return deterministic_compact(delta_items, prior_summary, llm_usage=llm_usage)
+        return deterministic_compact(
+            delta_items,
+            prior_summary,
+            llm_usage=llm_usage,
+            llm_usage_records=[usage_record],
+        )
 
     return CompactionResult(
         summary=summary,
@@ -211,6 +215,7 @@ async def compact_with_llm(
         protected_items=0,  # 由调用方设置
         used_llm=True,
         llm_usage=llm_usage,
+        llm_usage_records=[usage_record],
     )
 
 
@@ -219,15 +224,27 @@ async def _compact_map_reduce(
 ) -> CompactionResult:
     chunks = _chunk_delta_items(delta_items)
     usage = {"input_tokens": 0, "output_tokens": 0}
+    usage_records: list[dict[str, Any]] = []
     try:
         summaries = []
         for chunk in chunks:
-            summary, item_usage = await _summarize_llm(_build_llm_input(chunk, ""), llm_client)
+            chunk_input = _build_llm_input(chunk, "")
+            usage_record = _new_usage_record(chunk_input)
+            usage_records.append(usage_record)
+            summary, _item_usage = await _summarize_llm(
+                chunk_input,
+                llm_client,
+                usage_record=usage_record,
+            )
+            usage = _aggregate_usage(usage_records)
             if not _validate_llm_summary(summary):
-                return deterministic_compact(delta_items, prior_summary, llm_usage=usage)
+                return deterministic_compact(
+                    delta_items,
+                    prior_summary,
+                    llm_usage=usage,
+                    llm_usage_records=usage_records,
+                )
             summaries.append(summary)
-            for key in usage:
-                usage[key] += item_usage[key]
         if len(summaries) == 1 and not prior_summary:
             summary = summaries[0]
         else:
@@ -235,24 +252,46 @@ async def _compact_map_reduce(
                 "Prior Summary (merge into your output):\n"
                 f"{prior_summary}\n\nChunk Summaries to Merge:\n" + "\n\n---\n\n".join(summaries)
             )
-            summary, item_usage = await _summarize_llm(reduction_input, llm_client)
-            for key in usage:
-                usage[key] += item_usage[key]
+            usage_record = _new_usage_record(reduction_input)
+            usage_records.append(usage_record)
+            summary, _item_usage = await _summarize_llm(
+                reduction_input,
+                llm_client,
+                usage_record=usage_record,
+            )
+            usage = _aggregate_usage(usage_records)
         if not _validate_llm_summary(summary):
-            return deterministic_compact(delta_items, prior_summary, llm_usage=usage)
+            return deterministic_compact(
+                delta_items,
+                prior_summary,
+                llm_usage=usage,
+                llm_usage_records=usage_records,
+            )
         return CompactionResult(
             summary=summary,
             compacted_items=len(delta_items),
             protected_items=0,
             used_llm=True,
             llm_usage=usage,
+            llm_usage_records=usage_records,
         )
     except Exception:
-        return deterministic_compact(delta_items, prior_summary)
+        usage = _aggregate_usage(usage_records)
+        return deterministic_compact(
+            delta_items,
+            prior_summary,
+            llm_usage=usage,
+            llm_usage_records=usage_records,
+        )
 
 
-async def _summarize_llm(input_text: str, llm_client: LlmClient) -> tuple[str, dict[str, int]]:
-    usage = {"input_tokens": 0, "output_tokens": 0}
+async def _summarize_llm(
+    input_text: str,
+    llm_client: LlmClient,
+    *,
+    usage_record: dict[str, Any] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    usage = usage_record if usage_record is not None else _new_usage_record(input_text)
     response = ""
     async for event in llm_client.chat(
         [Message(role="user", content=input_text)], [], system_prompt=_build_compaction_prompt()
@@ -261,9 +300,40 @@ async def _summarize_llm(input_text: str, llm_client: LlmClient) -> tuple[str, d
             response += str(event.get("text") or "")
         elif event.get("type") == "usage":
             values = event.get("usage") or {}
-            usage["input_tokens"] += int(values.get("input_tokens") or 0)
-            usage["output_tokens"] += int(values.get("output_tokens") or 0)
+            usage["input_tokens"] = int(values.get("input_tokens") or 0)
+            usage["output_tokens"] = int(values.get("output_tokens") or 0)
+            usage["cache_read_tokens"] = int(
+                values.get("cache_read_tokens") or values.get("cached_tokens") or 0
+            )
+            usage["cache_write_tokens"] = int(values.get("cache_write_tokens") or 0)
+            source = str(
+                event.get("usage_source")
+                or values.get("usage_source")
+                or "actual"
+            )
+            usage["usage_source"] = (
+                source if source in {"actual", "estimated"} else "actual"
+            )
     return _parse_llm_summary(response), usage
+
+
+def _new_usage_record(input_text: str) -> dict[str, Any]:
+    return {
+        "input_tokens": estimate_tokens(
+            f"{_build_compaction_prompt()}\n\n{input_text}"
+        ),
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "usage_source": "estimated",
+    }
+
+
+def _aggregate_usage(records: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        key: sum(int(record.get(key) or 0) for record in records)
+        for key in ("input_tokens", "output_tokens")
+    }
 
 
 def _chunk_delta_items(delta_items: list[DeltaItem]) -> list[list[DeltaItem]]:
@@ -285,6 +355,7 @@ def deterministic_compact(
     prior_summary: str = "",
     *,
     llm_usage: dict[str, int] | None = None,
+    llm_usage_records: list[dict[str, Any]] | None = None,
 ) -> CompactionResult:
     """确定性摘要（不调用 LLM）
 
@@ -350,6 +421,7 @@ def deterministic_compact(
         protected_items=0,  # 由调用方设置
         used_llm=False,
         llm_usage=llm_usage or {},
+        llm_usage_records=list(llm_usage_records or []),
     )
 
 

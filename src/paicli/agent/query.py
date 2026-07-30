@@ -227,23 +227,38 @@ async def query(
                     "actions": list(context_result.reductions),
                 }
             if context_result.auxiliary_usage:
-                auxiliary_input = int(context_result.auxiliary_usage.get("input_tokens") or 0)
-                auxiliary_output = int(context_result.auxiliary_usage.get("output_tokens") or 0)
-                usage_input += auxiliary_input
-                usage_output += auxiliary_output
-                yield {
-                    "type": "usage",
-                    "usage_id": f"{query_run_id}:context-summary:{turn}",
-                    "provider": llm_client.provider_name,
-                    "model": llm_client.model_name,
-                    "usage_source": "actual",
-                    "usage": {
-                        "input_tokens": auxiliary_input,
-                        "output_tokens": auxiliary_output,
-                        "total_tokens": auxiliary_input + auxiliary_output,
-                    },
-                    "purpose": "context_summary",
-                }
+                usage_records = context_result.auxiliary_usage_records or [
+                    context_result.auxiliary_usage
+                ]
+                for usage_index, usage_record in enumerate(usage_records, start=1):
+                    auxiliary_input = int(usage_record.get("input_tokens") or 0)
+                    auxiliary_output = int(usage_record.get("output_tokens") or 0)
+                    cache_read = int(usage_record.get("cache_read_tokens") or 0)
+                    cache_write = int(usage_record.get("cache_write_tokens") or 0)
+                    usage_source = str(usage_record.get("usage_source") or "actual")
+                    usage_input += auxiliary_input
+                    usage_output += auxiliary_output
+                    yield {
+                        "type": "usage",
+                        "usage_id": (
+                            f"{query_run_id}:context-summary:{turn}:{usage_index}"
+                        ),
+                        "provider": llm_client.provider_name,
+                        "model": llm_client.model_name,
+                        "usage_source": (
+                            usage_source
+                            if usage_source in {"actual", "estimated"}
+                            else "actual"
+                        ),
+                        "usage": {
+                            "input_tokens": auxiliary_input,
+                            "output_tokens": auxiliary_output,
+                            "cache_read_tokens": cache_read,
+                            "cache_write_tokens": cache_write,
+                            "total_tokens": auxiliary_input + auxiliary_output,
+                        },
+                        "purpose": "context_summary",
+                    }
         else:
             final_system_prompt = system_prompt
 

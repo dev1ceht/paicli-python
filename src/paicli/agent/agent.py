@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from copy import deepcopy
 from typing import Any
@@ -149,21 +149,38 @@ class Agent:
     def clear_history(self) -> None:
         self.replace_history([])
 
-    async def compact_history(self) -> ContextBuildResult:
+    async def compact_history(
+        self,
+        *,
+        checkpoint_callback: Callable[[dict[str, Any]], Awaitable[Any]] | None = None,
+        usage_callback: Callable[[list[dict[str, Any]]], Awaitable[Any]] | None = None,
+    ) -> ContextBuildResult:
         """Manually summarize eligible Session history and retain recent turns."""
         history = list(self.history)
         context_state = self.context_manager.checkpoint_state()
+        checkpoint_marker = self._session_checkpoint_marker
+        session_checkpoint = deepcopy(self._session_checkpoint)
         try:
             result = await self.context_manager.compact_now(
                 prompt_sections=self._build_prompt_sections(),
                 messages=history,
                 tools=self.tool_registry.definitions(),
             )
+            if result.compacted:
+                self.history = list(result.messages)
+                if checkpoint_callback is not None:
+                    checkpoint = self.export_session_context()
+                    if checkpoint is None:
+                        raise RuntimeError("manual compaction did not produce a checkpoint")
+                    await checkpoint_callback(checkpoint)
+            elif result.auxiliary_usage_records and usage_callback is not None:
+                await usage_callback(result.auxiliary_usage_records)
         except Exception:
+            self.history = history
             self.context_manager.restore_state(context_state)
+            self._session_checkpoint_marker = checkpoint_marker
+            self._session_checkpoint = session_checkpoint
             raise
-        if result.compacted:
-            self.history = list(result.messages)
         return result
 
     def replace_history(self, history: list[Message]) -> None:

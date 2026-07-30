@@ -65,8 +65,10 @@ class ContextBuildResult:
     pressure_after: PressureResult | None = None
     reductions: list[str] = field(default_factory=list)
     compacted: bool = False
+    compaction_reason: str | None = None
     pressure_tier: str | None = None
     auxiliary_usage: dict[str, int] = field(default_factory=dict)
+    auxiliary_usage_records: list[dict[str, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -82,6 +84,8 @@ class ContextManager:
     _token_estimator: TokenEstimator = field(default_factory=TokenEstimator)
     _last_pressure: PressureResult | None = None
     _last_compaction: CompactionResult | None = None
+    _last_attempt_usage: dict[str, int] = field(default_factory=dict)
+    _last_attempt_usage_records: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         cleanup_stale_tool_results(
@@ -120,6 +124,8 @@ class ContextManager:
         tools: list[dict[str, Any]] | None = None,
         actual_usage: dict[str, int] | None = None,
     ) -> ContextBuildResult:
+        self._last_attempt_usage = {}
+        self._last_attempt_usage_records = []
         all_messages = list(messages or [])
         del actual_usage
         sections = prompt_sections or PromptSections(
@@ -236,9 +242,10 @@ class ContextManager:
 
         self._last_pressure = pressure
         auxiliary_usage = (
-            dict(self._last_compaction.llm_usage)
-            if compacted and self._last_compaction is not None
-            else {}
+            dict(self._last_attempt_usage)
+        )
+        auxiliary_usage_records = (
+            [dict(record) for record in self._last_attempt_usage_records]
         )
         return ContextBuildResult(
             system_prompt=sections.render(),
@@ -250,6 +257,7 @@ class ContextManager:
             compacted=compacted,
             pressure_tier=pressure.tier.value,
             auxiliary_usage=auxiliary_usage,
+            auxiliary_usage_records=auxiliary_usage_records,
         )
 
     async def compact_now(
@@ -260,6 +268,8 @@ class ContextManager:
         tools: list[dict[str, Any]] | None = None,
     ) -> ContextBuildResult:
         """Summarize eligible history without waiting for context pressure."""
+        self._last_attempt_usage = {}
+        self._last_attempt_usage_records = []
         if not self.config.features.context_compression:
             raise RuntimeError("Context compression is disabled.")
 
@@ -271,12 +281,30 @@ class ContextManager:
             tool_definitions,
             budget,
         )
+        history, _current = _split_current_request(messages)
+        if history and _is_summary_message(history[0]):
+            history = history[1:]
+        compactable, _protected = _partition_history(
+            history,
+            protected_turns=self.config.context.protected_turns,
+        )
+        if not compactable:
+            return ContextBuildResult(
+                system_prompt=prompt_sections.render(),
+                messages=list(messages),
+                prepared=prepared,
+                pressure_before=pressure_before,
+                pressure_after=pressure_before,
+                compaction_reason="insufficient_history",
+                pressure_tier=pressure_before.tier.value,
+            )
         compacted_result = await self._compact_structured_history(
             sections=prompt_sections,
             messages=messages,
             tools=tool_definitions,
             budget=budget,
             current_prepared=prepared,
+            allow_aggressive=False,
         )
         if compacted_result is None:
             return ContextBuildResult(
@@ -285,7 +313,12 @@ class ContextManager:
                 prepared=prepared,
                 pressure_before=pressure_before,
                 pressure_after=pressure_before,
+                compaction_reason="no_reduction",
                 pressure_tier=pressure_before.tier.value,
+                auxiliary_usage=dict(self._last_attempt_usage),
+                auxiliary_usage_records=[
+                    dict(record) for record in self._last_attempt_usage_records
+                ],
             )
 
         output_messages, prepared, pressure_after, actions = compacted_result
@@ -300,9 +333,10 @@ class ContextManager:
             compacted=True,
             pressure_tier=pressure_after.tier.value,
             auxiliary_usage=(
-                dict(self._last_compaction.llm_usage)
-                if self._last_compaction is not None
-                else {}
+                dict(self._last_attempt_usage)
+            ),
+            auxiliary_usage_records=(
+                [dict(record) for record in self._last_attempt_usage_records]
             ),
         )
 
@@ -371,6 +405,7 @@ class ContextManager:
         tools: list[dict[str, Any]],
         budget: Budget,
         current_prepared: PreparedOutboundRequest,
+        allow_aggressive: bool = True,
     ) -> tuple[list[Message], PreparedOutboundRequest, PressureResult, list[str]] | None:
         history, current = _split_current_request(messages)
         prior_summary = self._current_summary
@@ -387,6 +422,10 @@ class ContextManager:
             return None
 
         compaction = await self._create_compaction(delta_items, prior_summary)
+        self._last_attempt_usage = dict(compaction.llm_usage)
+        self._last_attempt_usage_records = [
+            dict(record) for record in compaction.llm_usage_records
+        ]
 
         candidate_messages = _summary_messages(
             compaction.summary,
@@ -408,6 +447,7 @@ class ContextManager:
                 delta_items,
                 prior_summary=prior_summary,
                 llm_usage=compaction.llm_usage,
+                llm_usage_records=compaction.llm_usage_records,
             )
             candidate_messages = _summary_messages(
                 compaction.summary,
@@ -434,7 +474,7 @@ class ContextManager:
             self.llm_client.max_context_window
             - self.config.context.output_reserve_tokens,
         )
-        if (
+        if allow_aggressive and (
             candidate_pressure.pressure_ratio >= self.config.context.tier3_threshold
             or candidate_prepared.estimated_input_tokens > physical_limit
         ):
@@ -546,6 +586,9 @@ class ContextManager:
                 "protected_items": compaction.protected_items,
                 "used_llm": compaction.used_llm,
                 "llm_usage": dict(compaction.llm_usage),
+                "llm_usage_records": [
+                    dict(record) for record in compaction.llm_usage_records
+                ],
             },
         }
 
@@ -556,6 +599,11 @@ class ContextManager:
             return
         compaction_data = dict(state["compaction"])
         pressure_data = dict(state.get("pressure") or {})
+        llm_usage_records = [
+            _restore_usage_record(record)
+            for record in list(compaction_data.get("llm_usage_records") or [])
+            if isinstance(record, dict)
+        ]
         pressure = (
             PressureResult(
                 tier=PressureTier(str(pressure_data["tier"])),
@@ -576,6 +624,7 @@ class ContextManager:
                 str(key): int(value)
                 for key, value in dict(compaction_data.get("llm_usage") or {}).items()
             },
+            llm_usage_records=llm_usage_records,
         )
         self.restore_state((str(state["summary"]), pressure, compaction))
 
@@ -595,6 +644,8 @@ class ContextManager:
         self._current_summary = ""
         self._last_pressure = None
         self._last_compaction = None
+        self._last_attempt_usage = {}
+        self._last_attempt_usage_records = []
         self._token_estimator.reset_calibration()
 
     def close(self) -> None:
@@ -714,6 +765,17 @@ def _is_summary_message(message: Message) -> bool:
 def _append_reduction(reductions: list[str], name: str) -> None:
     if name not in reductions:
         reductions.append(name)
+
+
+def _restore_usage_record(record: dict[str, Any]) -> dict[str, Any]:
+    source = str(record.get("usage_source") or "estimated")
+    return {
+        "input_tokens": int(record.get("input_tokens") or 0),
+        "output_tokens": int(record.get("output_tokens") or 0),
+        "cache_read_tokens": int(record.get("cache_read_tokens") or 0),
+        "cache_write_tokens": int(record.get("cache_write_tokens") or 0),
+        "usage_source": source if source in {"actual", "estimated"} else "estimated",
+    }
 
 
 __all__ = [

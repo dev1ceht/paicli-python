@@ -1406,6 +1406,13 @@ class SessionRepository:
         operation_id = f"compact_{checkpoint_id}"
         compaction = dict(annotated["compaction"])
         llm_usage = dict(compaction.get("llm_usage") or {})
+        raw_usage_records = [
+            dict(record)
+            for record in list(compaction.get("llm_usage_records") or [])
+            if isinstance(record, dict)
+        ]
+        if not raw_usage_records and llm_usage:
+            raw_usage_records = [llm_usage]
         checkpoint_payload, checkpoint_blob_refs = self._prepare_context_checkpoint(
             annotated
         )
@@ -1418,23 +1425,28 @@ class SessionRepository:
             )
             if self._checkpoint_is_current(connection, session_id, checkpoint_id):
                 return False
-            usage_record = None
-            if compaction.get("used_llm"):
-                usage_record = UsageRecord(
-                    usage_id=f"context-summary:{checkpoint_id}",
+            usage_records = tuple(
+                UsageRecord(
+                    usage_id=f"context-summary:{checkpoint_id}:{index}",
                     request_id=None,
                     provider=str(annotated.get("provider") or ""),
                     model=str(annotated.get("model") or ""),
                     purpose="context_summary",
                     tokens=TokenUsage(
-                        input_tokens=int(llm_usage.get("input_tokens") or 0),
-                        output_tokens=int(llm_usage.get("output_tokens") or 0),
-                        cache_read_tokens=int(llm_usage.get("cache_read_tokens") or 0),
-                        cache_write_tokens=int(llm_usage.get("cache_write_tokens") or 0),
+                        input_tokens=int(record.get("input_tokens") or 0),
+                        output_tokens=int(record.get("output_tokens") or 0),
+                        cache_read_tokens=int(record.get("cache_read_tokens") or 0),
+                        cache_write_tokens=int(record.get("cache_write_tokens") or 0),
                     ),
                     cost=None,
-                    usage_source="actual",
+                    usage_source=(
+                        "estimated"
+                        if str(record.get("usage_source") or "") == "estimated"
+                        else "actual"
+                    ),
                 )
+                for index, record in enumerate(raw_usage_records, start=1)
+            )
             self._append_context_checkpoint_in_transaction(
                 connection,
                 session_id=session_id,
@@ -1443,7 +1455,7 @@ class SessionRepository:
                 checkpoint_blob_refs=checkpoint_blob_refs,
                 turn_id=operation_id,
                 idempotency_prefix=checkpoint_id,
-                usage_record=usage_record,
+                usage_records=usage_records,
             )
         return True
 
@@ -1463,6 +1475,56 @@ class SessionRepository:
             idempotency_key=f"{turn_id}:usage:{record.usage_id}",
             lease_token=lease_token,
         )
+
+    def save_context_summary_usage(
+        self,
+        session_id: str,
+        *,
+        provider: str,
+        model: str,
+        records: list[dict[str, Any]],
+        lease_token: str | None = None,
+    ) -> None:
+        """Persist summary requests whose candidate compaction was not retained."""
+        operation_id = f"compact_usage_{uuid4().hex}"
+        usage_records = tuple(
+            UsageRecord(
+                usage_id=f"context-summary:{operation_id}:{index}",
+                request_id=None,
+                provider=provider,
+                model=model,
+                purpose="context_summary",
+                tokens=TokenUsage(
+                    input_tokens=int(record.get("input_tokens") or 0),
+                    output_tokens=int(record.get("output_tokens") or 0),
+                    cache_read_tokens=int(record.get("cache_read_tokens") or 0),
+                    cache_write_tokens=int(record.get("cache_write_tokens") or 0),
+                ),
+                cost=None,
+                usage_source=(
+                    "estimated"
+                    if str(record.get("usage_source") or "") == "estimated"
+                    else "actual"
+                ),
+            )
+            for index, record in enumerate(records, start=1)
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_writable_session(
+                connection,
+                session_id,
+                lease_token=lease_token,
+            )
+            for index, usage_record in enumerate(usage_records, start=1):
+                self._append_event_in_transaction(
+                    connection,
+                    session_id=session_id,
+                    event_type="usage.recorded",
+                    payload=usage_record.to_payload(),
+                    turn_id=operation_id,
+                    idempotency_key=f"{operation_id}:context-summary-usage:{index}",
+                )
 
     @staticmethod
     def _checkpoint_is_current(
@@ -1495,7 +1557,7 @@ class SessionRepository:
         checkpoint_blob_refs: tuple[BlobReference, ...],
         turn_id: str,
         idempotency_prefix: str,
-        usage_record: UsageRecord | None = None,
+        usage_records: tuple[UsageRecord, ...] = (),
     ) -> None:
         checkpoint_id = str(checkpoint["checkpoint_id"])
         self._append_event_in_transaction(
@@ -1513,14 +1575,16 @@ class SessionRepository:
             turn_id=turn_id,
             idempotency_key=f"{idempotency_prefix}:context-compacted",
         )
-        if usage_record is not None:
+        for index, usage_record in enumerate(usage_records, start=1):
             self._append_event_in_transaction(
                 connection,
                 session_id=session_id,
                 event_type="usage.recorded",
                 payload=usage_record.to_payload(),
                 turn_id=turn_id,
-                idempotency_key=f"{idempotency_prefix}:context-summary-usage",
+                idempotency_key=(
+                    f"{idempotency_prefix}:context-summary-usage:{index}"
+                ),
             )
         self._append_event_in_transaction(
             connection,

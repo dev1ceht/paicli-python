@@ -575,6 +575,8 @@ async def _handle_slash(
     agent: Agent,
     registry: ToolRegistry,
     mcp_manager: McpClientManager | None,
+    checkpoint_callback: Callable[[dict[str, Any]], Awaitable[Any]] | None = None,
+    usage_callback: Callable[[list[dict[str, Any]]], Awaitable[Any]] | None = None,
 ) -> bool:
     command, _, rest = raw.partition(" ")
     arg = rest.strip()
@@ -600,9 +602,20 @@ async def _handle_slash(
         table.add_row("tools", str(len(registry.list_names())))
         console.print(table)
     elif command == "/compact":
-        result = await agent.compact_history()
+        if checkpoint_callback is None or usage_callback is None:
+            console.print("[red]当前 Session 不支持持久化上下文压缩。[/red]")
+            return False
+        result = await agent.compact_history(
+            checkpoint_callback=checkpoint_callback,
+            usage_callback=usage_callback,
+        )
         if not result.compacted:
-            console.print("[yellow]没有可压缩的较早历史。[/yellow]")
+            message = (
+                "没有可压缩的较早历史。"
+                if result.compaction_reason == "insufficient_history"
+                else "摘要未能减少上下文，已保留原历史。"
+            )
+            console.print(f"[yellow]{message}[/yellow]")
         else:
             before = float(result.pressure_before.pressure_ratio) * 100
             after = float(result.pressure_after.pressure_ratio) * 100

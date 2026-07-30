@@ -493,8 +493,20 @@ def test_manual_compaction_checkpoint_is_persisted_without_creating_a_turn(tmp_p
                 "summary": "Earlier work was summarized manually.",
                 "compacted_items": 4,
                 "protected_items": 2,
-                "used_llm": True,
+                "used_llm": False,
                 "llm_usage": {"input_tokens": 20, "output_tokens": 5},
+                "llm_usage_records": [
+                    {
+                        "input_tokens": 12,
+                        "output_tokens": 3,
+                        "usage_source": "estimated",
+                    },
+                    {
+                        "input_tokens": 8,
+                        "output_tokens": 2,
+                        "usage_source": "actual",
+                    },
+                ],
             },
             "pressure": {},
             "provider": "fake",
@@ -507,24 +519,57 @@ def test_manual_compaction_checkpoint_is_persisted_without_creating_a_turn(tmp_p
     assert [event.type for event in manual_events] == [
         "context.compacted",
         "usage.recorded",
+        "usage.recorded",
         "context.checkpoint_created",
     ]
     assert not any(event.type.startswith("turn.") for event in manual_events)
-    assert manual_events[0].turn_id == manual_events[1].turn_id
-    usage = manual_events[1].payload
-    assert usage["purpose"] == "context_summary"
-    assert usage["tokens"] == {
-        "input": 20,
-        "output": 5,
-        "cache_read": 0,
-        "cache_write": 0,
-    }
+    assert len({event.turn_id for event in manual_events}) == 1
+    usages = [event.payload for event in manual_events if event.type == "usage.recorded"]
+    assert [usage["purpose"] for usage in usages] == [
+        "context_summary",
+        "context_summary",
+    ]
+    assert [usage["usage_source"] for usage in usages] == ["estimated", "actual"]
+    assert [usage["tokens"] for usage in usages] == [
+        {"input": 12, "output": 3, "cache_read": 0, "cache_write": 0},
+        {"input": 8, "output": 2, "cache_read": 0, "cache_write": 0},
+    ]
     view = repository.rebuild_session_view(session.id)
     assert view.context_checkpoint is not None
     assert view.context_checkpoint["checkpoint_id"] == "ctx_manual"
     assert view.context_checkpoint["messages"][-1]["source_message_id"] == (
         view.model_messages[-1].id
     )
+
+
+def test_rejected_manual_summary_persists_usage_without_compaction_event(tmp_path):
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(tmp_path)
+
+    repository.save_context_summary_usage(
+        session.id,
+        provider="fake",
+        model="summary-model",
+        records=[
+            {
+                "input_tokens": 9,
+                "output_tokens": 2,
+                "cache_read_tokens": 1,
+                "usage_source": "actual",
+            }
+        ],
+    )
+
+    events = repository.list_events(session.id)
+    assert [event.type for event in events[-1:]] == ["usage.recorded"]
+    assert not any(event.type == "context.compacted" for event in events)
+    assert events[-1].payload["purpose"] == "context_summary"
+    assert events[-1].payload["tokens"] == {
+        "input": 9,
+        "output": 2,
+        "cache_read": 1,
+        "cache_write": 0,
+    }
 
 
 def test_unchanged_context_checkpoint_is_not_duplicated(tmp_path):
