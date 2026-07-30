@@ -81,7 +81,7 @@ The compact chronological group of Agent thinking and tool activity, where activ
 _Avoid_: tool-card stack, execution log, debug console
 
 **Command dock**:
-The bottom interaction area combining an adaptive message input with PaiCLI's persistent one-line operational status; it excludes a separate shortcut footer.
+The bottom interaction area combining an adaptive message input with PaiCLI's persistent two-line status: workspace and runtime identity above, durable usage and live context below. It excludes a separate shortcut footer.
 _Avoid_: input bar, command prompt, footer stack
 
 **Inline approval request**:

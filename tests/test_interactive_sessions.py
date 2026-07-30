@@ -1394,6 +1394,9 @@ def test_tui_persists_usage_and_shows_durable_session_stats(tmp_path: Path) -> N
         async with app.run_test(size=(110, 26)):
             session = app._interactive_session
             assert session is not None
+            initial_status = app.query_one(StatusBar)
+            assert "CH—" in initial_status.session_text
+            assert "≈¥0.00" in initial_status.session_text
             app._provider = "qwen"
             app._model = "qwen-plus"
             session.begin_turn("measure this")
@@ -1417,9 +1420,12 @@ def test_tui_persists_usage_and_shows_durable_session_stats(tmp_path: Path) -> N
             app._update_status_bar()
 
             status = app.query_one(StatusBar)
-            assert "session ↑80 ↓20 R40 W5" in status.session_text
-            assert "CH32%" in status.session_text
+            assert status.session_title == session.record.title
+            assert "↑80 ↓20 R40 W5" in status.session_text
+            assert "CH32.0%" in status.session_text
             assert "≈¥" in status.session_text
+            assert "coverage:" not in status.session_text
+            assert status.model == "qwen/qwen-plus"
 
             app._handle_slash_command("/session stats")
             await app.workers.wait_for_complete()

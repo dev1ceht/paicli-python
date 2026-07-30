@@ -933,7 +933,7 @@ class ChatLog(VerticalScroll):
 
 
 class StatusBar(Static):
-    """Bottom status bar showing model info, token usage, cost, and phase."""
+    """Two-line status bar for workspace identity and live Session telemetry."""
 
     DEFAULT_CSS = """
     StatusBar {
@@ -948,29 +948,38 @@ class StatusBar(Static):
         super().__init__(*args, **kwargs)
 
     model: reactive[str] = reactive("")
+    workspace_text: reactive[str] = reactive("")
+    git_branch: reactive[str] = reactive("")
+    session_title: reactive[str] = reactive("")
     phase: reactive[str] = reactive("idle")
     context_text: reactive[str] = reactive("ctx 0%")
     context_level: reactive[str] = reactive("neutral")
     pressure_text: reactive[str] = reactive("pressure:—")
-    token_detail: reactive[str] = reactive("")
-    cost_text: reactive[str] = reactive("")
     elapsed_text: reactive[str] = reactive("")
     session_text: reactive[str] = reactive("")
 
-    def render(self) -> str:
-        parts: list[str] = []
-        # Phase
+    def render(self) -> Text:
+        workspace = Text(self.workspace_text, style="dim")
+        if self.git_branch:
+            workspace.append(f" ({self.git_branch})", style="#8b949e")
+        if self.session_title:
+            workspace.append(" · ", style="dim")
+            workspace.append(self.session_title, style="bold #f0f6fc")
+
         phase_icon = status_glyph(self.phase)
         phase_color = {
             "idle": "#8b949e",
             "running": "#60d8ff",
             "plan": "#c084fc",
         }.get(self.phase, "#8b949e")
-        parts.append(f"[bold {phase_color}]{phase_icon} {self.phase}[/bold {phase_color}]")
-        # Model
-        if self.model:
-            parts.append(f"  [bold]{self.model}[/bold]")
-        # Context
+        runtime = Text(f"{phase_icon} {self.phase}", style=f"bold {phase_color}")
+        if self.elapsed_text:
+            runtime.append(" · ", style="dim")
+            runtime.append(self.elapsed_text, style="dim")
+
+        usage = Text(self.session_text, style="#a8ff60")
+        live = Text()
+        model = self.model or ""
         context_color = {
             "normal": "#a8ff60",
             "yellow": "#facc15",
@@ -978,22 +987,56 @@ class StatusBar(Static):
             "red": "#ef4444",
             "neutral": "#94a3b8",
         }.get(self.context_level, "#94a3b8")
-        parts.append(f"  [{context_color}]{self.context_text}[/{context_color}]")
-        # Compression pressure after context assembly
-        parts.append(f"  [dim]{self.pressure_text}[/dim]")
-        # Token detail
-        if self.token_detail:
-            parts.append(f"  [dim]{self.token_detail}[/dim]")
-        # Cost
-        if self.cost_text:
-            parts.append(f"  [bold #facc15]{self.cost_text}[/bold #facc15]")
-        # Elapsed
-        if self.elapsed_text:
-            parts.append(f"  [dim]{self.elapsed_text}[/dim]")
-        operational = " ".join(parts)
-        if not self.session_text:
-            return operational
-        return f"{operational}\n{self.session_text}"
+        if self.context_text:
+            live.append(_compact_context_text(self.context_text), style=context_color)
+        if self.pressure_text:
+            if live:
+                live.append(" · ", style="dim")
+            live.append(_compact_pressure_text(self.pressure_text), style="dim")
+        if model:
+            if live:
+                live.append("   ")
+            live.append(model, style="bold #f0f6fc")
+
+        first = self._aligned_line(workspace, runtime)
+        second = self._aligned_line(usage, live)
+        first.append("\n")
+        first.append(second)
+        return first
+
+    def _aligned_line(self, left: Text, right: Text) -> Text:
+        left = left.copy()
+        right = right.copy()
+        available = (
+            max(0, self.size.width - 2)
+            if self.size.width > 0
+            else left.cell_len + right.cell_len + 3
+        )
+        minimum_gap = 3
+        if left.cell_len + minimum_gap + right.cell_len > available:
+            if available == 0:
+                return Text()
+            content_width = max(0, available - minimum_gap)
+            right_width = min(right.cell_len, max(0, content_width // 2))
+            left_width = max(0, content_width - right_width)
+            left.truncate(left_width, overflow="ellipsis")
+            right.truncate(right_width, overflow="ellipsis")
+        gap = minimum_gap if left else 0
+        if available:
+            gap = max(gap, available - left.cell_len - right.cell_len)
+        left.append(" " * gap)
+        left.append(right)
+        return left
+
+
+def _compact_context_text(value: str) -> str:
+    return value.replace(" (", " ").replace(")", "")
+
+
+def _compact_pressure_text(value: str) -> str:
+    if value.startswith("pressure "):
+        return f"p{value.removeprefix('pressure ')}"
+    return value
 
 
 # ---------------------------------------------------------------------------
