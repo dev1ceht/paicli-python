@@ -252,6 +252,60 @@ class ContextManager:
             auxiliary_usage=auxiliary_usage,
         )
 
+    async def compact_now(
+        self,
+        *,
+        prompt_sections: PromptSections,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> ContextBuildResult:
+        """Summarize eligible history without waiting for context pressure."""
+        if not self.config.features.context_compression:
+            raise RuntimeError("Context compression is disabled.")
+
+        budget = self._calculate_budget()
+        tool_definitions = list(tools or [])
+        prepared, pressure_before = self._prepare_candidate(
+            prompt_sections,
+            messages,
+            tool_definitions,
+            budget,
+        )
+        compacted_result = await self._compact_structured_history(
+            sections=prompt_sections,
+            messages=messages,
+            tools=tool_definitions,
+            budget=budget,
+            current_prepared=prepared,
+        )
+        if compacted_result is None:
+            return ContextBuildResult(
+                system_prompt=prompt_sections.render(),
+                messages=list(messages),
+                prepared=prepared,
+                pressure_before=pressure_before,
+                pressure_after=pressure_before,
+                pressure_tier=pressure_before.tier.value,
+            )
+
+        output_messages, prepared, pressure_after, actions = compacted_result
+        self._last_pressure = pressure_after
+        return ContextBuildResult(
+            system_prompt=prompt_sections.render(),
+            messages=output_messages,
+            prepared=prepared,
+            pressure_before=pressure_before,
+            pressure_after=pressure_after,
+            reductions=actions,
+            compacted=True,
+            pressure_tier=pressure_after.tier.value,
+            auxiliary_usage=(
+                dict(self._last_compaction.llm_usage)
+                if self._last_compaction is not None
+                else {}
+            ),
+        )
+
     def _calculate_budget(self) -> Budget:
         return calculate_budget(
             context_window=self.llm_client.max_context_window,

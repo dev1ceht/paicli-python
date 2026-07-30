@@ -50,6 +50,7 @@ SLASH_COMMANDS = [
     "/clear",
     "/reset",
     "/context",
+    "/compact",
     "/memory",
     "/save",
     "/config",
@@ -97,6 +98,7 @@ HELP_LINES = [
     "/clear - 清空屏幕显示（保留 Session history 和模型上下文）",
     "/reset - 清空屏幕与后续模型上下文（保留 Session history）",
     "/context - 查看当前上下文状态",
+    "/compact - 立即摘要较早的模型上下文并保留最近回合",
     "/memory - 查看记忆系统状态",
     "/memory list - 查看长期记忆列表",
     "/memory search <关键词> - 搜索当前项目可见长期记忆",
@@ -597,6 +599,19 @@ async def _handle_slash(
         table.add_row("memory", f"{len(memories)} recent entries")
         table.add_row("tools", str(len(registry.list_names())))
         console.print(table)
+    elif command == "/compact":
+        result = await agent.compact_history()
+        if not result.compacted:
+            console.print("[yellow]没有可压缩的较早历史。[/yellow]")
+        else:
+            before = float(result.pressure_before.pressure_ratio) * 100
+            after = float(result.pressure_after.pressure_ratio) * 100
+            status = agent.context_manager.get_status()["last_compaction"]
+            mode = "LLM 摘要" if status["used_llm"] else "确定性摘要"
+            console.print(
+                f"[green]上下文已压缩：{before:.0f}% → {after:.0f}%；"
+                f"{status['compacted_items']} items，{mode}。[/green]"
+            )
     elif command == "/memory":
         await _memory_command(arg, console, cwd, config)
     elif command == "/save":

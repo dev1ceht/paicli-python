@@ -309,6 +309,12 @@ class PaiCliApp(App):
         if command == "/context":
             self._show_context(chat_log)
             return
+        if command == "/compact":
+            self._worker = self.run_worker(
+                self._compact_command_async(chat_log),
+                exclusive=True,
+            )
+            return
         if command == "/tools":
             if self.registry:
                 chat_log.add_info("\n".join(self.registry.list_names()))
@@ -1446,6 +1452,40 @@ class PaiCliApp(App):
         from paicli.entrypoints.repl import help_text
 
         return help_text()
+
+    async def _compact_command_async(self, chat_log: ChatLog) -> None:
+        if self.agent is None:
+            chat_log.add_info("[red]Agent not initialized[/red]")
+            return
+        try:
+            result = await self.agent.compact_history()
+            if not result.compacted:
+                chat_log.add_info("[yellow]没有可压缩的较早历史。[/yellow]")
+                return
+
+            checkpoint = self.agent.export_session_context()
+            save_checkpoint = getattr(
+                self._interactive_session,
+                "save_context_checkpoint",
+                None,
+            )
+            if checkpoint is not None and callable(save_checkpoint):
+                await self._run_session_call(save_checkpoint, checkpoint)
+
+            before = float(result.pressure_before.pressure_ratio) * 100
+            after = float(result.pressure_after.pressure_ratio) * 100
+            chat_log.add_info(
+                f"[green]上下文已压缩：{before:.0f}% → {after:.0f}%[/green]"
+            )
+            build_context_event = getattr(self.agent, "context_usage_event", None)
+            context_event = build_context_event() if callable(build_context_event) else None
+            if context_event:
+                self._context_usage.apply(context_event)
+            self._update_status_bar()
+        except Exception as exc:
+            chat_log.add_info(f"[red]上下文压缩失败：{exc}[/red]")
+        finally:
+            self._worker = None
 
     def _show_context(self, chat_log: ChatLog) -> None:
         if not self.agent:

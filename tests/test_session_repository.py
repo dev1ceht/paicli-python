@@ -444,6 +444,89 @@ def test_completed_turn_persists_latest_context_compaction_checkpoint(
     assert view.context_checkpoint_sequence == events[-1].sequence
 
 
+def test_manual_compaction_checkpoint_is_persisted_without_creating_a_turn(tmp_path):
+    repository = SessionRepository(tmp_path / "sessions.db")
+    session = repository.create_session(tmp_path)
+    repository.begin_turn(session.id, turn_id="turn_1", user_content="question")
+    repository.complete_turn(
+        session.id,
+        turn_id="turn_1",
+        assistant_content="answer",
+    )
+    before = repository.list_events(session.id)
+
+    repository.save_context_checkpoint(
+        session.id,
+        {
+            "checkpoint_id": "ctx_manual",
+            "summary": "Earlier work was summarized manually.",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "[Previous conversation summary]\n"
+                        "Earlier work was summarized manually."
+                    ),
+                    "name": None,
+                    "tool_call_id": None,
+                    "tool_calls": [],
+                    "reasoning_content": None,
+                },
+                {
+                    "role": "user",
+                    "content": "question",
+                    "name": None,
+                    "tool_call_id": None,
+                    "tool_calls": [],
+                    "reasoning_content": None,
+                },
+                {
+                    "role": "assistant",
+                    "content": "answer",
+                    "name": None,
+                    "tool_call_id": None,
+                    "tool_calls": [],
+                    "reasoning_content": None,
+                },
+            ],
+            "compaction": {
+                "summary": "Earlier work was summarized manually.",
+                "compacted_items": 4,
+                "protected_items": 2,
+                "used_llm": True,
+                "llm_usage": {"input_tokens": 20, "output_tokens": 5},
+            },
+            "pressure": {},
+            "provider": "fake",
+            "model": "summary-model",
+        },
+    )
+
+    events = repository.list_events(session.id)
+    manual_events = events[len(before) :]
+    assert [event.type for event in manual_events] == [
+        "context.compacted",
+        "usage.recorded",
+        "context.checkpoint_created",
+    ]
+    assert not any(event.type.startswith("turn.") for event in manual_events)
+    assert manual_events[0].turn_id == manual_events[1].turn_id
+    usage = manual_events[1].payload
+    assert usage["purpose"] == "context_summary"
+    assert usage["tokens"] == {
+        "input": 20,
+        "output": 5,
+        "cache_read": 0,
+        "cache_write": 0,
+    }
+    view = repository.rebuild_session_view(session.id)
+    assert view.context_checkpoint is not None
+    assert view.context_checkpoint["checkpoint_id"] == "ctx_manual"
+    assert view.context_checkpoint["messages"][-1]["source_message_id"] == (
+        view.model_messages[-1].id
+    )
+
+
 def test_unchanged_context_checkpoint_is_not_duplicated(tmp_path):
     repository = SessionRepository(tmp_path / "sessions.db")
     session = repository.create_session(tmp_path, title="checkpoint")
