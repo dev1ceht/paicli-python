@@ -125,12 +125,103 @@ def test_agent_manual_compaction_is_a_noop_when_only_protected_turns_exist(tmp_p
     result = asyncio.run(agent.compact_history())
 
     assert result.compacted is False
+    assert result.compaction_reason == "insufficient_history"
     assert llm.calls == 0
     assert [(message.role, message.content) for message in agent.history] == [
         ("user", "question"),
         ("assistant", "answer"),
     ]
     assert agent.export_session_context() is None
+
+
+def test_agent_manual_compaction_rolls_back_when_checkpoint_persistence_fails(tmp_path):
+    config = PaiCliConfig()
+    config.context.protected_turns = 1
+    agent = Agent(
+        llm_client=SummaryLlm(max_context_window=128_000),
+        tool_registry=ToolRegistry(),
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+    )
+    original = [
+        Message(role="user", content="old question " * 100),
+        Message(role="assistant", content="old answer " * 100),
+        Message(role="user", content="recent question"),
+        Message(role="assistant", content="recent answer"),
+    ]
+    agent.history = list(original)
+
+    async def reject_checkpoint(_checkpoint):
+        raise OSError("session database unavailable")
+
+    with pytest.raises(OSError, match="session database unavailable"):
+        asyncio.run(agent.compact_history(checkpoint_callback=reject_checkpoint))
+
+    assert agent.history == original
+    assert agent.export_session_context() is None
+
+
+def test_agent_persists_summary_usage_when_candidate_does_not_reduce_history(tmp_path):
+    config = PaiCliConfig()
+    config.context.protected_turns = 1
+    agent = Agent(
+        llm_client=SummaryLlm(max_context_window=128_000),
+        tool_registry=ToolRegistry(),
+        system_prompt="system",
+        cwd=str(tmp_path),
+        config=config,
+    )
+    agent.history = [
+        Message(role="user", content="old"),
+        Message(role="assistant", content="answer"),
+        Message(role="user", content="recent"),
+        Message(role="assistant", content="response"),
+    ]
+    persisted = []
+
+    async def save_usage(records):
+        persisted.extend(records)
+
+    result = asyncio.run(agent.compact_history(usage_callback=save_usage))
+
+    assert result.compacted is False
+    assert result.compaction_reason == "no_reduction"
+    assert len(persisted) == 1
+    assert persisted[0]["usage_source"] == "actual"
+    assert agent.export_session_context() is None
+
+
+def test_manual_compaction_never_summarizes_configured_protected_turns(tmp_path):
+    config = PaiCliConfig()
+    config.context.min_budget_chars = 1_600
+    config.context.max_budget_chars = 1_600
+    config.context.output_reserve_tokens = 0
+    config.context.protected_turns = 2
+    manager = ContextManager(config=config, llm_client=SummaryLlm(), cwd=str(tmp_path))
+    second_latest = "second-latest-protected-marker"
+    latest = "latest-protected-marker"
+
+    result = asyncio.run(
+        manager.compact_now(
+            prompt_sections=PromptSections(prefix="core", suffix="suffix"),
+            messages=[
+                Message(role="user", content="old request " * 80),
+                Message(role="assistant", content="old response " * 80),
+                Message(role="user", content=(second_latest + " ") * 100),
+                Message(role="assistant", content="large response " * 100),
+                Message(role="user", content=latest),
+                Message(role="assistant", content="latest response"),
+            ],
+            tools=[],
+        )
+    )
+
+    rendered = "\n".join(str(message.content) for message in result.messages)
+    assert result.compacted is True
+    assert "history_aggressive" not in result.reductions
+    assert second_latest in rendered
+    assert latest in rendered
 
 
 def test_context_manager_exports_and_restores_durable_compaction_state(tmp_path):
@@ -173,6 +264,7 @@ def test_context_manager_exports_and_restores_durable_compaction_state(tmp_path)
             "protected_items": 4,
             "used_llm": True,
             "llm_usage": {"input_tokens": 12, "output_tokens": 4},
+            "llm_usage_records": [],
         },
     }
 
@@ -278,6 +370,42 @@ def test_oversized_compaction_uses_map_reduce_without_dropping_late_items():
     assert result.used_llm
     assert llm.calls >= 3
     assert "late-marker" in result.summary
+    assert len(result.llm_usage_records) == llm.calls
+
+
+def test_compaction_preserves_usage_when_stream_fails_after_usage_event():
+    class UsageThenFailureLlm(SummaryLlm):
+        async def chat(self, messages, tools, *, system_prompt):  # noqa: ARG002
+            self.calls += 1
+            yield {
+                "type": "usage",
+                "usage_source": "actual",
+                "usage": {"input_tokens": 7, "output_tokens": 2},
+            }
+            raise RuntimeError("stream interrupted")
+
+    llm = UsageThenFailureLlm()
+    result = asyncio.run(
+        compact_with_llm(
+            [DeltaItem(turn_id=1, role="user", content="retain usage")],
+            llm,
+        )
+    )
+
+    assert result.used_llm is False
+    assert result.llm_usage == {
+        "input_tokens": 7,
+        "output_tokens": 2,
+    }
+    assert result.llm_usage_records == [
+        {
+            "input_tokens": 7,
+            "output_tokens": 2,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "usage_source": "actual",
+        }
+    ]
 
 
 def _small_context_config() -> PaiCliConfig:

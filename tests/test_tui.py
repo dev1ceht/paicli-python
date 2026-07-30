@@ -564,6 +564,9 @@ def test_tui_compact_command_summarizes_history_without_starting_a_turn():
         def save_context_checkpoint(self, checkpoint):
             self.checkpoints.append(checkpoint)
 
+        def save_context_summary_usage(self, **_kwargs):
+            return None
+
         def close(self):
             return None
 
@@ -571,8 +574,15 @@ def test_tui_compact_command_summarizes_history_without_starting_a_turn():
         def __init__(self):
             self.calls = 0
 
-        async def compact_history(self):
+        async def compact_history(
+            self,
+            *,
+            checkpoint_callback=None,
+            usage_callback=None,  # noqa: ARG002
+        ):
             self.calls += 1
+            if checkpoint_callback is not None:
+                await checkpoint_callback({"checkpoint_id": "ctx_manual"})
             return SimpleNamespace(
                 compacted=True,
                 pressure_before=SimpleNamespace(pressure_ratio=0.12),
@@ -581,9 +591,6 @@ def test_tui_compact_command_summarizes_history_without_starting_a_turn():
 
         def context_usage_event(self):
             return None
-
-        def export_session_context(self):
-            return {"checkpoint_id": "ctx_manual"}
 
     async def run() -> None:
         agent = CompactAgent()
