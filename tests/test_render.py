@@ -82,11 +82,21 @@ def test_bottom_toolbar_uses_runtime_summary_segments():
 
 
 def test_interactive_renderer_enables_live_markdown_for_inline_mode():
-    config = PaiCliConfig(render_mode="inline")
+    config = PaiCliConfig(
+        render_mode="inline",
+        typewriter_enabled=True,
+        typewriter_chars_per_second=120,
+        typewriter_max_chars_per_second=480,
+        typewriter_frame_rate=24,
+    )
 
     renderer = _interactive_renderer(config, context_window=1000)
 
     assert renderer._live_markdown is True
+    assert renderer._text_typewriter.enabled is True
+    assert renderer._text_typewriter.chars_per_second == 120
+    assert renderer._text_typewriter.max_chars_per_second == 480
+    assert renderer._live_refresh_rate == 24
     assert renderer.toolbar_status()["context_ratio"] == 0
 
 
@@ -96,6 +106,7 @@ def test_interactive_renderer_disables_live_markdown_for_plain_mode():
     renderer = _interactive_renderer(config)
 
     assert renderer._live_markdown is False
+    assert renderer._text_typewriter.enabled is False
 
 
 def test_text_deltas_render_as_markdown_on_turn_complete():

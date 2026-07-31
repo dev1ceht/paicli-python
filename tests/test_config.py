@@ -41,6 +41,29 @@ def test_config_precedence(tmp_path, monkeypatch):
     assert config.llm.model == "cli-model"
 
 
+def test_typewriter_settings_have_interactive_defaults_and_env_overrides(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PAICLI_TYPEWRITER", "false")
+    monkeypatch.setenv("PAICLI_TYPEWRITER_CPS", "120")
+    monkeypatch.setenv("PAICLI_TYPEWRITER_MAX_CPS", "480")
+    monkeypatch.setenv("PAICLI_TYPEWRITER_FPS", "24")
+
+    config = load_config(project_root=tmp_path)
+
+    assert config.typewriter_enabled is False
+    assert config.typewriter_chars_per_second == 120
+    assert config.typewriter_max_chars_per_second == 480
+    assert config.typewriter_frame_rate == 24
+
+
+def test_typewriter_rejects_a_maximum_rate_below_the_base_rate() -> None:
+    with pytest.raises(ValueError, match="typewriter_max_chars_per_second"):
+        PaiCliConfig(
+            typewriter_chars_per_second=100,
+            typewriter_max_chars_per_second=80,
+        )
+
+
 def test_provider_specific_api_key(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("PAICLI_PROVIDER", "deepseek")
@@ -211,9 +234,7 @@ def test_llm_context_window_must_be_positive():
         PaiCliConfig().llm.__class__(context_window=0)
 
 
-def test_thinking_budget_defaults_to_4096_and_can_be_overridden_from_env(
-    tmp_path, monkeypatch
-):
+def test_thinking_budget_defaults_to_4096_and_can_be_overridden_from_env(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("PAICLI_THINKING_BUDGET", "2048")
 

@@ -108,6 +108,104 @@ def test_tui_focuses_text_area_and_streams_text_before_done():
     asyncio.run(run())
 
 
+def test_tui_typewriter_queues_visible_text_until_a_frame_or_boundary():
+    async def run() -> None:
+        app = PaiCliApp(
+            cwd=".",
+            config=PaiCliConfig(
+                typewriter_enabled=True,
+                typewriter_chars_per_second=1,
+                typewriter_max_chars_per_second=1,
+            ),
+        )
+        async with app.run_test(size=(80, 24)):
+            chat_log = app.query_one(ChatLog)
+
+            app.handle_event({"type": "text_delta", "text": "paced"})
+            assert "paced" not in chat_log.renderable_text()
+
+            app.handle_event({"type": "done", "total_tokens": 0, "total_turns": 1})
+            assert "paced" not in chat_log.renderable_text()
+            await asyncio.sleep(0.3)
+            assert "paced" in chat_log.renderable_text()
+
+    asyncio.run(run())
+
+
+def test_tui_typewriter_keeps_background_task_queues_isolated():
+    async def run() -> None:
+        config = PaiCliConfig(
+            typewriter_enabled=True,
+            typewriter_chars_per_second=1,
+            typewriter_max_chars_per_second=1,
+        )
+        app = PaiCliApp(cwd=".", config=config)
+        async with app.run_test(size=(80, 24)):
+            chat_log = app.query_one(ChatLog)
+            for task_id in ("a", "b"):
+                app.handle_event(
+                    {
+                        "type": "task_started",
+                        "task_id": task_id,
+                        "task": {"type": "COMMAND"},
+                    }
+                )
+                app.handle_event(
+                    {
+                        "type": "task_text_delta",
+                        "task_id": task_id,
+                        "text": f"{task_id}-output",
+                    }
+                )
+
+            app.handle_event({"type": "task_completed", "task_id": "a"})
+
+            rendered = chat_log.renderable_text()
+            assert "a-output" in rendered
+            assert "b-output" not in rendered
+
+    asyncio.run(run())
+
+
+def test_tui_plain_mode_bypasses_the_typewriter_queue():
+    async def run() -> None:
+        app = PaiCliApp(
+            cwd=".",
+            config=PaiCliConfig(render_mode="plain", typewriter_enabled=True),
+        )
+        async with app.run_test(size=(80, 24)):
+            chat_log = app.query_one(ChatLog)
+
+            app.handle_event({"type": "text_delta", "text": "instant"})
+
+            assert "instant" in chat_log.renderable_text()
+
+    asyncio.run(run())
+
+
+def test_tui_error_boundary_immediately_flushes_queued_text():
+    async def run() -> None:
+        app = PaiCliApp(
+            cwd=".",
+            config=PaiCliConfig(
+                typewriter_enabled=True,
+                typewriter_chars_per_second=1,
+                typewriter_max_chars_per_second=1,
+            ),
+        )
+        async with app.run_test(size=(80, 24)):
+            chat_log = app.query_one(ChatLog)
+            app.handle_event({"type": "text_delta", "text": "partial"})
+
+            app.handle_event({"type": "error", "error": "connection lost"})
+
+            rendered = chat_log.renderable_text()
+            assert "partial" in rendered
+            assert "connection lost" in rendered
+
+    asyncio.run(run())
+
+
 def test_tui_updates_status_bar_from_plan_usage_events():
     async def run() -> None:
         app = PaiCliApp(cwd=".")

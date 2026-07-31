@@ -171,6 +171,10 @@ class ContextConfig:
 class PaiCliConfig:
     llm: LlmConfig = field(default_factory=LlmConfig)
     render_mode: str = "inline"
+    typewriter_enabled: bool = True
+    typewriter_chars_per_second: float = 80
+    typewriter_max_chars_per_second: float = 320
+    typewriter_frame_rate: float = 30
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
@@ -181,6 +185,16 @@ class PaiCliConfig:
     prompt: PromptConfig = field(default_factory=PromptConfig)
     features: FeatureConfig = field(default_factory=FeatureConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
+
+    def __post_init__(self) -> None:
+        if self.typewriter_chars_per_second <= 0:
+            raise ValueError("typewriter_chars_per_second must be positive")
+        if self.typewriter_max_chars_per_second < self.typewriter_chars_per_second:
+            raise ValueError(
+                "typewriter_max_chars_per_second must be at least typewriter_chars_per_second"
+            )
+        if self.typewriter_frame_rate <= 0:
+            raise ValueError("typewriter_frame_rate must be positive")
 
 
 def load_config(
@@ -402,6 +416,19 @@ def _apply_env(data: dict[str, Any], env: dict[str, str | None]) -> dict[str, An
     if env.get("PAICLI_TUI") == "true":
         result["render_mode"] = "inline"
 
+    typewriter = env.get("PAICLI_TYPEWRITER")
+    if typewriter in {"true", "false"}:
+        result["typewriter_enabled"] = typewriter == "true"
+    for env_key, config_key in [
+        ("PAICLI_TYPEWRITER_CPS", "typewriter_chars_per_second"),
+        ("PAICLI_TYPEWRITER_MAX_CPS", "typewriter_max_chars_per_second"),
+        ("PAICLI_TYPEWRITER_FPS", "typewriter_frame_rate"),
+    ]:
+        raw = env.get(env_key)
+        if raw not in (None, ""):
+            with suppress(TypeError, ValueError):
+                result[config_key] = float(raw)
+
     for env_key, feature_key in [
         ("PAICLI_MCP", "mcp"),
         ("PAICLI_SKILL", "skill"),
@@ -442,6 +469,10 @@ def _dict_to_config(data: dict[str, Any]) -> PaiCliConfig:
     return PaiCliConfig(
         llm=LlmConfig(**data.get("llm", {})),
         render_mode=data.get("render_mode", "inline"),
+        typewriter_enabled=bool(data.get("typewriter_enabled", True)),
+        typewriter_chars_per_second=float(data.get("typewriter_chars_per_second", 80)),
+        typewriter_max_chars_per_second=float(data.get("typewriter_max_chars_per_second", 320)),
+        typewriter_frame_rate=float(data.get("typewriter_frame_rate", 30)),
         tools=ToolsConfig(**data.get("tools", {})),
         agent=AgentConfig(**data.get("agent", {})),
         retry=RetryConfig(

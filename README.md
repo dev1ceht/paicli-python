@@ -87,6 +87,10 @@ uv run paicli doctor --cwd .
 | `PAICLI_MAX_TOKENS` | 单次响应 token 上限 |
 | `PAICLI_CONTEXT_WINDOW` | 覆盖模型上下文窗口 |
 | `PAICLI_TEMPERATURE` | 采样温度 |
+| `PAICLI_TYPEWRITER` | 是否启用交互式打字机效果，默认 `true` |
+| `PAICLI_TYPEWRITER_CPS` | 基础显示速度，默认每秒 `80` 字符 |
+| `PAICLI_TYPEWRITER_MAX_CPS` | 积压时最高显示速度，默认每秒 `320` 字符 |
+| `PAICLI_TYPEWRITER_FPS` | 界面刷新帧率，默认 `30` |
 | `PAICLI_HITL` | 审批模式：`always`、`auto` 或 `never` |
 
 除通用 Key 外，也支持 `DEEPSEEK_API_KEY`、`GLM_API_KEY`、
@@ -111,6 +115,10 @@ PAICLI_API_KEY=local-key
     "model": "deepseek-v4-flash",
     "context_window": 64000
   },
+  "typewriter_enabled": true,
+  "typewriter_chars_per_second": 80,
+  "typewriter_max_chars_per_second": 320,
+  "typewriter_frame_rate": 30,
   "policy": {
     "hitl_mode": "auto"
   },
