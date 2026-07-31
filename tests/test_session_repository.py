@@ -14,7 +14,12 @@ def test_repository_creates_jsonl_session_and_replays_messages(tmp_path: Path) -
 
     session = repository.create_session(workspace, title="Persistent work")
     repository.begin_turn(session.id, turn_id="turn_1", user_content="hello")
-    repository.complete_turn(session.id, turn_id="turn_1", assistant_content="hi")
+    repository.complete_turn(
+        session.id,
+        turn_id="turn_1",
+        assistant_content="hi",
+        reasoning_content="considered the greeting",
+    )
 
     assert not (tmp_path / "sessions.db").exists()
     assert len(list((tmp_path / "sessions").rglob("*.jsonl"))) == 1
@@ -23,6 +28,29 @@ def test_repository_creates_jsonl_session_and_replays_messages(tmp_path: Path) -
         ("user", "hello"),
         ("assistant", "hi"),
     ]
+    assert view.model_messages[-1].parts[0].metadata["reasoning_content"] == (
+        "considered the greeting"
+    )
+
+
+def test_repository_persists_thinking_only_interruption(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions")
+    session = repository.create_session(tmp_path)
+    repository.begin_turn(session.id, turn_id="turn_1", user_content="think")
+
+    repository.interrupt_turn(
+        session.id,
+        turn_id="turn_1",
+        assistant_content="",
+        reasoning_content="unfinished reasoning",
+        reason="user_interrupt",
+    )
+
+    message = repository.rebuild_session_view(session.id).session_history[-1]
+    assert message.role == "assistant"
+    assert message.status == "partial"
+    assert message.content == ""
+    assert message.parts[0].metadata["reasoning_content"] == "unfinished reasoning"
 
 
 def test_repository_keeps_large_content_inline_in_session_file(tmp_path: Path) -> None:

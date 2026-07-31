@@ -130,6 +130,7 @@ class PaiCliApp(App):
         self._text_buffer: list[str] = []
         self._session_text_buffer: list[str] = []
         self._thinking_buffer: list[str] = []
+        self._session_thinking_buffer: list[str] = []
         self._input_tokens = 0
         self._output_tokens = 0
         self._cached_tokens = 0
@@ -254,10 +255,45 @@ class PaiCliApp(App):
             return
         chat_log = self.query_one("#chat-log", ChatLog)
         for message in self._interactive_session.session_history:
+            if message.hidden:
+                continue
             if message.role == "user":
                 chat_log.add_user_message(message.content)
             elif message.role == "assistant":
-                chat_log.add_assistant_text(message.content)
+                for part in message.parts:
+                    if part.kind == "text":
+                        reasoning = str(part.metadata.get("reasoning_content") or "")
+                        if reasoning:
+                            chat_log.add_thinking(reasoning)
+                        if part.content:
+                            chat_log.add_assistant_text(part.content)
+                    elif part.kind == "tool_call":
+                        chat_log.add_tool_call(
+                            str(part.metadata.get("tool_name") or "unknown"),
+                            dict(part.metadata.get("arguments") or {}),
+                            tool_call_id=(
+                                str(part.metadata["tool_call_id"])
+                                if part.metadata.get("tool_call_id")
+                                else None
+                            ),
+                        )
+                if message.status == "partial":
+                    reason = message.interruption_reason or "interrupted"
+                    chat_log.add_info(f"[yellow]Assistant turn interrupted: {reason}[/yellow]")
+            elif message.role == "tool":
+                for part in message.parts:
+                    if part.kind != "tool_result":
+                        continue
+                    chat_log.finish_tool_card(
+                        str(part.metadata.get("tool_name") or "unknown"),
+                        part.content,
+                        is_error=bool(part.metadata.get("is_error")),
+                        tool_call_id=(
+                            str(part.metadata["tool_call_id"])
+                            if part.metadata.get("tool_call_id")
+                            else None
+                        ),
+                    )
 
     def _hitl_banner_text(self) -> str:
         mode = self.config.policy.hitl_mode if self.config else "auto"
@@ -455,6 +491,7 @@ class PaiCliApp(App):
         self._text_buffer.clear()
         self._session_text_buffer.clear()
         self._thinking_buffer.clear()
+        self._session_thinking_buffer.clear()
         self._input_tokens = 0
         self._output_tokens = 0
         self._cached_tokens = 0
@@ -527,6 +564,7 @@ class PaiCliApp(App):
                 try:
                     if session is not None and turn_started:
                         assistant_text = "".join(self._session_text_buffer)
+                        reasoning_content = "".join(self._session_thinking_buffer) or None
                         if completed:
                             export_context = getattr(
                                 self.agent,
@@ -540,17 +578,20 @@ class PaiCliApp(App):
                                 await self._run_session_call(
                                     session.complete_turn,
                                     assistant_text,
+                                    reasoning_content=reasoning_content,
                                 )
                             else:
                                 await self._run_session_call(
                                     session.complete_turn,
                                     assistant_text,
+                                    reasoning_content=reasoning_content,
                                     context_checkpoint=context_checkpoint,
                                 )
                         else:
                             await self._run_session_call(
                                 session.interrupt_turn,
                                 assistant_text,
+                                reasoning_content=reasoning_content,
                                 reason=run_state["interruption_reason"],
                             )
                 except Exception as persistence_error:
@@ -643,20 +684,22 @@ class PaiCliApp(App):
             )
         elif ui_event.kind == "turn_complete":
             tool_actions = payload.get("tool_actions") or []
+            message = payload.get("message") or {}
+            reasoning_content = (
+                str(message["reasoning_content"]) if message.get("reasoning_content") else None
+            )
             if tool_actions:
-                message = payload.get("message") or {}
                 await self._run_session_call(
                     session.record_tool_batch,
                     model_turn=int(payload.get("turn") or 0),
                     assistant_content=str(message.get("content") or ""),
-                    reasoning_content=(
-                        str(message["reasoning_content"])
-                        if message.get("reasoning_content")
-                        else None
-                    ),
+                    reasoning_content=reasoning_content,
                     actions=list(tool_actions),
                 )
                 self._session_text_buffer.clear()
+                self._session_thinking_buffer.clear()
+            elif reasoning_content is not None:
+                self._session_thinking_buffer[:] = [reasoning_content]
         elif ui_event.kind == "tool_call":
             await self._run_session_call(
                 session.start_tool_action,
@@ -685,6 +728,7 @@ class PaiCliApp(App):
         elif event_type == "thinking_delta":
             thinking = str(payload.get("thinking") or "")
             self._thinking_buffer.append(thinking)
+            self._session_thinking_buffer.append(thinking)
             if thinking:
                 self._queue_visible_text("thinking", thinking)
         elif event_type == "usage":
@@ -1015,14 +1059,25 @@ class PaiCliApp(App):
         name = str(event.get("name") or "unknown")
         payload = event.get("input") or {}
         chat_log = self.query_one("#chat-log", ChatLog)
-        chat_log.add_tool_call(name, payload, task_id=task_id)
+        chat_log.add_tool_call(
+            name,
+            payload,
+            task_id=task_id,
+            tool_call_id=(str(event["tool_call_id"]) if event.get("tool_call_id") else None),
+        )
 
     def _handle_tool_result(self, event: dict[str, Any], *, task_id: str | None = None) -> None:
         is_error = bool(event.get("is_error"))
         name = str(event.get("name") or "unknown")
         result = str(event.get("result") or "")
         chat_log = self.query_one("#chat-log", ChatLog)
-        chat_log.finish_tool_card(name, result, is_error=is_error, task_id=task_id)
+        chat_log.finish_tool_card(
+            name,
+            result,
+            is_error=is_error,
+            task_id=task_id,
+            tool_call_id=(str(event["tool_call_id"]) if event.get("tool_call_id") else None),
+        )
 
     def _handle_diff(self, event: dict[str, Any]) -> None:
         from paicli.render._common import diff_ops as _diff_ops

@@ -755,7 +755,12 @@ class ChatLog(VerticalScroll):
         self._follow_new_activity()
 
     def add_tool_call(
-        self, name: str, args: dict | None = None, *, task_id: str | None = None
+        self,
+        name: str,
+        args: dict | None = None,
+        *,
+        task_id: str | None = None,
+        tool_call_id: str | None = None,
     ) -> ToolCard:
         card = ToolCard(
             tool_name=name,
@@ -763,7 +768,7 @@ class ChatLog(VerticalScroll):
             task_id=task_id,
         )
         self._activity_rail().add_activity(card)
-        key = f"{task_id or ''}:{name}"
+        key = f"{task_id or ''}:{tool_call_id or name}"
         self._running_tool_cards[key] = card
         self._follow_new_activity()
         return card
@@ -775,8 +780,9 @@ class ChatLog(VerticalScroll):
         *,
         is_error: bool = False,
         task_id: str | None = None,
+        tool_call_id: str | None = None,
     ) -> None:
-        key = f"{task_id or ''}:{name}"
+        key = f"{task_id or ''}:{tool_call_id or name}"
         card = self._running_tool_cards.pop(key, None)
         if card is None:
             # Fallback: find the last running card for this tool name

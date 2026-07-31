@@ -298,6 +298,7 @@ class InteractiveSession:
         self,
         assistant_text: str,
         *,
+        reasoning_content: str | None = None,
         context_checkpoint: dict[str, Any] | None = None,
     ) -> None:
         turn_id = self._require_active_turn()
@@ -305,12 +306,19 @@ class InteractiveSession:
             self.id,
             turn_id=turn_id,
             assistant_content=assistant_text,
+            reasoning_content=reasoning_content,
             context_checkpoint=context_checkpoint,
         )
         self._active_turn_id = None
         self.refresh_stats()
 
-    def interrupt_turn(self, assistant_text: str, *, reason: str) -> None:
+    def interrupt_turn(
+        self,
+        assistant_text: str,
+        *,
+        reasoning_content: str | None = None,
+        reason: str,
+    ) -> None:
         if self._active_turn_id is None:
             return
         turn_id = self._active_turn_id
@@ -318,6 +326,7 @@ class InteractiveSession:
             self.id,
             turn_id=turn_id,
             assistant_content=assistant_text,
+            reasoning_content=reasoning_content,
             reason=reason,
         )
         self._active_turn_id = None

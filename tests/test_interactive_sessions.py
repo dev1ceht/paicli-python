@@ -9,7 +9,7 @@ import pytest
 
 from paicli.config import PaiCliConfig
 from paicli.entrypoints.repl import start_repl
-from paicli.render.textual_widgets import ChatLog, StatusBar
+from paicli.render.textual_widgets import ChatLog, StatusBar, ThinkingBlock, ToolCard
 from paicli.render.tui_app import PaiCliApp
 from paicli.render.tui_dialogs import SessionResumePicker
 from paicli.session import (
@@ -48,6 +48,7 @@ class ContextRestoringAgent(HistoryAgent):
 class CompletingAgent(HistoryAgent):
     async def run(self, message: str):
         assert message == "persist me"
+        yield {"type": "thinking_delta", "thinking": "durable reasoning"}
         yield {"type": "text_delta", "text": "durable "}
         yield {"type": "text_delta", "text": "answer"}
         yield {"type": "done", "total_tokens": 3, "total_turns": 1}
@@ -118,7 +119,7 @@ class ToolCompletingAgent(HistoryAgent):
                 "name": None,
                 "tool_call_id": None,
                 "tool_calls": [],
-                "reasoning_content": None,
+                "reasoning_content": "final reasoning",
             },
         }
         yield {"type": "done", "total_tokens": 3, "total_turns": 2}
@@ -127,6 +128,7 @@ class ToolCompletingAgent(HistoryAgent):
 class InterruptibleAgent(HistoryAgent):
     async def run(self, message: str):
         assert message == "interrupt me"
+        yield {"type": "thinking_delta", "thinking": "interrupted reasoning"}
         yield {"type": "text_delta", "text": "half answer"}
         await asyncio.Event().wait()
         yield {"type": "done", "total_tokens": 0, "total_turns": 1}
@@ -568,6 +570,9 @@ def test_tui_persists_completed_submission_and_turn_boundary(tmp_path: Path) -> 
                 ("assistant", "durable answer"),
             ]
             assert repository.list_events(app.session_id)[-1].type == "turn.completed"
+            assert view.session_history[-1].parts[0].metadata["reasoning_content"] == (
+                "durable reasoning"
+            )
             assert "durable answer" in app.query_one(ChatLog).renderable_text()
 
     asyncio.run(run())
@@ -633,6 +638,7 @@ def test_tui_persists_tool_call_and_result_for_model_replay(tmp_path: Path) -> N
     assert restored.history[1].tool_calls[0]["id"] == "call_1"
     assert restored.history[1].reasoning_content == "inspect reasoning"
     assert restored.history[2].tool_call_id == "call_1"
+    assert restored.history[3].reasoning_content == "final reasoning"
 
 
 def test_tui_persists_one_partial_message_on_interrupt_without_model_replay(
@@ -673,6 +679,9 @@ def test_tui_persists_one_partial_message_on_interrupt_without_model_replay(
                 "message.assistant.partial"
             ) == 1
             assert repository.list_events(app.session_id)[-1].type == "turn.interrupted"
+            assert view.session_history[-1].parts[0].metadata["reasoning_content"] == (
+                "interrupted reasoning"
+            )
             rendered = app.query_one(ChatLog).renderable_text()
             assert rendered.index("half answer") < rendered.index("Agent interrupted")
 
@@ -1252,6 +1261,40 @@ def test_tui_renders_restored_session_history_on_mount(tmp_path: Path) -> None:
         partial=True,
         interruption_reason="user_interrupt",
     )
+    repository.begin_turn(session.id, turn_id="turn_tool", user_content="inspect file")
+    repository.prepare_tool_actions(
+        session.id,
+        turn_id="turn_tool",
+        model_turn=1,
+        assistant_content="I will inspect.",
+        reasoning_content="restored tool reasoning",
+        actions=(
+            ToolActionSpec(
+                tool_call_id="call_restore",
+                tool_name="read_file",
+                arguments={"path": "note.txt"},
+                raw_call={
+                    "id": "call_restore",
+                    "function": {"name": "read_file", "arguments": '{"path":"note.txt"}'},
+                },
+                is_read_only=True,
+                is_idempotent=True,
+            ),
+        ),
+    )
+    repository.start_tool_action(session.id, "call_restore")
+    repository.complete_tool_action(
+        session.id,
+        "call_restore",
+        content="restored tool result",
+        is_error=False,
+    )
+    repository.complete_turn(
+        session.id,
+        turn_id="turn_tool",
+        assistant_content="restored final answer",
+        reasoning_content="restored final reasoning",
+    )
 
     async def run() -> None:
         app = PaiCliApp(
@@ -1264,6 +1307,17 @@ def test_tui_renders_restored_session_history_on_mount(tmp_path: Path) -> None:
             rendered = app.query_one(ChatLog).renderable_text()
             assert "restored question" in rendered
             assert "restored partial" in rendered
+            assert "restored tool reasoning" in rendered
+            assert "restored final reasoning" in rendered
+            assert "read_file" in rendered
+            assert "restored tool result" in rendered
+            assert "restored final answer" in rendered
+            thinking = list(app.query(ThinkingBlock))
+            assert len(thinking) == 2
+            assert all(block.is_expanded is False for block in thinking)
+            tool = app.query_one(ToolCard)
+            assert tool.status == "success"
+            assert tool.is_expanded is False
 
     asyncio.run(run())
 
@@ -1301,6 +1355,12 @@ def test_tui_can_create_and_resume_workspace_sessions(tmp_path: Path) -> None:
     repository = SessionRepository(tmp_path / "sessions.db")
     original = repository.create_session(workspace, title="Original")
     repository.append_message(original.id, role="user", content="resume this history")
+    repository.append_message(
+        original.id,
+        role="assistant",
+        content="resumed answer",
+        reasoning_content="resumed reasoning",
+    )
     agent = HistoryAgent()
 
     async def run() -> None:
@@ -1321,9 +1381,14 @@ def test_tui_can_create_and_resume_workspace_sessions(tmp_path: Path) -> None:
             await pilot.pause()
             assert app.session_id == original.id
             assert [(message.role, message.content) for message in agent.history] == [
-                ("user", "resume this history")
+                ("user", "resume this history"),
+                ("assistant", "resumed answer"),
             ]
-            assert "resume this history" in app.query_one(ChatLog).renderable_text()
+            rendered = app.query_one(ChatLog).renderable_text()
+            assert "resume this history" in rendered
+            assert "resumed reasoning" in rendered
+            assert "resumed answer" in rendered
+            assert app.query_one(ThinkingBlock).is_expanded is False
 
     asyncio.run(run())
 
