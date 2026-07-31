@@ -5,8 +5,6 @@ import json
 import os
 import threading
 import time
-from collections.abc import Callable
-from contextlib import suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
@@ -26,11 +24,9 @@ from paicli.runtime.tasks import DurableTaskManager
 from paicli.session import (
     InteractiveSession,
     SessionRepository,
-    default_session_database_path,
+    default_session_directory,
 )
 from paicli.tools.base import ApprovalPending
-
-SESSION_LEASE_REFRESH_SECONDS = 20.0
 
 
 class RuntimeApiServer:
@@ -49,11 +45,12 @@ class RuntimeApiServer:
         self.api_key = api_key
         self.port = port
         self.session_repository = session_repository or SessionRepository(
-            default_session_database_path()
+            default_session_directory()
         )
         self.runtime_root = self._resolve_runtime_root()
         self.task_manager = DurableTaskManager(
-            self.session_repository,
+            self.session_repository.root.parent / "runtime" / "tasks.db",
+            session_repository=self.session_repository,
             workspace_root=self.cwd,
             parent_session_id=self.runtime_root.id,
         )
@@ -234,41 +231,14 @@ class RuntimeApiServer:
         *,
         execution_state: dict[str, Any] | None = None,
         checkpoint_callback=None,
-        lease_refresh: Callable[[], None] | None = None,
     ) -> str:
-        operation = asyncio.create_task(
-            self._consume_session_turn(
-                interactive,
-                engine,
-                message,
-                execution_state=execution_state,
-                checkpoint_callback=checkpoint_callback,
-            )
+        return await self._consume_session_turn(
+            interactive,
+            engine,
+            message,
+            execution_state=execution_state,
+            checkpoint_callback=checkpoint_callback,
         )
-        lease_heartbeat = asyncio.create_task(
-            self._refresh_session_lease(interactive, lease_refresh)
-        )
-        try:
-            done, _pending = await asyncio.wait(
-                {operation, lease_heartbeat},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if operation in done:
-                return await operation
-            heartbeat_error = lease_heartbeat.exception()
-            operation.cancel()
-            await asyncio.gather(operation, return_exceptions=True)
-            if heartbeat_error is not None:
-                raise heartbeat_error
-            raise RuntimeError("Runtime Session lease heartbeat stopped unexpectedly")
-        finally:
-            if not operation.done():
-                operation.cancel()
-                await asyncio.gather(operation, return_exceptions=True)
-            if not lease_heartbeat.done():
-                lease_heartbeat.cancel()
-                with suppress(asyncio.CancelledError):
-                    await lease_heartbeat
 
     async def _consume_session_turn(
         self,
@@ -341,17 +311,6 @@ class RuntimeApiServer:
             )
             raise
 
-    @staticmethod
-    async def _refresh_session_lease(
-        interactive: InteractiveSession,
-        extra_refresh: Callable[[], None] | None = None,
-    ) -> None:
-        while True:
-            await asyncio.sleep(SESSION_LEASE_REFRESH_SECONDS)
-            await interactive.refresh_lease_async()
-            if extra_refresh is not None:
-                await asyncio.to_thread(extra_refresh)
-
     def _worker_loop(self) -> None:
         while not self._stop.is_set():
             task = self.task_manager.claim_next()
@@ -383,31 +342,7 @@ class RuntimeApiServer:
         prompt: str,
         cancellation: CancellationToken | None = None,
     ) -> str:
-        operation = asyncio.create_task(
-            self._run_claimed_task(task_id, prompt, cancellation)
-        )
-        claim_heartbeat = asyncio.create_task(self._refresh_task_claim(task_id))
-        try:
-            done, _pending = await asyncio.wait(
-                {operation, claim_heartbeat},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if operation in done:
-                return await operation
-            heartbeat_error = claim_heartbeat.exception()
-            operation.cancel()
-            await asyncio.gather(operation, return_exceptions=True)
-            if heartbeat_error is not None:
-                raise heartbeat_error
-            raise RuntimeError("background task claim heartbeat stopped unexpectedly")
-        finally:
-            if not operation.done():
-                operation.cancel()
-                await asyncio.gather(operation, return_exceptions=True)
-            if not claim_heartbeat.done():
-                claim_heartbeat.cancel()
-                with suppress(asyncio.CancelledError):
-                    await claim_heartbeat
+        return await self._run_claimed_task(task_id, prompt, cancellation)
 
     async def _run_claimed_task(
         self,
@@ -439,9 +374,7 @@ class RuntimeApiServer:
                 execution_state["approval_request"] = request
                 execution_state["runtime_identity"] = runtime_identity
                 execution_state["approval_context_stale"] = True
-                active_tool_call_id = str(
-                    execution_state.get("active_tool_call_id") or ""
-                )
+                active_tool_call_id = str(execution_state.get("active_tool_call_id") or "")
                 approval = self.task_manager.wait_for_approval(
                     task_id,
                     checkpoint=execution_state,
@@ -449,7 +382,6 @@ class RuntimeApiServer:
                     invalidation_reason="runtime_identity_changed",
                     session_id=(interactive.id if active_tool_call_id else None),
                     tool_call_id=active_tool_call_id or None,
-                    lease_token=(interactive.lease_token if active_tool_call_id else None),
                 )
                 if not approval:
                     raise TaskCanceled()
@@ -469,14 +401,14 @@ class RuntimeApiServer:
                 request: dict[str, Any],
             ) -> None:
                 state["runtime_identity"] = runtime_identity
-                tool_call_id = str(state.get("active_tool_call_id") or "")
+                tool_call_id = interactive.request_tool_approval(request)
+                state["active_tool_call_id"] = tool_call_id
                 approval = self.task_manager.wait_for_approval(
                     task_id,
                     checkpoint=state,
                     request=request,
                     session_id=interactive.id,
                     tool_call_id=tool_call_id,
-                    lease_token=interactive.lease_token,
                 )
                 if not approval:
                     raise TaskCanceled()
@@ -514,11 +446,6 @@ class RuntimeApiServer:
             return await operation
         finally:
             interactive.close()
-
-    async def _refresh_task_claim(self, task_id: str) -> None:
-        while True:
-            await asyncio.sleep(SESSION_LEASE_REFRESH_SECONDS)
-            self.task_manager.refresh_claim(task_id)
 
     def _runtime_identity(self, registry: Any) -> dict[str, Any]:
         return {

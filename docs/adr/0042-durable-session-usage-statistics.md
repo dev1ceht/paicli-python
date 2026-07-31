@@ -15,7 +15,7 @@ token reading. Narrow terminals truncate both sides while preserving some cumula
 live context information.
 
 Persisting a usage event refreshes the durable snapshot off the UI thread; ordinary status
-refreshes never scan SQLite. `/session stats` performs an explicit complete aggregation off the
+refreshes never scan JSONL. `/session stats` performs an explicit complete aggregation off the
 UI thread and shows token, cache, cost, activity, inherited-history, and coverage details.
 
 Provider token counts are facts. When a provider reports prompt tokens that include cache
@@ -26,9 +26,8 @@ presented as a provider-billed amount.
 ## Replay, compatibility, and forks
 
 Session statistics are derived from events rather than stored as mutable counters, so close,
-resume, verification, and replay produce the same result. Usage writes use the active Turn and
-the stable usage identity as their idempotency key. Multiple provider usage chunks for one
-request are coalesced into one final usage fact.
+resume and replay produce the same result. Multiple provider usage chunks for one request are
+coalesced into one final usage fact before it is appended.
 
 Older turns with Assistant output but no corresponding usage event remain readable and report
 `partial` coverage instead of inventing zero-cost certainty.

@@ -164,7 +164,7 @@ def test_fork_keeps_inherited_usage_out_of_child_totals(tmp_path):
         session.close()
 
 
-def test_duplicate_usage_identity_is_idempotent_within_a_turn(tmp_path):
+def test_duplicate_usage_identity_is_not_deduplicated_by_session_storage(tmp_path):
     repository = SessionRepository(tmp_path / "sessions.db")
     session = InteractiveSession(repository, tmp_path)
     try:
@@ -182,9 +182,9 @@ def test_duplicate_usage_identity_is_idempotent_within_a_turn(tmp_path):
         usage_events = [
             event for event in repository.list_events(session.id) if event.type == "usage.recorded"
         ]
-        assert len(usage_events) == 1
-        assert session.stats.tokens == record.tokens
-        assert session.stats.total_cost == Decimal("0.01")
+        assert len(usage_events) == 2
+        assert session.stats.tokens == TokenUsage(input_tokens=20, output_tokens=10)
+        assert session.stats.total_cost == Decimal("0.02")
     finally:
         session.close()
 

@@ -4,8 +4,8 @@ import json
 import re
 from pathlib import Path
 
+from paicli.session.jsonl_repository import SessionRepository
 from paicli.session.models import SessionMessage
-from paicli.session.repository import SessionRepository
 
 _SECRET_PATTERNS = (
     re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"),
@@ -43,7 +43,7 @@ class SessionShareService:
         self.output_dir = (
             Path(output_dir).expanduser()
             if output_dir is not None
-            else repository.db_path.parent / "shares"
+            else repository.root.parent / "shares"
         )
 
     def export_markdown(

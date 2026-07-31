@@ -185,7 +185,7 @@ curl -X POST http://127.0.0.1:8080/v1/threads/<thread_id>/turns \
   -d '{"message":"总结当前项目"}'
 ```
 
-运行数据默认保存在 `~/.paicli/sessions/sessions.db`。
+完整 Session 默认按工作区保存在 `~/.paicli/sessions/<workspace-hash>/*.jsonl`；后台任务生命周期、检查点和审批状态保存在 `~/.paicli/runtime/tasks.db`。
 
 ## Python SDK
 

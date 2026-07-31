@@ -5,6 +5,7 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from dulwich.repo import Repo
 from rich.panel import Panel
 from textual.app import App, ComposeResult
@@ -1664,6 +1665,7 @@ def test_command_input_persists_history_outside_ui_thread(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.skip(reason="Session lease refresh was removed for single-process JSONL Sessions")
 def test_session_lease_refresh_does_not_block_terminal_input():
     class BlockingSession:
         def __init__(self) -> None:
@@ -1699,6 +1701,7 @@ def test_session_lease_refresh_does_not_block_terminal_input():
     asyncio.run(run())
 
 
+@pytest.mark.skip(reason="Session lease refresh was removed for single-process JSONL Sessions")
 def test_transient_session_database_lock_does_not_stop_running_agent():
     import sqlite3
 

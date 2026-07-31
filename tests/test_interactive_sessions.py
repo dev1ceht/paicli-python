@@ -14,7 +14,6 @@ from paicli.render.tui_app import PaiCliApp
 from paicli.render.tui_dialogs import SessionResumePicker
 from paicli.session import (
     InteractiveSession,
-    SessionLeaseConflictError,
     SessionRepository,
     ToolActionSpec,
 )
@@ -402,6 +401,7 @@ def test_checkpoint_restore_applies_later_message_hidden_events(tmp_path: Path) 
     interactive.close()
 
 
+@pytest.mark.skip(reason="Session write leases were removed for the single-process JSONL model")
 def test_interactive_session_skips_busy_session_and_rejects_explicit_conflict(
     tmp_path: Path,
 ) -> None:
@@ -413,7 +413,7 @@ def test_interactive_session_skips_busy_session_and_rejects_explicit_conflict(
     second = InteractiveSession(repository, workspace)
 
     assert second.id != first.id
-    with pytest.raises(SessionLeaseConflictError):
+    with pytest.raises(SessionLeaseConflictError):  # noqa: F821
         InteractiveSession(repository, workspace, session_id=first.id)
 
     first.close()
@@ -421,6 +421,7 @@ def test_interactive_session_skips_busy_session_and_rejects_explicit_conflict(
     assert resumed.id == first.id
 
 
+@pytest.mark.skip(reason="Session write leases were removed for the single-process JSONL model")
 def test_resume_current_session_reacquires_expired_lease(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -437,6 +438,7 @@ def test_resume_current_session_reacquires_expired_lease(tmp_path: Path) -> None
     assert interactive.id == session_id
 
 
+@pytest.mark.skip(reason="Session write leases were removed for the single-process JSONL model")
 def test_refresh_lease_reacquires_expired_lease(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -450,6 +452,7 @@ def test_refresh_lease_reacquires_expired_lease(tmp_path: Path) -> None:
     interactive.begin_turn("after heartbeat recovery")
 
 
+@pytest.mark.skip(reason="Session write leases were removed for the single-process JSONL model")
 def test_refresh_lease_async_retries_transient_database_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -481,6 +484,7 @@ def test_refresh_lease_async_retries_transient_database_lock(
     assert attempts == 3
 
 
+@pytest.mark.skip(reason="Session write leases were removed for the single-process JSONL model")
 def test_resume_current_session_does_not_steal_live_replacement_lease(
     tmp_path: Path,
 ) -> None:
@@ -494,12 +498,13 @@ def test_resume_current_session_does_not_steal_live_replacement_lease(
     _expire_session_lease(database, session_id)
     replacement = repository.acquire_session_lease(session_id, owner_id="replacement-owner")
 
-    with pytest.raises(SessionLeaseConflictError):
+    with pytest.raises(SessionLeaseConflictError):  # noqa: F821
         interactive.resume_session(session_id)
 
     repository.refresh_session_lease(session_id, replacement.token)
 
 
+@pytest.mark.skip(reason="Session write leases were removed for the single-process JSONL model")
 def test_busy_archived_session_is_not_unarchived_before_lease_acquisition(
     tmp_path: Path,
 ) -> None:
@@ -511,7 +516,7 @@ def test_busy_archived_session_is_not_unarchived_before_lease_acquisition(
     repository.archive_session(archived.id, lease_token=lease.token)
     interactive = InteractiveSession(repository, workspace)
 
-    with pytest.raises(SessionLeaseConflictError):
+    with pytest.raises(SessionLeaseConflictError):  # noqa: F821
         interactive.resume_session(archived.id)
 
     record = repository.get_session(archived.id)
@@ -520,6 +525,7 @@ def test_busy_archived_session_is_not_unarchived_before_lease_acquisition(
     repository.release_session_lease(archived.id, lease.token)
 
 
+@pytest.mark.skip(reason="Session write leases were removed for the single-process JSONL model")
 def test_busy_deleted_session_is_not_restored_before_lease_acquisition(
     tmp_path: Path,
 ) -> None:
@@ -531,7 +537,7 @@ def test_busy_deleted_session_is_not_restored_before_lease_acquisition(
     repository.delete_session(deleted.id, lease_token=lease.token)
     interactive = InteractiveSession(repository, workspace)
 
-    with pytest.raises(SessionLeaseConflictError):
+    with pytest.raises(SessionLeaseConflictError):  # noqa: F821
         interactive.restore_session(deleted.id)
 
     record = repository.get_session(deleted.id)
@@ -1164,7 +1170,7 @@ def test_tui_reset_persists_context_boundary_across_restart(tmp_path: Path) -> N
     assert second_agent.history == []
 
 
-def test_start_repl_uses_the_user_level_session_database(tmp_path: Path, monkeypatch) -> None:
+def test_start_repl_uses_the_user_level_session_directory(tmp_path: Path, monkeypatch) -> None:
     captured: dict = {}
 
     class FakeRegistry:
@@ -1209,21 +1215,21 @@ def test_start_repl_uses_the_user_level_session_database(tmp_path: Path, monkeyp
         provider_name="test-provider",
         max_context_window=1_000,
     )
-    database_path = tmp_path / "home" / ".paicli" / "sessions" / "sessions.db"
+    session_directory = tmp_path / "home" / ".paicli" / "sessions"
     monkeypatch.setattr("paicli.entrypoints.repl.build_tool_registry", build_registry)
     monkeypatch.setattr("paicli.entrypoints.repl.create_llm_client", lambda *args, **kwargs: client)
     monkeypatch.setattr("paicli.entrypoints.repl.PromptAssembler", FakePromptAssembler)
     monkeypatch.setattr("paicli.entrypoints.repl.Agent", FakeAgent)
     monkeypatch.setattr("paicli.entrypoints.repl.PaiCliApp", FakeApp)
     monkeypatch.setattr(
-        "paicli.entrypoints.repl.default_session_database_path",
-        lambda: database_path,
+        "paicli.entrypoints.repl.default_session_directory",
+        lambda: session_directory,
         raising=False,
     )
 
     asyncio.run(start_repl(str(tmp_path), PaiCliConfig()))
 
-    assert captured["session_repository"].db_path == database_path
+    assert captured["session_repository"].root == session_directory
 
 
 def test_tui_renders_restored_session_history_on_mount(tmp_path: Path) -> None:
@@ -1461,6 +1467,7 @@ def test_interactive_session_renames_and_exposes_rich_session_summaries(
     session.close()
 
 
+@pytest.mark.skip(reason="JSONL Sessions no longer maintain a corrupt SQLite catalog status")
 def test_show_session_can_inspect_a_corrupt_catalog_record(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

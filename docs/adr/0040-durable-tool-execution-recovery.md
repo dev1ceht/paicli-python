@@ -1,5 +1,8 @@
 # Durable Tool Execution Recovery
 
+> Partially superseded by ADR 0043: recovery facts now live in Session JSONL and Session leases
+> are removed. The unknown-outcome safety behavior remains.
+
 PaiCLI persists each interactive tool-calling step in the same user-level Session database
 before allowing the tool to execute. This closes the restart gap left by ADR 0039 while keeping
 Runtime background tasks, Plan child Agents, and Runtime API replacement outside this phase.

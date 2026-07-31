@@ -1,5 +1,7 @@
 # Interactive Session Persistence
 
+> Superseded by ADR 0043 for storage format and concurrency behavior.
+
 PaiCLI's interactive entrypoint now binds each TUI instance to one durable Session in the
 user-level database at `~/.paicli/sessions/sessions.db`. The historical `start_repl` name is
 retained, but it launches the Textual TUI; both the entrypoint and the application share the
