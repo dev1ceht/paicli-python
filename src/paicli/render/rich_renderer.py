@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -76,6 +77,7 @@ class RichRenderer:
             max_chars_per_second=typewriter_max_chars_per_second,
             frame_rate=typewriter_frame_rate,
         )
+        self._final_output_pending = False
         self._live: Live | None = None
         self._thinking_live: Live | None = None
         self._context_window = context_window or 0
@@ -118,6 +120,7 @@ class RichRenderer:
         self._thinking_buffer.clear()
         self._text_typewriter.reset()
         self._thinking_typewriter.reset()
+        self._final_output_pending = False
         self._stop_live_markdown()
         self._stop_live_thinking()
         # Start a new accounting scope while preserving the last displayed
@@ -270,7 +273,9 @@ class RichRenderer:
             # Java: answer marker "▪" before final output
             if stop_reason != "tool_use" and self._buffer:
                 self.console.print(Text("\u25aa", style="bold #22c55e"))
-            self._flush_markdown(title=title, paced=stop_reason != "tool_use")
+                if self._schedule_final_output():
+                    return
+            self._flush_markdown(title=title)
         elif event_type == "tool_call":
             self._flush_thinking()
             self._flush_markdown(title="Assistant Output")
@@ -476,9 +481,10 @@ class RichRenderer:
         elif event_type == "done":
             self._flush_thinking()
             # Java: answer marker before final output
-            if self._buffer:
+            if self._buffer and not self._final_output_pending:
                 self.console.print(Text("\u25aa", style="bold #22c55e"))
-            self._flush_markdown(title="Final Output", paced=True)
+            if self._buffer and not self._schedule_final_output():
+                self._flush_markdown(title="Final Output")
             self._record_run_summary(event)
 
     def markdown(self, text: str) -> None:
@@ -489,16 +495,23 @@ class RichRenderer:
         self._flush_markdown(title="Final Output")
         self.console.print()
 
-    def _flush_markdown(self, *, title: str, paced: bool = False) -> None:
+    async def finish_run(self) -> None:
+        """Let a scheduled final tail drain without blocking event consumption."""
+        if self._final_output_pending:
+            deadline = time.monotonic() + 0.3
+            while self._text_typewriter.pending_length and time.monotonic() < deadline:
+                await asyncio.sleep(1 / self._live_refresh_rate)
+        self._flush_markdown(title="Final Output")
+
+    def _flush_markdown(self, *, title: str) -> None:
         if not self._buffer:
             return
         text = "".join(self._buffer)
         self._buffer.clear()
-        if paced:
-            self._drain_live_typewriter(self._text_typewriter, self._live)
         self._text_typewriter.flush()
         self._stop_live_markdown()
         self._text_typewriter.reset()
+        self._final_output_pending = False
         if text.strip():
             self.console.print(
                 _output_panel(
@@ -508,18 +521,16 @@ class RichRenderer:
                 )
             )
 
-    def _drain_live_typewriter(
-        self,
-        buffer: TypewriterBuffer,
-        live: Live | None,
-    ) -> None:
-        if not buffer.enabled or live is None or buffer.pending_length == 0:
-            return
-        buffer.finish(within_seconds=0.25)
-        deadline = time.monotonic() + 0.3
-        while buffer.pending_length and time.monotonic() < deadline:
-            time.sleep(1 / self._live_refresh_rate)
-            live.refresh()
+    def _schedule_final_output(self) -> bool:
+        if (
+            not self._text_typewriter.enabled
+            or self._live is None
+            or self._text_typewriter.pending_length == 0
+        ):
+            return False
+        self._text_typewriter.finish(within_seconds=0.25)
+        self._final_output_pending = True
+        return True
 
     def _update_live_markdown(self) -> None:
         if not self._live_markdown or not self.console.is_terminal:
@@ -535,8 +546,7 @@ class RichRenderer:
                 get_renderable=self._live_markdown_renderable,
             )
             self._live.start(refresh=True)
-            return
-        self._live.refresh()
+        return
 
     def _live_markdown_renderable(self) -> Any:
         self._text_typewriter.advance()
@@ -583,8 +593,7 @@ class RichRenderer:
                 get_renderable=self._live_thinking_renderable,
             )
             self._thinking_live.start(refresh=True)
-            return
-        self._thinking_live.refresh()
+        return
 
     def _live_thinking_renderable(self) -> Any:
         self._thinking_typewriter.advance()

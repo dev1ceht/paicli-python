@@ -228,6 +228,7 @@ async def _run_agent(agent: Agent, renderer: RichRenderer, message: str) -> None
         renderer.handle(event)
         if event.get("type") == "error":
             break
+    await renderer.finish_run()
     renderer.newline()
 
 
