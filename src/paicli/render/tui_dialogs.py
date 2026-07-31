@@ -256,7 +256,12 @@ class InlinePlanReview(Static):
         width: 100%;
         height: auto;
         margin: 0 0 1 0;
-        padding: 0 1;
+        padding: 0;
+        background: transparent;
+        border: none;
+    }
+    InlinePlanReview:focus {
+        border: none;
     }
     InlinePlanReview .decision-title {
         height: 1;
@@ -268,8 +273,6 @@ class InlinePlanReview(Static):
     InlinePlanReview .plan-detail {
         display: none;
         height: auto;
-        max-height: 12;
-        overflow-y: auto;
     }
     InlinePlanReview.expanded .plan-detail {
         display: block;
@@ -282,12 +285,44 @@ class InlinePlanReview(Static):
         display: block;
     }
     InlinePlanReview .decision-actions {
-        height: 3;
+        width: auto;
+        height: 1;
         margin-top: 1;
+    }
+    InlinePlanReview .decision-actions Button {
+        width: auto;
+        min-width: 0;
+        height: 1;
+        margin-right: 1;
+        padding: 0 1;
+        border: none !important;
+        background: transparent !important;
+        text-style: bold;
+    }
+    InlinePlanReview .decision-actions Button:hover,
+    InlinePlanReview .decision-actions Button:focus,
+    InlinePlanReview .decision-actions Button.-active {
+        border: none !important;
+        background: transparent !important;
+        text-style: underline bold;
+    }
+    InlinePlanReview .plan-execute {
+        color: #a8ff60 !important;
+    }
+    InlinePlanReview .plan-expand {
+        color: #60d8ff !important;
+    }
+    InlinePlanReview .plan-supplement-action {
+        color: #c084fc !important;
+    }
+    InlinePlanReview .plan-cancel {
+        color: #ff4d5a !important;
     }
     InlinePlanReview.resolved {
         height: 1;
         margin: 0;
+        background: transparent;
+        border: none;
     }
     InlinePlanReview.resolved .plan-summary,
     InlinePlanReview.resolved .plan-detail,
@@ -331,10 +366,14 @@ class InlinePlanReview(Static):
             classes="plan-supplement",
         )
         with Horizontal(classes="decision-actions"):
-            yield Button("Execute [Enter]", variant="success", name="execute")
-            yield Button("Expand [Ctrl+O]", name="expand")
-            yield Button("Supplement [I]", name="supplement")
-            yield Button("Cancel [Esc]", variant="error", name="cancel")
+            yield Button("Execute [Enter]", name="execute", classes="plan-execute")
+            yield Button("Expand [Ctrl+O]", name="expand", classes="plan-expand")
+            yield Button(
+                "Supplement [I]",
+                name="supplement",
+                classes="plan-supplement-action",
+            )
+            yield Button("Cancel [Esc]", name="cancel", classes="plan-cancel")
 
     async def wait(self) -> PlanReviewDecision:
         return await self._future

@@ -1445,6 +1445,8 @@ def test_approval_screen_approve_returns_approve():
 
 
 def test_app_reviews_plan_inline_without_changing_screen():
+    from textual.widgets import Button
+
     from paicli.plan import ExecutionPlan, PlanTask, TaskType
     from paicli.render.tui_dialogs import InlinePlanReview, PlanReviewScreen
 
@@ -1469,6 +1471,10 @@ def test_app_reviews_plan_inline_without_changing_screen():
             assert not isinstance(app.screen, PlanReviewScreen)
             assert app.query_one(CommandInput).disabled is True
             assert "read file" in review_widget.plain_text
+            buttons = list(review_widget.query(Button))
+            assert len(buttons) == 4
+            assert all(button.size.height == 1 for button in buttons)
+            assert max(button.size.width for button in buttons) < 24
 
             await pilot.press("enter")
             await pilot.pause()
