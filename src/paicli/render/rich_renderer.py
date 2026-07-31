@@ -6,7 +6,7 @@ from typing import Any
 
 from rich import box
 from rich.align import Align
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -104,6 +104,8 @@ class RichRenderer:
         # Per-task streaming buffers
         self._task_buffers: dict[str, list[str]] = {}
         self._task_thinking_buffers: dict[str, list[str]] = {}
+        self._task_typewriters: dict[tuple[str, str], TypewriterBuffer] = {}
+        self._task_live: Live | None = None
         self._context_usage = ContextUsageState()
 
     def set_context_window(self, context_window: int | None) -> None:
@@ -123,6 +125,7 @@ class RichRenderer:
         self._final_output_pending = False
         self._stop_live_markdown()
         self._stop_live_thinking()
+        self._stop_task_live()
         # Start a new accounting scope while preserving the last displayed
         # request metrics until the next usage event arrives.
         self._input_tokens = 0
@@ -130,6 +133,7 @@ class RichRenderer:
         self._cached_tokens = 0
         self._task_buffers.clear()
         self._task_thinking_buffers.clear()
+        self._task_typewriters.clear()
         self._run_start_time = time.monotonic()
         self._phase = "running"
 
@@ -419,11 +423,13 @@ class RichRenderer:
             text = str(event.get("text") or "")
             if task_id and task_id in self._task_buffers:
                 self._task_buffers[task_id].append(text)
+                self._queue_task_text(task_id, "assistant", text)
         elif event_type == "task_thinking_delta":
             task_id = event.get("task_id")
             thinking = str(event.get("thinking") or "")
             if task_id and task_id in self._task_thinking_buffers:
                 self._task_thinking_buffers[task_id].append(thinking)
+                self._queue_task_text(task_id, "thinking", thinking)
         elif event_type == "task_tool_call":
             task_id = event.get("task_id")
             self._flush_task_thinking(task_id)
@@ -538,6 +544,7 @@ class RichRenderer:
             return
         # Only one Live instance per Console — stop thinking Live first
         self._stop_live_thinking()
+        self._stop_task_live()
         if self._live is None:
             self._live = Live(
                 console=self.console,
@@ -585,6 +592,7 @@ class RichRenderer:
             return
         # Only one Live instance per Console — stop text Live first
         self._stop_live_markdown()
+        self._stop_task_live()
         if self._thinking_live is None:
             self._thinking_live = Live(
                 console=self.console,
@@ -732,6 +740,70 @@ class RichRenderer:
 
     # -- Task output helpers -----------------------------------------------
 
+    def _new_task_typewriter(self) -> TypewriterBuffer:
+        return TypewriterBuffer(
+            enabled=self._text_typewriter.enabled,
+            chars_per_second=self._text_typewriter.chars_per_second,
+            max_chars_per_second=self._text_typewriter.max_chars_per_second,
+            frame_rate=self._text_typewriter.frame_rate,
+        )
+
+    def _queue_task_text(self, task_id: str, role: str, text: str) -> None:
+        if not text or not self._text_typewriter.enabled:
+            return
+        key = (task_id, role)
+        buffer = self._task_typewriters.get(key)
+        if buffer is None:
+            buffer = self._new_task_typewriter()
+            self._task_typewriters[key] = buffer
+        buffer.feed(text)
+        self._update_live_tasks()
+
+    def _update_live_tasks(self) -> None:
+        if not self._task_typewriters or not self.console.is_terminal:
+            return
+        self._stop_live_markdown()
+        self._stop_live_thinking()
+        if self._task_live is None:
+            self._task_live = Live(
+                console=self.console,
+                refresh_per_second=self._live_refresh_rate,
+                transient=True,
+                vertical_overflow="visible",
+                get_renderable=self._live_tasks_renderable,
+            )
+            self._task_live.start(refresh=True)
+
+    def _live_tasks_renderable(self) -> Any:
+        panels: list[Any] = []
+        for (task_id, role), buffer in self._task_typewriters.items():
+            buffer.advance()
+            text = buffer.visible_text or " "
+            if role == "thinking":
+                body: Any = Text(text, style="dim")
+                title = Text(
+                    f"\U0001f9e0 \u4efb\u52a1\u601d\u8003 \u00b7 {task_id}", style="bold #c084fc"
+                )
+                border_style = "#6d28d9"
+            else:
+                body = Markdown(text)
+                title = Text(
+                    f"\U0001f916 \u4efb\u52a1\u8f93\u51fa \u00b7 {task_id}", style="bold #a8ff60"
+                )
+                border_style = "#3f3f46"
+            panels.append(_output_panel(body, title=title, border_style=border_style))
+        return Group(*panels) if panels else Text(" ")
+
+    def _stop_task_live(self) -> None:
+        if self._task_live is None:
+            return
+        self._task_live.stop()
+        self._task_live = None
+
+    def _restart_task_live(self) -> None:
+        if self._task_typewriters:
+            self._update_live_tasks()
+
     def _flush_task_output(self, task_id: str | None) -> None:
         if not task_id:
             return
@@ -748,6 +820,10 @@ class RichRenderer:
             return
         text = "".join(buffer)
         buffer.clear()
+        self._stop_task_live()
+        typewriter = self._task_typewriters.pop((task_id, "assistant"), None)
+        if typewriter is not None:
+            typewriter.flush()
         if text.strip():
             self.console.print(
                 _output_panel(
@@ -759,6 +835,7 @@ class RichRenderer:
                     border_style="#3f3f46",
                 )
             )
+        self._restart_task_live()
 
     def _flush_task_thinking(self, task_id: str | None) -> None:
         if not task_id or task_id not in self._task_thinking_buffers:
@@ -768,6 +845,10 @@ class RichRenderer:
             return
         text = "".join(buffer)
         buffer.clear()
+        self._stop_task_live()
+        typewriter = self._task_typewriters.pop((task_id, "thinking"), None)
+        if typewriter is not None:
+            typewriter.flush()
         if text.strip():
             self.console.print(
                 _output_panel(
@@ -779,6 +860,7 @@ class RichRenderer:
                     border_style="#6d28d9",
                 )
             )
+        self._restart_task_live()
 
     # -- Run summary and cost tracking ------------------------------------
 

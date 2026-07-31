@@ -131,6 +131,30 @@ def test_rich_typewriter_drains_final_output_asynchronously():
     assert "Final Output" in stream.getvalue()
 
 
+def test_rich_typewriter_keeps_parallel_task_display_queues_isolated():
+    stream = StringIO()
+    renderer = RichRenderer(
+        console=Console(file=stream, force_terminal=True, width=120),
+        live_markdown=True,
+        typewriter_enabled=True,
+        typewriter_chars_per_second=1,
+        typewriter_max_chars_per_second=1,
+    )
+    renderer.start_run()
+    for task_id in ("a", "b"):
+        renderer.handle({"type": "task_started", "task": {"id": task_id, "type": "COMMAND"}})
+        renderer.handle(
+            {"type": "task_text_delta", "task_id": task_id, "text": f"{task_id}-output"}
+        )
+
+    renderer.handle({"type": "task_completed", "task_id": "a"})
+
+    assert "a-output" in stream.getvalue()
+    assert ("a", "assistant") not in renderer._task_typewriters
+    assert renderer._task_typewriters[("b", "assistant")].pending_length > 0
+    renderer.handle({"type": "task_completed", "task_id": "b"})
+
+
 def test_text_deltas_render_as_markdown_on_turn_complete():
     stream = StringIO()
     console = Console(file=stream, color_system=None, width=120)
