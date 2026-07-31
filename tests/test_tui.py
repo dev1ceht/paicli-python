@@ -1888,13 +1888,21 @@ def test_agent_session_persistence_runs_off_ui_thread_in_event_order():
             self,
             assistant_text: str,
             *,
+            reasoning_content: str | None = None,
             context_checkpoint: dict | None = None,
         ) -> None:
             assert assistant_text == "done"
+            assert reasoning_content is None
             self.context_checkpoint = context_checkpoint
             self._record("complete_turn")
 
-        def interrupt_turn(self, assistant_text: str, *, reason: str) -> None:
+        def interrupt_turn(
+            self,
+            assistant_text: str,
+            *,
+            reasoning_content: str | None = None,
+            reason: str,
+        ) -> None:
             self._record("interrupt_turn")
 
         def close(self) -> None:

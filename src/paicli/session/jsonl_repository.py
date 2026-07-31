@@ -160,6 +160,7 @@ class SessionRepository:
         *,
         role: str,
         content: str,
+        reasoning_content: str | None = None,
         partial: bool = False,
         interruption_reason: str | None = None,
         turn_id: str | None = None,
@@ -172,6 +173,8 @@ class SessionRepository:
             partial=partial,
             interruption_reason=interruption_reason,
         )
+        if reasoning_content:
+            payload["parts"][0]["metadata"]["reasoning_content"] = reasoning_content
         event = self.append_event(
             session_id,
             event_type,
@@ -202,6 +205,7 @@ class SessionRepository:
         *,
         turn_id: str,
         assistant_content: str,
+        reasoning_content: str | None = None,
         context_checkpoint: dict[str, Any] | None = None,
         **_: Any,
     ) -> SessionMessage:
@@ -209,6 +213,7 @@ class SessionRepository:
             session_id,
             role="assistant",
             content=assistant_content,
+            reasoning_content=reasoning_content,
             turn_id=turn_id,
         )
         self.append_event(
@@ -227,6 +232,7 @@ class SessionRepository:
         *,
         turn_id: str,
         assistant_content: str,
+        reasoning_content: str | None = None,
         reason: str,
         **_: Any,
     ) -> SessionMessage | None:
@@ -243,11 +249,12 @@ class SessionRepository:
                 session_id,
                 role="assistant",
                 content=assistant_content,
+                reasoning_content=reasoning_content,
                 partial=True,
                 interruption_reason=reason,
                 turn_id=turn_id,
             )
-            if assistant_content
+            if assistant_content or reasoning_content
             else None
         )
         self.append_event(
