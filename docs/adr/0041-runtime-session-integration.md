@@ -1,5 +1,8 @@
 # Runtime Session Integration
 
+> Superseded by ADR 0043. Runtime conversation history uses Session JSONL, while task lifecycle,
+> checkpoints, and approvals use an independent `tasks.db`.
+
 PaiCLI uses the user-level Session database as the sole durable store for Runtime threads and
 Background Tasks. The former `runtime.db` thread/event store and `tasks.db` task store are not
 opened, migrated, or used.

@@ -32,14 +32,6 @@ def validate_event_payload(event_type: str, payload: dict[str, Any]) -> None:
         messages = payload.get("messages")
         if not isinstance(messages, list):
             raise TypeError("context checkpoint messages must be a JSON array")
-        messages_content_hash = payload.get("messages_content_hash")
-        if messages_content_hash is not None:
-            _require_non_empty_string(payload, "messages_content_hash")
-            if messages:
-                raise ValueError("blob-backed context checkpoint messages must not be inline")
-            messages_count = payload.get("messages_count")
-            if not isinstance(messages_count, int) or messages_count < 0:
-                raise TypeError("context checkpoint messages_count must be non-negative")
         for message in messages:
             if not isinstance(message, dict):
                 raise TypeError("context checkpoint message must be a JSON object")

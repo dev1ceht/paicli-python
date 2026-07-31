@@ -38,7 +38,7 @@ from paicli.prompt.project_memory import ProjectMemoryLoader
 from paicli.rag import CodeIndex
 from paicli.render import PaiCliApp, RichRenderer
 from paicli.runtime import DurableTaskManager
-from paicli.session import SessionRepository, default_session_database_path
+from paicli.session import SessionRepository, default_session_directory
 from paicli.skill import SkillRegistry
 from paicli.snapshot import SnapshotService
 from paicli.tools import ToolRegistry
@@ -86,7 +86,10 @@ HELP_LINES = [
     "/session archive - 归档当前会话",
     "/session delete - 将当前会话移入回收站",
     "/session restore <session-id> - 从回收站恢复会话",
-    ("持久化：会话、Runtime thread 和后台任务统一保存在 ~/.paicli/sessions/sessions.db"),
+    (
+        "持久化：完整 Session 保存在 ~/.paicli/sessions/*.jsonl，"
+        "后台任务状态保存在 ~/.paicli/runtime/tasks.db"
+    ),
     "后台任务是提交会话的 child Session",
     "后台任务的对话历史、工具调用状态和待审批状态会持久化",
     "中断的运行中任务不会自动重试，可使用 /task retry",
@@ -202,7 +205,7 @@ async def start_repl(cwd: str, config: PaiCliConfig) -> None:
         registry=registry,
         mcp_manager=mcp_manager,
         console=console,
-        session_repository=SessionRepository(default_session_database_path()),
+        session_repository=SessionRepository(default_session_directory()),
     )
     tui_app._model = client.model_name
     tui_app._context_window = client.max_context_window
@@ -817,8 +820,11 @@ def _skill_command(arg: str, console: Console, cwd: str) -> None:
 
 
 def _task_command(arg: str, console: Console) -> None:
+    from paicli.runtime import default_task_database_path
+
     manager = DurableTaskManager(
-        SessionRepository(default_session_database_path()),
+        default_task_database_path(),
+        session_repository=SessionRepository(default_session_directory()),
         workspace_root=Path.cwd(),
     )
     sub, _, rest = arg.partition(" ")

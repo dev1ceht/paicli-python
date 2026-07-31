@@ -25,12 +25,19 @@ the Session that created or owns it.
 _Avoid_: foreign-key metadata, task reference
 
 **Queued task**:
-A background task accepted for execution but not yet exclusively claimed by a worker.
+A background task accepted for execution but not yet started by the local scheduler.
 _Avoid_: pending task, enqueued task
 
-**Exclusive task claim**:
-The single successful transition of a queued task to `running` by one worker, even when workers compete concurrently.
-_Avoid_: dequeue, task pickup
+**Task repository**:
+The independent SQLite store at `~/.paicli/runtime/tasks.db` containing Background-task
+lifecycle state, execution checkpoints, and approval decisions. Agent conversation history does
+not live there.
+_Avoid_: Session database, task Session
+
+**Single-process task scheduler**:
+The local scheduler that transitions one queued Background task at a time to `running`; it has
+no distributed ownership token, renewable claim, or multi-worker coordination contract.
+_Avoid_: worker lease, distributed queue
 
 **Terminal task status**:
 One of `completed`, `failed`, or `canceled`; a task in a terminal status cannot transition again.
@@ -151,9 +158,17 @@ _Avoid_: model context utilization, cache hit rate, billing completeness guarant
 A durable tool call that has been accepted from an Assistant model turn but has not yet been paired with a conclusive Tool result. Its local call payload, safety classification, execution status, and approval status support restart recovery without trusting model replay.
 _Avoid_: background task, child Agent, queued task
 
-**Session write lease**:
-A renewable, expiring ownership token that permits one interactive process to mutate a Session while allowing another process to use a different Session in the same workspace.
-_Avoid_: database lock, permanent ownership, process mutex
+**Session JSONL**:
+The complete append-only file for one Session. Its first line is the Session header and each
+following line is a Session Entry; workspace directories are discovered by hash and Session
+catalog views are rebuilt by scanning files rather than querying SQLite.
+_Avoid_: Session database, event table
+
+**Session Entry**:
+One append-only JSON object in a Session JSONL file. Its `id` and optional `parentId` form the
+Session's branch tree, while its type and payload carry messages, Turns, tool actions, usage,
+and lifecycle facts.
+_Avoid_: database row, WAL record
 
 **Unknown execution outcome**:
 The conservative result assigned when PaiCLI restarted or was interrupted after a side-effecting tool began but before its result became durable. Such a call is never automatically repeated; the model receives a paired Tool error directing it to inspect current state first.

@@ -1,5 +1,7 @@
 # SQLite Session Event Store
 
+> Superseded by ADR 0043. This file records the former SQLite Session design.
+
 PaiCLI will persist interactive sessions in a user-level SQLite database at
 `~/.paicli/sessions/sessions.db`. TUI, REPL, and Runtime API integration will share this
 repository in later delivery phases. Project directories do not own session databases; each

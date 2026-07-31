@@ -5,23 +5,6 @@ from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
-class BlobReference:
-    content_hash: str
-    role: str
-
-
-@dataclass(frozen=True, slots=True)
-class StoredBlob:
-    content_hash: str
-    content_type: str
-    compression: str
-    original_size: int
-    stored_size: int
-    data: bytes
-    created_at: str
-
-
-@dataclass(frozen=True, slots=True)
 class SessionRecord:
     id: str
     workspace_root: str
@@ -41,16 +24,6 @@ class SessionRecord:
     model: str | None = None
     last_checkpoint_id: str | None = None
     last_compacted_at: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class SessionLease:
-    session_id: str
-    owner_id: str
-    token: str
-    acquired_at: str
-    refreshed_at: str
-    expires_at: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,13 +72,9 @@ class SessionEvent:
     payload: dict[str, Any]
     schema_version: int
     created_at: str
-    previous_event_hash: str | None
-    event_hash: str
     turn_id: str | None = None
-    idempotency_key: str | None = None
     source_session_id: str | None = None
     source_event_id: str | None = None
-    blob_refs: tuple[BlobReference, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

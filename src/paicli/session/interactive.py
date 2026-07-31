@@ -1,21 +1,18 @@
 from __future__ import annotations
 
-import asyncio
-import sqlite3
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
-from paicli.session.errors import SessionLeaseConflictError
-from paicli.session.models import SessionLease, SessionMessage, SessionRecord, ToolActionSpec
-from paicli.session.repository import SessionRepository
+from paicli.session.jsonl_repository import SessionRepository
+from paicli.session.models import SessionMessage, SessionRecord, ToolActionSpec
 from paicli.session.stats import SessionStats, calculate_session_stats
 from paicli.types import Message, Role
 from paicli.usage import UsageRecord
 
 
-def default_session_database_path() -> Path:
-    return Path.home() / ".paicli" / "sessions" / "sessions.db"
+def default_session_directory() -> Path:
+    return Path.home() / ".paicli" / "sessions"
 
 
 class InteractiveSession:
@@ -30,18 +27,13 @@ class InteractiveSession:
     ) -> None:
         self.repository = repository
         self.workspace_root = str(Path(workspace_root).expanduser().resolve())
-        self._owner_id = f"interactive_{uuid4().hex}"
-        self.record, self._lease = self._open_session(session_id)
+        self.record = self._open_session(session_id)
         self._active_turn_id = self._find_active_turn_id()
         self._stats_snapshot = self.refresh_stats()
 
     @property
     def id(self) -> str:
         return self.record.id
-
-    @property
-    def lease_token(self) -> str:
-        return self._lease.token
 
     @property
     def session_history(self) -> tuple[SessionMessage, ...]:
@@ -168,7 +160,6 @@ class InteractiveSession:
                         "by approval policy."
                     ),
                     is_error=True,
-                    lease_token=self._lease.token,
                 )
             elif action.status in {"prepared", "waiting_approval"} or (
                 action.status == "executing" and action.is_read_only and action.is_idempotent
@@ -179,7 +170,6 @@ class InteractiveSession:
                     self.id,
                     action.tool_call_id,
                     reason="process_restarted",
-                    lease_token=self._lease.token,
                 )
         view = self.repository.rebuild_session_view(self.id)
         return {
@@ -227,14 +217,12 @@ class InteractiveSession:
                 )
                 for action in actions
             ),
-            lease_token=self._lease.token,
         )
 
     def start_tool_action(self, tool_call_id: str) -> None:
         self.repository.start_tool_action(
             self.id,
             tool_call_id,
-            lease_token=self._lease.token,
         )
 
     def complete_tool_action(
@@ -249,7 +237,6 @@ class InteractiveSession:
             tool_call_id,
             content=content,
             is_error=is_error,
-            lease_token=self._lease.token,
         )
 
     def record_usage(self, record: UsageRecord) -> None:
@@ -258,7 +245,6 @@ class InteractiveSession:
             self.id,
             record,
             turn_id=turn_id,
-            lease_token=self._lease.token,
         )
         self.refresh_stats()
 
@@ -279,7 +265,6 @@ class InteractiveSession:
         self.repository.request_tool_approval(
             self.id,
             tool_call_id,
-            lease_token=self._lease.token,
         )
         return tool_call_id
 
@@ -295,7 +280,6 @@ class InteractiveSession:
             tool_call_id,
             decision=decision,
             deferred_execution=deferred_execution,
-            lease_token=self._lease.token,
         )
 
     def begin_turn(self, message: str) -> str:
@@ -306,7 +290,6 @@ class InteractiveSession:
             self.id,
             turn_id=turn_id,
             user_content=message,
-            lease_token=self._lease.token,
         )
         self._active_turn_id = turn_id
         return turn_id
@@ -323,7 +306,6 @@ class InteractiveSession:
             turn_id=turn_id,
             assistant_content=assistant_text,
             context_checkpoint=context_checkpoint,
-            lease_token=self._lease.token,
         )
         self._active_turn_id = None
         self.refresh_stats()
@@ -337,7 +319,6 @@ class InteractiveSession:
             turn_id=turn_id,
             assistant_content=assistant_text,
             reason=reason,
-            lease_token=self._lease.token,
         )
         self._active_turn_id = None
         self.refresh_stats()
@@ -345,7 +326,7 @@ class InteractiveSession:
     def reset_context(self) -> None:
         if self._active_turn_id is not None:
             raise RuntimeError("cannot reset context during an active turn")
-        self.repository.reset_context(self.id, lease_token=self._lease.token)
+        self.repository.reset_context(self.id)
 
     def save_context_checkpoint(self, checkpoint: dict[str, Any]) -> bool:
         if self._active_turn_id is not None:
@@ -353,7 +334,6 @@ class InteractiveSession:
         return self.repository.save_context_checkpoint(
             self.id,
             checkpoint,
-            lease_token=self._lease.token,
         )
 
     def save_context_summary_usage(
@@ -370,7 +350,6 @@ class InteractiveSession:
             provider=provider,
             model=model,
             records=records,
-            lease_token=self._lease.token,
         )
         self.refresh_stats()
 
@@ -392,7 +371,6 @@ class InteractiveSession:
         self.record = self.repository.update_session_metadata(
             self.id,
             title=normalized,
-            lease_token=self._lease.token,
         )
         return self.record
 
@@ -425,21 +403,8 @@ class InteractiveSession:
         self._require_idle()
         record = self._resolve_workspace_session(session_id, allow_archived=True)
         if record.archived_at is not None:
-            next_lease = self.repository.acquire_session_lease(
-                record.id,
-                owner_id=self._owner_id,
-            )
-            try:
-                record = self.repository.unarchive_session(
-                    session_id,
-                    lease_token=next_lease.token,
-                )
-            except Exception:
-                self.repository.release_session_lease(record.id, next_lease.token)
-                raise
-            self._switch_to(record, next_lease=next_lease)
-        else:
-            self._switch_to(record)
+            record = self.repository.unarchive_session(session_id)
+        self._switch_to(record)
         return self.record
 
     def fork_session(self, *, title: str | None = None) -> SessionRecord:
@@ -448,27 +413,20 @@ class InteractiveSession:
             self.id,
             workspace_root=self.workspace_root,
             title=title,
-            lease_token=self._lease.token,
         )
         self._switch_to(record)
         return self.record
 
     def archive_session(self) -> tuple[SessionRecord, SessionRecord]:
         self._require_idle()
-        archived = self.repository.archive_session(
-            self.id,
-            lease_token=self._lease.token,
-        )
+        archived = self.repository.archive_session(self.id)
         replacement = self.repository.create_session(self.workspace_root)
         self._switch_to(replacement)
         return archived, replacement
 
     def delete_session(self) -> tuple[SessionRecord, SessionRecord]:
         self._require_idle()
-        deleted = self.repository.delete_session(
-            self.id,
-            lease_token=self._lease.token,
-        )
+        deleted = self.repository.delete_session(self.id)
         replacement = self.repository.create_session(self.workspace_root)
         self._switch_to(replacement)
         return deleted, replacement
@@ -482,104 +440,12 @@ class InteractiveSession:
         )
         if record.deleted_at is None:
             raise ValueError(f"session is not deleted: {session_id}")
-        next_lease = self.repository.acquire_session_lease(
-            record.id,
-            owner_id=self._owner_id,
-        )
-        try:
-            restored = self.repository.restore_session(
-                session_id,
-                lease_token=next_lease.token,
-            )
-        except Exception:
-            self.repository.release_session_lease(record.id, next_lease.token)
-            raise
-        self._switch_to(restored, next_lease=next_lease)
+        restored = self.repository.restore_session(session_id)
+        self._switch_to(restored)
         return self.record
 
-    def _request_refreshed_lease(
-        self,
-        session_id: str,
-        lease_token: str,
-        *,
-        lock_timeout_seconds: float,
-    ) -> SessionLease:
-        try:
-            return self.repository.refresh_session_lease(
-                session_id,
-                lease_token,
-                lock_timeout_seconds=lock_timeout_seconds,
-            )
-        except SessionLeaseConflictError:
-            return self.repository.acquire_session_lease(
-                session_id,
-                owner_id=self._owner_id,
-                lock_timeout_seconds=lock_timeout_seconds,
-            )
-
-    def refresh_lease(self) -> None:
-        session_id = self.id
-        lease_token = self._lease.token
-        next_lease = self._request_refreshed_lease(
-            session_id,
-            lease_token,
-            lock_timeout_seconds=5.0,
-        )
-        if self.id == session_id and self._lease.token == lease_token:
-            self._lease = next_lease
-
-    async def refresh_lease_async(
-        self,
-        *,
-        retry_delays: tuple[float, ...] = (0.2, 0.5, 1.0),
-        lock_timeout_seconds: float = 0.2,
-    ) -> bool:
-        """Refresh the Session lease without blocking an async caller's event loop."""
-        if lock_timeout_seconds < 0:
-            raise ValueError("lock_timeout_seconds must be non-negative")
-        if any(delay < 0 for delay in retry_delays):
-            raise ValueError("retry delays must be non-negative")
-
-        session_id = self.id
-        lease_token = self._lease.token
-        next_lease: SessionLease | None = None
-        for attempt in range(len(retry_delays) + 1):
-            try:
-                refresh_task = asyncio.create_task(
-                    asyncio.to_thread(
-                        self._request_refreshed_lease,
-                        session_id,
-                        lease_token,
-                        lock_timeout_seconds=lock_timeout_seconds,
-                    )
-                )
-                try:
-                    next_lease = await asyncio.shield(refresh_task)
-                except asyncio.CancelledError:
-                    await asyncio.gather(refresh_task, return_exceptions=True)
-                    raise
-                break
-            except sqlite3.OperationalError as exc:
-                is_locked = "locked" in str(exc).lower()
-                if not is_locked or attempt >= len(retry_delays):
-                    raise
-                await asyncio.sleep(retry_delays[attempt])
-
-        if next_lease is None:  # pragma: no cover - loop either returns a lease or raises
-            return False
-        if self.id != session_id or self._lease.token != lease_token:
-            if next_lease.token != lease_token:
-                await asyncio.to_thread(
-                    self.repository.release_session_lease,
-                    session_id,
-                    next_lease.token,
-                )
-            return False
-        self._lease = next_lease
-        return True
-
     def close(self) -> None:
-        self.repository.release_session_lease(self.id, self._lease.token)
+        """Close the Session lifecycle hook; JSONL writers hold no persistent resource."""
 
     def _require_active_turn(self) -> str:
         if self._active_turn_id is None:
@@ -593,52 +459,24 @@ class InteractiveSession:
     def _open_session(
         self,
         session_id: str | None,
-    ) -> tuple[SessionRecord, SessionLease]:
+    ) -> SessionRecord:
         if session_id is not None:
-            record = self._resolve_workspace_session(session_id)
-            return record, self.repository.acquire_session_lease(
-                record.id,
-                owner_id=self._owner_id,
-            )
+            return self._resolve_workspace_session(session_id)
         for record in self.repository.list_sessions():
             if record.workspace_root != self.workspace_root or record.status == "corrupt":
                 continue
-            try:
-                lease = self.repository.acquire_session_lease(
-                    record.id,
-                    owner_id=self._owner_id,
-                )
-            except SessionLeaseConflictError:
-                continue
-            return record, lease
-        record = self.repository.create_session(self.workspace_root)
-        return record, self.repository.acquire_session_lease(
-            record.id,
-            owner_id=self._owner_id,
-        )
+            return record
+        return self.repository.create_session(self.workspace_root)
 
     def _switch_to(
         self,
         record: SessionRecord,
-        *,
-        next_lease: SessionLease | None = None,
     ) -> None:
         if record.id == self.id:
-            self._lease = next_lease or self.repository.acquire_session_lease(
-                record.id,
-                owner_id=self._owner_id,
-            )
             return
-        acquired_lease = next_lease or self.repository.acquire_session_lease(
-            record.id, owner_id=self._owner_id
-        )
-        previous_id = self.id
-        previous_token = self._lease.token
         self.record = record
-        self._lease = acquired_lease
         self._active_turn_id = self._find_active_turn_id()
         self.refresh_stats()
-        self.repository.release_session_lease(previous_id, previous_token)
 
     def _find_active_turn_id(self) -> str | None:
         active: str | None = None

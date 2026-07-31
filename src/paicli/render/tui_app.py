@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sqlite3
 import sys
 import time
 from contextlib import suppress
@@ -156,7 +155,6 @@ class PaiCliApp(App):
         self._task_buffers: dict[str, list[str]] = {}
         self._task_thinking_buffers: dict[str, list[str]] = {}
         self._context_usage = ContextUsageState()
-        self._lease_refresh_delayed = False
 
     @property
     def session_id(self) -> str | None:
@@ -181,15 +179,16 @@ class PaiCliApp(App):
         self.set_interval(2.0, self._refresh_git_branch)
         self._show_banner()
         self._show_restored_session_history()
-        if self._interactive_session is not None:
-            self.set_interval(20, self._refresh_session_lease)
-            if self._interactive_session.discard_incomplete_turn(
+        if (
+            self._interactive_session is not None
+            and self._interactive_session.discard_incomplete_turn(
                 reason="process_restarted",
-            ):
-                self.query_one("#chat-log", ChatLog).add_info(
-                    "[yellow]Previous incomplete turn was marked interrupted; "
-                    "it was not resumed.[/yellow]"
-                )
+            )
+        ):
+            self.query_one("#chat-log", ChatLog).add_info(
+                "[yellow]Previous incomplete turn was marked interrupted; "
+                "it was not resumed.[/yellow]"
+            )
         self.call_after_refresh(self.query_one(TextArea).focus)
 
     def on_unmount(self) -> None:
@@ -209,40 +208,6 @@ class PaiCliApp(App):
         self._git_branch = branch
         with suppress(NoMatches):
             self._update_status_bar()
-
-    async def _refresh_session_lease(self) -> None:
-        session = self._interactive_session
-        if session is None:
-            return
-        try:
-            refreshed = await session.refresh_lease_async()
-        except sqlite3.OperationalError as exc:
-            if "locked" in str(exc).lower():
-                if self._interactive_session is session and not self._lease_refresh_delayed:
-                    self.query_one("#chat-log", ChatLog).add_info(
-                        "[yellow]Session lease refresh delayed by database activity; "
-                        "retrying in the background.[/yellow]"
-                    )
-                    self._lease_refresh_delayed = True
-                return
-            self._handle_session_lease_loss(session, exc)
-        except Exception as exc:
-            self._handle_session_lease_loss(session, exc)
-        else:
-            if refreshed and self._interactive_session is session:
-                self._lease_refresh_delayed = False
-
-    def _handle_session_lease_loss(self, session: Any, exc: Exception) -> None:
-        if self._interactive_session is not session:
-            return
-        self.query_one("#chat-log", ChatLog).add_info(
-            f"[bold red]Session lease lost:[/bold red] {exc}"
-        )
-        self._agent_running = False
-        self._phase = "idle"
-        if self._worker is not None and self._worker.is_running:
-            self._worker.cancel()
-        self._update_status_bar()
 
     def _show_banner(self) -> None:
         """Display a startup banner in the chat log."""
@@ -1514,9 +1479,7 @@ class PaiCliApp(App):
 
             before = float(result.pressure_before.pressure_ratio) * 100
             after = float(result.pressure_after.pressure_ratio) * 100
-            chat_log.add_info(
-                f"[green]上下文已压缩：{before:.0f}% → {after:.0f}%[/green]"
-            )
+            chat_log.add_info(f"[green]上下文已压缩：{before:.0f}% → {after:.0f}%[/green]")
             build_context_event = getattr(self.agent, "context_usage_event", None)
             context_event = build_context_event() if callable(build_context_event) else None
             if context_event:
@@ -1821,24 +1784,20 @@ class PaiCliApp(App):
         chat_log.add_info(f"Browser mode: {state.mode}{suffix}")
 
     def _task_command_info(self, arg: str, chat_log: ChatLog) -> None:
-        from paicli.runtime import DurableTaskManager
-        from paicli.session import SessionRepository, default_session_database_path
+        from paicli.runtime import DurableTaskManager, default_task_database_path
+        from paicli.session import SessionRepository, default_session_directory
 
         repository = (
             self._interactive_session.repository
             if self._interactive_session is not None
-            else SessionRepository(default_session_database_path())
+            else SessionRepository(default_session_directory())
         )
         manager = DurableTaskManager(
-            repository,
+            default_task_database_path(),
+            session_repository=repository,
             workspace_root=self.cwd,
             parent_session_id=(
                 self._interactive_session.id if self._interactive_session is not None else None
-            ),
-            parent_lease_token=(
-                self._interactive_session.lease_token
-                if self._interactive_session is not None
-                else None
             ),
         )
         sub, _, rest = arg.partition(" ")

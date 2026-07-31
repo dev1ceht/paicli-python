@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
@@ -11,8 +9,6 @@ from paicli.session.models import MessagePart, SessionEvent, SessionMessage, Ses
 def rebuild_session_view(
     session_id: str,
     events: list[SessionEvent],
-    *,
-    blob_loader: Callable[[str], bytes] | None = None,
 ) -> SessionView:
     metadata: dict[str, Any] = {}
     session_history: list[SessionMessage] = []
@@ -45,13 +41,6 @@ def rebuild_session_view(
             continue
         if event.type == "context.checkpoint_created":
             checkpoint_messages = event.payload.get("messages")
-            messages_content_hash = event.payload.get("messages_content_hash")
-            if messages_content_hash:
-                if blob_loader is None:
-                    raise ValueError("context checkpoint blob requires a blob loader")
-                checkpoint_messages = json.loads(
-                    blob_loader(str(messages_content_hash)).decode("utf-8")
-                )
             if not isinstance(checkpoint_messages, list):
                 raise TypeError("context checkpoint messages must be a JSON array")
             context_checkpoint = {
@@ -83,7 +72,7 @@ def rebuild_session_view(
             continue
         if not event.type.startswith("message."):
             continue
-        message = message_from_event(event, blob_loader=blob_loader)
+        message = message_from_event(event)
         session_history.append(message)
         if message.replayable and not message.hidden and message.status == "complete":
             model_messages.append(message)
@@ -99,11 +88,7 @@ def rebuild_session_view(
     )
 
 
-def message_from_event(
-    event: SessionEvent,
-    *,
-    blob_loader: Callable[[str], bytes] | None = None,
-) -> SessionMessage:
+def message_from_event(event: SessionEvent) -> SessionMessage:
     payload = event.payload
     message_id = payload.get("message_id")
     role = payload.get("role")
@@ -125,14 +110,10 @@ def message_from_event(
         raw_content = part.get("content", "")
         if not isinstance(raw_content, str):
             raise TypeError("message part content must be a string")
-        content = raw_content
-        content_hash = metadata.get("content_hash")
-        if not content and content_hash and blob_loader is not None:
-            content = blob_loader(str(content_hash)).decode("utf-8")
         parts.append(
             MessagePart(
                 kind=str(part.get("kind") or "text"),
-                content=content,
+                content=raw_content,
                 metadata=metadata,
             )
         )

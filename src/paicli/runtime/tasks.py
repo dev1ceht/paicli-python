@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-import json
-import sqlite3
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
 from paicli.clock import filename_timestamp, now_timestamp, parse_timestamp
-from paicli.session import SessionRepository
-from paicli.session.schema import connect
+from paicli.runtime.task_repository import TaskRepository
+from paicli.session import SessionRepository, default_session_directory
+
+
+def default_task_database_path() -> Path:
+    return Path.home() / ".paicli" / "runtime" / "tasks.db"
 
 
 @dataclass(slots=True)
@@ -31,11 +32,12 @@ class TaskRecord:
     def duration_seconds(self) -> float | None:
         if not self.started_at:
             return None
-        end_at = self.finished_at or (_now() if self.status == "running" else None)
+        end_at = self.finished_at or (now_timestamp() if self.status == "running" else None)
         if not end_at:
             return None
-        elapsed = parse_timestamp(end_at) - parse_timestamp(self.started_at)
-        return max(0.0, elapsed.total_seconds())
+        return max(
+            0.0, (parse_timestamp(end_at) - parse_timestamp(self.started_at)).total_seconds()
+        )
 
     def to_dict(self) -> dict[str, str | float | None]:
         return {
@@ -78,115 +80,139 @@ class TaskApproval:
 
 
 class DurableTaskManager:
+    """Coordinate Background tasks in SQLite and execution history in child Sessions."""
+
     def __init__(
         self,
-        db_path: str | Path | SessionRepository,
+        db_path: str | Path,
         *,
+        session_repository: SessionRepository | None = None,
         workspace_root: str | Path | None = None,
         parent_session_id: str | None = None,
-        queue_session_id: str | None = None,
-        parent_lease_token: str | None = None,
-        claim_ttl_seconds: int = 60,
-    ):
-        self.repository = (
-            db_path if isinstance(db_path, SessionRepository) else SessionRepository(db_path)
-        )
-        self.db_path = self.repository.db_path
+    ) -> None:
+        self.task_repository = TaskRepository(db_path)
+        self.db_path = self.task_repository.db_path
+        if session_repository is None:
+            default_tasks = default_task_database_path().expanduser().resolve()
+            session_root = (
+                default_session_directory()
+                if self.db_path.resolve() == default_tasks
+                else self.db_path.parent / "sessions"
+            )
+            session_repository = SessionRepository(session_root)
+        self.repository = session_repository
         self.workspace_root = str(
             Path(workspace_root or self.db_path.parent).expanduser().resolve()
         )
         self.parent_session_id = parent_session_id or self._resolve_task_root()
-        self.queue_session_id = queue_session_id or self._resolve_runtime_queue()
-        self.parent_lease_token = parent_lease_token
-        self.claim_ttl_seconds = claim_ttl_seconds
-        self._claim_owner = f"task_manager_{uuid4().hex}"
-        self._claim_tokens: dict[str, str] = {}
-        self._claim_tokens_lock = threading.Lock()
 
     def add(self, prompt: str, *, retry_of: str | None = None) -> str:
-        task_id = _new_id("task")
         parent_session_id = self.parent_session_id
         relation_type = "background_task"
         if retry_of is not None:
-            retried = self.get(retry_of)
-            if retried is None:
+            source = self.get(retry_of)
+            if source is None:
                 raise KeyError(f"retry source task not found: {retry_of}")
-            parent_session_id = retried.session_id
+            parent_session_id = source.session_id
             relation_type = "background_task_retry"
-        self.repository.create_background_task(
+        task_id = _new_id("task")
+        child = self.repository.create_child_session(
             parent_session_id,
-            queue_session_id=self.queue_session_id,
+            relation_type=relation_type,
+            title=prompt[:80] or task_id,
+            metadata={"session_kind": "background_task", "task_id": task_id},
+        )
+        self.task_repository.add(
             task_id=task_id,
+            workspace_root=self.workspace_root,
+            session_id=child.id,
+            parent_session_id=parent_session_id,
             prompt=prompt,
             retry_of=retry_of,
-            relation_type=relation_type,
-            lease_token=(
-                self.parent_lease_token if parent_session_id == self.parent_session_id else None
-            ),
+        )
+        self.repository.append_event(
+            child.id,
+            "background_task.queued",
+            {"task_id": task_id, "prompt": prompt, "retry_of": retry_of},
         )
         return task_id
 
     def retry(self, task_id: str) -> str | None:
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                """
-                select prompt
-                from background_tasks
-                where id = ? and queue_session_id = ? and status = 'failed'
-                """,
-                (task_id, self.queue_session_id),
-            ).fetchone()
-            if not row:
-                return None
-        return self.add(str(row[0]), retry_of=task_id)
+        task = self.get(task_id)
+        if task is None or task.status != "failed":
+            return None
+        return self.add(task.prompt, retry_of=task_id)
 
     def fail_interrupted_tasks(self) -> int:
-        return self.repository.fail_interrupted_background_tasks(
-            self.queue_session_id,
-            "Task interrupted by a previous Runtime shutdown; not retried automatically."
+        error = "Task interrupted by a previous Runtime shutdown; not retried automatically."
+        interrupted = self.task_repository.fail_running(
+            self.workspace_root,
+            error,
         )
+        for row in interrupted:
+            task = _task_from_row(row)
+            self.repository.interrupt_active_turn(
+                task.session_id,
+                reason="process_restarted",
+            )
+            self.repository.append_event(
+                task.session_id,
+                "background_task.failed",
+                {"task_id": task.id, "error": error},
+            )
+        return len(interrupted)
 
     def claim_next(self) -> TaskRecord | None:
-        self.fail_interrupted_tasks()
-        row = self.repository.claim_next_background_task(
-            self.queue_session_id,
-            owner_id=self._claim_owner,
-            ttl_seconds=self.claim_ttl_seconds,
-        )
+        row = self.task_repository.claim_next(self.workspace_root)
         if row is None:
             return None
-        claim_token = str(row.pop("claim_token"))
-        task = TaskRecord(**row)
-        with self._claim_tokens_lock:
-            self._claim_tokens[task.id] = claim_token
+        task = _task_from_row(row)
+        self.repository.append_event(
+            task.session_id,
+            "background_task.running",
+            {"task_id": task.id},
+        )
         return task
 
-    def refresh_claim(self, task_id: str) -> None:
-        with self._claim_tokens_lock:
-            claim_token = self._claim_tokens.get(task_id)
-        if claim_token is None or not self.repository.refresh_background_task_claim(
-            task_id,
-            owner_id=self._claim_owner,
-            claim_token=claim_token,
-            ttl_seconds=self.claim_ttl_seconds,
-        ):
-            raise RuntimeError(f"background task claim is no longer owned: {task_id}")
-
     def complete(self, task_id: str, result: str) -> bool:
-        return self._update(task_id, "completed", result=result, error=None, from_status="running")
+        updated = self.task_repository.transition(
+            task_id,
+            from_status="running",
+            to_status="completed",
+            result=result,
+        )
+        if updated:
+            self._record_status(task_id, "completed", {"result": result})
+        return updated
 
     def fail(self, task_id: str, error: str) -> bool:
-        return self._update(task_id, "failed", result=None, error=error, from_status="running")
+        updated = self.task_repository.transition(
+            task_id,
+            from_status="running",
+            to_status="failed",
+            error=error,
+        )
+        if updated:
+            self._record_status(task_id, "failed", {"error": error})
+        return updated
 
     def cancel(self, task_id: str) -> bool:
-        canceled = self.repository.cancel_background_task(
+        task = self.get(task_id)
+        if task is None or task.status in {"completed", "failed", "canceled"}:
+            return False
+        updated = self.task_repository.transition(
             task_id,
-            queue_session_id=self.queue_session_id,
+            from_status=task.status,
+            to_status="canceled",
         )
-        if canceled:
-            self._forget_claim(task_id)
-        return canceled
+        if not updated:
+            return False
+        self.repository.interrupt_active_turn(
+            task.session_id,
+            reason="background_task_canceled",
+        )
+        self._record_status(task_id, "canceled")
+        return True
 
     def wait_for_approval(
         self,
@@ -195,276 +221,76 @@ class DurableTaskManager:
         checkpoint: dict[str, object],
         request: dict[str, object],
         invalidation_reason: str | None = None,
-        session_id: str | None = None,
-        tool_call_id: str | None = None,
-        lease_token: str | None = None,
+        **_: object,
     ) -> TaskApproval | None:
-        """Persist an execution checkpoint and move a running task to approval wait."""
-        claim_token = self._claim_token(task_id)
-        if claim_token is None:
+        if invalidation_reason:
+            checkpoint = {**checkpoint, "approval_invalidation_reason": invalidation_reason}
+        approval_id = _new_id("approval")
+        if not self.task_repository.wait_for_approval(
+            task_id,
+            approval_id=approval_id,
+            checkpoint=checkpoint,
+            request=request,
+            invalidation_reason=invalidation_reason,
+        ):
             return None
-        if session_id is not None and tool_call_id is not None:
-            approval_id = _new_id("approval")
-            if not self.repository.pause_background_task_for_approval(
-                task_id,
-                session_id=session_id,
-                tool_call_id=tool_call_id,
-                checkpoint=checkpoint,
-                approval_id=approval_id,
-                request=request,
-                claim_owner=self._claim_owner,
-                claim_token=claim_token,
-                invalidation_reason=invalidation_reason,
-                lease_token=lease_token,
-            ):
-                return None
-            return next(
-                approval
-                for approval in reversed(self.list_approvals(task_id))
-                if approval.id == approval_id
-            )
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            now = _now()
-            cursor = conn.execute(
-                """
-                update background_tasks
-                set status = 'waiting_approval', updated_at = ?
-                where id = ? and status = 'running'
-                  and claim_owner = ? and claim_token = ? and claim_expires_at > ?
-                """,
-                (now, task_id, self._claim_owner, claim_token, now),
-            )
-            if cursor.rowcount != 1:
-                return None
-            if invalidation_reason:
-                invalidated_id = _new_id("approval")
-                conn.execute(
-                    """
-                    insert into task_approvals(
-                        id, task_id, status, request_json, requested_at, decided_at, decision_source
-                    ) values (?, ?, 'invalidated', ?, ?, ?, ?)
-                    """,
-                    (
-                        invalidated_id,
-                        task_id,
-                        json.dumps(request, ensure_ascii=False),
-                        now,
-                        now,
-                        invalidation_reason,
-                    ),
-                )
-            conn.execute(
-                """
-                insert into task_checkpoints(
-                    task_id, schema_version, state_json, created_at, updated_at
-                )
-                values (?, 'approval-v1', ?, ?, ?)
-                on conflict(task_id) do update set
-                    schema_version = excluded.schema_version,
-                    state_json = excluded.state_json,
-                    updated_at = excluded.updated_at
-                """,
-                (task_id, json.dumps(checkpoint, ensure_ascii=False), now, now),
-            )
-            approval = TaskApproval(
-                id=_new_id("approval"),
-                task_id=task_id,
-                status="requested",
-                request=request,
-                requested_at=now,
-            )
-            conn.execute(
-                """
-                insert into task_approvals(
-                    id, task_id, status, request_json, requested_at, decided_at, decision_source
-                ) values (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    approval.id,
-                    approval.task_id,
-                    approval.status,
-                    json.dumps(approval.request, ensure_ascii=False),
-                    approval.requested_at,
-                    approval.decided_at,
-                    approval.decision_source,
-                ),
-            )
-            return approval
+        return next(
+            approval for approval in self.list_approvals(task_id) if approval.id == approval_id
+        )
 
     def approve(self, task_id: str, *, source: str = "cli") -> bool:
-        return self._decide_approval(task_id, decision="approved", source=source)
+        return self.task_repository.decide_approval(
+            task_id,
+            decision="approved",
+            source=source,
+        )
 
     def deny(self, task_id: str, *, source: str = "cli") -> bool:
-        return self._decide_approval(task_id, decision="denied", source=source)
+        return self.task_repository.decide_approval(
+            task_id,
+            decision="denied",
+            source=source,
+        )
 
     def get_checkpoint(self, task_id: str) -> dict[str, object] | None:
-        if self.get(task_id) is None:
-            return None
-        with self._connect() as conn:
-            row = conn.execute(
-                "select state_json from task_checkpoints where task_id = ?", (task_id,)
-            ).fetchone()
-        return json.loads(row[0]) if row else None
+        return self.task_repository.checkpoint(task_id)
 
     def list_approvals(self, task_id: str) -> list[TaskApproval]:
-        if self.get(task_id) is None:
-            return []
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                select id, task_id, status, request_json, requested_at, decided_at, decision_source
-                from task_approvals
-                where task_id = ?
-                order by requested_at, rowid
-                """,
-                (task_id,),
-            ).fetchall()
         return [
             TaskApproval(
-                id=row[0],
-                task_id=row[1],
-                status=row[2],
-                request=json.loads(row[3]),
-                requested_at=row[4],
-                decided_at=row[5],
-                decision_source=row[6],
+                id=str(row["id"]),
+                task_id=str(row["task_id"]),
+                status=str(row["status"]),
+                request=dict(row["request"]),
+                requested_at=str(row["requested_at"]),
+                decided_at=(str(row["decided_at"]) if row["decided_at"] else None),
+                decision_source=(str(row["decision_source"]) if row["decision_source"] else None),
             )
-            for row in rows
+            for row in self.task_repository.approvals(task_id)
         ]
 
     def list(self, limit: int = 50) -> list[TaskRecord]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                select id, prompt, status, created_at, updated_at, started_at, finished_at, result,
-                       error, retry_of, session_id, parent_session_id
-                from background_tasks
-                where queue_session_id = ?
-                order by created_at desc, rowid desc
-                limit ?
-                """,
-                (self.queue_session_id, limit),
-            ).fetchall()
-        return [TaskRecord(*row) for row in rows]
+        return [
+            _task_from_row(row)
+            for row in self.task_repository.list(self.workspace_root, limit=limit)
+        ]
 
     def get(self, task_id: str) -> TaskRecord | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                select id, prompt, status, created_at, updated_at, started_at, finished_at, result,
-                       error, retry_of, session_id, parent_session_id
-                from background_tasks
-                where id = ? and queue_session_id = ?
-                """,
-                (task_id, self.queue_session_id),
-            ).fetchone()
-        return TaskRecord(*row) if row else None
+        row = self.task_repository.get(task_id)
+        if row is None or row["workspace_root"] != self.workspace_root:
+            return None
+        return _task_from_row(row)
 
     def resolve_reference(self, reference: str, *, limit: int = 20) -> TaskRecord | None:
         value = reference.strip()
         if value == "latest":
-            rows = self.list(limit=1)
-            return rows[0] if rows else None
+            tasks = self.list(limit=1)
+            return tasks[0] if tasks else None
         if value.isdecimal():
             index = int(value)
-            if index < 1 or index > limit:
-                return None
-            rows = self.list(limit=limit)
-            return rows[index - 1] if index <= len(rows) else None
+            tasks = self.list(limit=limit)
+            return tasks[index - 1] if 1 <= index <= len(tasks) else None
         return self.get(value)
-
-    def _update(
-        self,
-        task_id: str,
-        status: str,
-        *,
-        result: str | None,
-        error: str | None,
-        from_status: str,
-    ) -> bool:
-        claim_token = self._claim_token(task_id)
-        if claim_token is None:
-            return False
-        updated = self.repository.transition_background_task(
-            task_id,
-            status=status,
-            from_status=from_status,
-            result=result,
-            error=error,
-            claim_owner=self._claim_owner,
-            claim_token=claim_token,
-        )
-        if updated:
-            self._forget_claim(task_id)
-        return updated
-
-    def _forget_claim(self, task_id: str) -> None:
-        with self._claim_tokens_lock:
-            self._claim_tokens.pop(task_id, None)
-
-    def _claim_token(self, task_id: str) -> str | None:
-        with self._claim_tokens_lock:
-            return self._claim_tokens.get(task_id)
-
-    def _decide_approval(self, task_id: str, *, decision: str, source: str) -> bool:
-        if self.get(task_id) is None:
-            return False
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            now = _now()
-            approval = conn.execute(
-                """
-                select id from task_approvals
-                where task_id = ? and status = 'requested'
-                order by requested_at desc, rowid desc
-                limit 1
-                """,
-                (task_id,),
-            ).fetchone()
-            if not approval:
-                return False
-            task_update = conn.execute(
-                """
-                update background_tasks
-                set status = 'queued', updated_at = ?,
-                    claim_owner = null, claim_token = null, claim_expires_at = null
-                where id = ? and status = 'waiting_approval'
-                """,
-                (now, task_id),
-            )
-            if task_update.rowcount != 1:
-                return False
-            checkpoint = conn.execute(
-                "select state_json from task_checkpoints where task_id = ?", (task_id,)
-            ).fetchone()
-            if not checkpoint:
-                return False
-            checkpoint_state = json.loads(checkpoint[0])
-            checkpoint_state["approval_decision"] = decision
-            conn.execute(
-                """
-                update task_checkpoints
-                set state_json = ?, updated_at = ?
-                where task_id = ?
-                """,
-                (json.dumps(checkpoint_state, ensure_ascii=False), now, task_id),
-            )
-            approval_update = conn.execute(
-                """
-                update task_approvals
-                set status = ?, decided_at = ?, decision_source = ?
-                where id = ? and status = 'requested'
-                """,
-                (decision, now, source, approval[0]),
-            )
-            decided = approval_update.rowcount == 1
-        if decided:
-            self._forget_claim(task_id)
-        return decided
-
-    def _connect(self) -> sqlite3.Connection:
-        return connect(self.db_path)
 
     def _resolve_task_root(self) -> str:
         return self.repository.get_or_create_root_session(
@@ -473,16 +299,41 @@ class DurableTaskManager:
             root_kind="background_task_root",
         ).id
 
-    def _resolve_runtime_queue(self) -> str:
-        return self.repository.get_or_create_root_session(
-            self.workspace_root,
-            title="Runtime",
-            root_kind="runtime_root",
-        ).id
+    def _record_status(
+        self,
+        task_id: str,
+        status: str,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        task = self.get(task_id)
+        if task is None:
+            return
+        self.repository.append_event(
+            task.session_id,
+            f"background_task.{status}",
+            {"task_id": task_id, **dict(details or {})},
+        )
 
 
-def _now() -> str:
-    return now_timestamp()
+def _task_from_row(row: dict[str, object]) -> TaskRecord:
+    return TaskRecord(
+        id=str(row["id"]),
+        prompt=str(row["prompt"]),
+        status=str(row["status"]),
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+        started_at=_optional_string(row.get("started_at")),
+        finished_at=_optional_string(row.get("finished_at")),
+        result=_optional_string(row.get("result")),
+        error=_optional_string(row.get("error")),
+        retry_of=_optional_string(row.get("retry_of")),
+        session_id=str(row["session_id"]),
+        parent_session_id=str(row["parent_session_id"]),
+    )
+
+
+def _optional_string(value: object) -> str | None:
+    return str(value) if value is not None else None
 
 
 def _new_id(prefix: str) -> str:
