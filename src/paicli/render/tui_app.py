@@ -520,6 +520,8 @@ class PaiCliApp(App):
                     if event.get("type") == "error":
                         break
             except Exception as exc:
+                self._flush_thinking()
+                self._flush_text("Assistant Output")
                 chat_log.add_info(f"[bold red]{error_label}:[/bold red] {exc}")
             finally:
                 try:
