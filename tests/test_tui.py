@@ -206,6 +206,33 @@ def test_tui_error_boundary_immediately_flushes_queued_text():
     asyncio.run(run())
 
 
+def test_tui_agent_exception_flushes_queued_text_before_the_error_notice():
+    class FailingAgent:
+        async def run(self, _message: str):
+            yield {"type": "text_delta", "text": "partial answer"}
+            raise RuntimeError("stream failed")
+
+    async def run() -> None:
+        app = PaiCliApp(
+            agent=FailingAgent(),
+            cwd=".",
+            config=PaiCliConfig(
+                typewriter_enabled=True,
+                typewriter_chars_per_second=1,
+                typewriter_max_chars_per_second=1,
+            ),
+        )
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.run_agent_task("fail after output")
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+
+            rendered = app.query_one(ChatLog).renderable_text()
+            assert rendered.index("partial answer") < rendered.index("stream failed")
+
+    asyncio.run(run())
+
+
 def test_tui_updates_status_bar_from_plan_usage_events():
     async def run() -> None:
         app = PaiCliApp(cwd=".")
