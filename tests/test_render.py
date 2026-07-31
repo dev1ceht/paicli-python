@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from io import StringIO
 
 from rich.console import Console
@@ -107,6 +108,27 @@ def test_interactive_renderer_disables_live_markdown_for_plain_mode():
 
     assert renderer._live_markdown is False
     assert renderer._text_typewriter.enabled is False
+
+
+def test_rich_typewriter_drains_final_output_asynchronously():
+    stream = StringIO()
+    renderer = RichRenderer(
+        console=Console(file=stream, force_terminal=True, width=120),
+        live_markdown=True,
+        typewriter_enabled=True,
+        typewriter_chars_per_second=1,
+        typewriter_max_chars_per_second=1,
+        typewriter_frame_rate=30,
+    )
+    renderer.start_run()
+    renderer.handle({"type": "text_delta", "text": "x" * 100})
+
+    renderer.handle({"type": "done", "total_turns": 1, "total_tokens": 100})
+
+    assert renderer._text_typewriter.pending_length > 0
+    asyncio.run(renderer.finish_run())
+    assert renderer._text_typewriter.pending_length == 0
+    assert "Final Output" in stream.getvalue()
 
 
 def test_text_deltas_render_as_markdown_on_turn_complete():

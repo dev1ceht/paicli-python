@@ -645,6 +645,11 @@ def test_tui_persists_one_partial_message_on_interrupt_without_model_replay(
     async def run() -> None:
         app = PaiCliApp(
             agent=InterruptibleAgent(),
+            config=PaiCliConfig(
+                typewriter_enabled=True,
+                typewriter_chars_per_second=1,
+                typewriter_max_chars_per_second=1,
+            ),
             cwd=str(workspace),
             session_repository=repository,
         )
@@ -668,6 +673,8 @@ def test_tui_persists_one_partial_message_on_interrupt_without_model_replay(
                 "message.assistant.partial"
             ) == 1
             assert repository.list_events(app.session_id)[-1].type == "turn.interrupted"
+            rendered = app.query_one(ChatLog).renderable_text()
+            assert rendered.index("half answer") < rendered.index("Agent interrupted")
 
     asyncio.run(run())
 

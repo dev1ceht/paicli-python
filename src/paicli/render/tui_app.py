@@ -1255,6 +1255,8 @@ class PaiCliApp(App):
             if self._active_run_state is not None:
                 self._active_run_state["interruption_reason"] = "user_interrupt"
             self._worker.cancel()
+            self._flush_thinking()
+            self._flush_text("Assistant Output")
             if self._active_run_state is None:
                 self._agent_running = False
                 self._phase = "idle"
