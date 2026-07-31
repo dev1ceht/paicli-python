@@ -268,14 +268,11 @@ class RichRenderer:
             self.console.print(f"[dim]Context reduced: {before}% → {after}% · {actions}[/dim]")
         elif event_type == "turn_complete":
             stop_reason = str(event.get("stop_reason") or "end_turn")
-            title = "Assistant Output" if stop_reason == "tool_use" else "Final Output"
             self._flush_thinking()
-            # Java: answer marker "▪" before final output
-            if stop_reason != "tool_use" and self._buffer:
-                self.console.print(Text("\u25aa", style="bold #22c55e"))
-                if self._schedule_final_output():
-                    return
-            self._flush_markdown(title=title)
+            if stop_reason == "tool_use":
+                self._flush_markdown(title="Assistant Output")
+            else:
+                self._finalize_output()
         elif event_type == "tool_call":
             self._flush_thinking()
             self._flush_markdown(title="Assistant Output")
@@ -480,11 +477,7 @@ class RichRenderer:
         # -- Done event ------------------------------------------------
         elif event_type == "done":
             self._flush_thinking()
-            # Java: answer marker before final output
-            if self._buffer and not self._final_output_pending:
-                self.console.print(Text("\u25aa", style="bold #22c55e"))
-            if self._buffer and not self._schedule_final_output():
-                self._flush_markdown(title="Final Output")
+            self._finalize_output()
             self._record_run_summary(event)
 
     def markdown(self, text: str) -> None:
@@ -531,6 +524,14 @@ class RichRenderer:
         self._text_typewriter.finish(within_seconds=0.25)
         self._final_output_pending = True
         return True
+
+    def _finalize_output(self) -> None:
+        if not self._buffer:
+            return
+        if not self._final_output_pending:
+            self.console.print(Text("\u25aa", style="bold #22c55e"))
+        if not self._schedule_final_output():
+            self._flush_markdown(title="Final Output")
 
     def _update_live_markdown(self) -> None:
         if not self._live_markdown or not self.console.is_terminal:
