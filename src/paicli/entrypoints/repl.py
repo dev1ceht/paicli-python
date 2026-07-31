@@ -1011,6 +1011,10 @@ def _interactive_renderer(
     renderer = RichRenderer(
         live_markdown=config.render_mode == "inline",
         context_window=context_window,
+        typewriter_enabled=(config.render_mode == "inline" and config.typewriter_enabled),
+        typewriter_chars_per_second=config.typewriter_chars_per_second,
+        typewriter_max_chars_per_second=config.typewriter_max_chars_per_second,
+        typewriter_frame_rate=config.typewriter_frame_rate,
     )
     renderer.set_provider(provider)
     return renderer

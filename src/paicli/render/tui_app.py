@@ -39,6 +39,7 @@ from paicli.render.tui_dialogs import (
 )
 from paicli.render.tui_events import UiEvent
 from paicli.render.tui_theme import PI_DARK
+from paicli.render.typewriter import TypewriterBuffer
 from paicli.usage import TokenUsage, UsageCost, UsagePurpose, UsageRecord, UsageSource
 
 
@@ -154,6 +155,20 @@ class PaiCliApp(App):
         self._active_run_state: dict[str, str] | None = None
         self._task_buffers: dict[str, list[str]] = {}
         self._task_thinking_buffers: dict[str, list[str]] = {}
+        self._typewriter_enabled = bool(
+            config is not None
+            and getattr(config, "render_mode", "inline") != "plain"
+            and getattr(config, "typewriter_enabled", False)
+        )
+        self._typewriter_chars_per_second = float(
+            getattr(config, "typewriter_chars_per_second", 80)
+        )
+        self._typewriter_max_chars_per_second = float(
+            getattr(config, "typewriter_max_chars_per_second", 320)
+        )
+        self._typewriter_frame_rate = float(getattr(config, "typewriter_frame_rate", 30))
+        self._typewriter_buffers: dict[tuple[str | None, str], TypewriterBuffer] = {}
+        self._finishing_typewriters: set[tuple[str | None, str]] = set()
         self._context_usage = ContextUsageState()
 
     @property
@@ -177,6 +192,8 @@ class PaiCliApp(App):
         self._update_status_bar()
         self.set_interval(0.1, self._refresh_elapsed_status)
         self.set_interval(2.0, self._refresh_git_branch)
+        if self._typewriter_enabled:
+            self.set_interval(1 / self._typewriter_frame_rate, self._advance_typewriters)
         self._show_banner()
         self._show_restored_session_history()
         if (
@@ -431,6 +448,7 @@ class PaiCliApp(App):
         )
 
     def _prepare_agent_run(self) -> None:
+        self._flush_pending_display()
         self._agent_running = True
         self._phase = "running"
         self._run_start_time = time.monotonic()
@@ -442,6 +460,8 @@ class PaiCliApp(App):
         self._cached_tokens = 0
         self._task_buffers.clear()
         self._task_thinking_buffers.clear()
+        self._typewriter_buffers.clear()
+        self._finishing_typewriters.clear()
         self._update_status_bar()
 
     def _launch_agent_run(
@@ -538,6 +558,9 @@ class PaiCliApp(App):
                         session=session,
                     )
                 if self._active_run_state is run_state:
+                    if not completed:
+                        self._flush_thinking()
+                        self._flush_text("Assistant Output")
                     self._agent_running = False
                     self._phase = "idle"
                     self._worker = None
@@ -656,14 +679,12 @@ class PaiCliApp(App):
             self._text_buffer.append(text)
             self._session_text_buffer.append(text)
             if text:
-                chat_log = self.query_one("#chat-log", ChatLog)
-                chat_log.begin_stream("assistant").append(text)
+                self._queue_visible_text("assistant", text)
         elif event_type == "thinking_delta":
             thinking = str(payload.get("thinking") or "")
             self._thinking_buffer.append(thinking)
             if thinking:
-                chat_log = self.query_one("#chat-log", ChatLog)
-                chat_log.begin_stream("thinking").append(thinking)
+                self._queue_visible_text("thinking", thinking)
         elif event_type == "usage":
             self._record_usage(payload.get("usage") or {})
         elif event_type in {
@@ -717,7 +738,7 @@ class PaiCliApp(App):
             self._flush_thinking()
             stop_reason = str(payload.get("stop_reason") or "end_turn")
             if stop_reason != "tool_use" and self._text_buffer:
-                self._flush_text("Final Output")
+                self._flush_text("Final Output", paced=True)
             elif stop_reason == "tool_use":
                 self._flush_text("Assistant Output")
         elif event_type == "tool_call":
@@ -736,7 +757,7 @@ class PaiCliApp(App):
         elif event_type == "done":
             self._flush_thinking()
             if self._text_buffer:
-                self._flush_text("Final Output")
+                self._flush_text("Final Output", paced=True)
             self._record_run_summary(payload)
         # Plan events
         elif event_type == "plan_generation_started":
@@ -876,16 +897,14 @@ class PaiCliApp(App):
             if task_id and task_id in self._task_buffers:
                 self._task_buffers[task_id].append(text)
                 if text:
-                    chat_log = self.query_one("#chat-log", ChatLog)
-                    chat_log.begin_stream("assistant", task_id=task_id).append(text)
+                    self._queue_visible_text("assistant", text, task_id=task_id)
         elif event_type == "task_thinking_delta":
             task_id = ui_event.task_id
             thinking = str(payload.get("thinking") or "")
             if task_id and task_id in self._task_thinking_buffers:
                 self._task_thinking_buffers[task_id].append(thinking)
                 if thinking:
-                    chat_log = self.query_one("#chat-log", ChatLog)
-                    chat_log.begin_stream("thinking", task_id=task_id).append(thinking)
+                    self._queue_visible_text("thinking", thinking, task_id=task_id)
         elif event_type == "task_tool_call":
             task_id = ui_event.task_id
             self._flush_task_thinking(task_id)
@@ -905,6 +924,90 @@ class PaiCliApp(App):
         self._update_status_bar()
 
     # -- Internal helpers -------------------------------------------------
+
+    def _new_typewriter(self) -> TypewriterBuffer:
+        return TypewriterBuffer(
+            enabled=self._typewriter_enabled,
+            chars_per_second=self._typewriter_chars_per_second,
+            max_chars_per_second=self._typewriter_max_chars_per_second,
+            frame_rate=self._typewriter_frame_rate,
+        )
+
+    def _queue_visible_text(
+        self,
+        role: str,
+        text: str,
+        *,
+        task_id: str | None = None,
+    ) -> None:
+        if not self._typewriter_enabled:
+            self.query_one("#chat-log", ChatLog).begin_stream(role, task_id=task_id).append(text)
+            return
+        key = (task_id, role)
+        buffer = self._typewriter_buffers.get(key)
+        if buffer is None:
+            buffer = self._new_typewriter()
+            self._typewriter_buffers[key] = buffer
+        buffer.feed(text)
+
+    def _advance_typewriters(self) -> None:
+        if not self._typewriter_buffers:
+            return
+        chat_logs = list(self.query(ChatLog))
+        if not chat_logs:
+            return
+        chat_log = chat_logs[0]
+        for (task_id, role), buffer in list(self._typewriter_buffers.items()):
+            chunk = buffer.advance()
+            if chunk:
+                chat_log.begin_stream(role, task_id=task_id).append(chunk)
+            key = (task_id, role)
+            if buffer.pending_length == 0 and key in self._finishing_typewriters:
+                self._typewriter_buffers.pop(key, None)
+                self._finishing_typewriters.discard(key)
+                self._complete_visible_stream(role, task_id=task_id)
+
+    def _flush_typewriter(self, role: str, *, task_id: str | None = None) -> None:
+        key = (task_id, role)
+        self._finishing_typewriters.discard(key)
+        buffer = self._typewriter_buffers.pop(key, None)
+        if buffer is None:
+            return
+        chunk = buffer.flush()
+        if chunk:
+            self.query_one("#chat-log", ChatLog).begin_stream(role, task_id=task_id).append(chunk)
+
+    def _finish_typewriter(self, role: str, *, task_id: str | None = None) -> bool:
+        key = (task_id, role)
+        buffer = self._typewriter_buffers.get(key)
+        if buffer is None or buffer.pending_length == 0:
+            return False
+        buffer.finish(within_seconds=0.25)
+        self._finishing_typewriters.add(key)
+        return True
+
+    def _complete_visible_stream(
+        self,
+        role: str,
+        *,
+        task_id: str | None = None,
+    ) -> None:
+        if task_id is None:
+            if role == "assistant":
+                self._text_buffer.clear()
+            elif role == "thinking":
+                self._thinking_buffer.clear()
+        elif role == "assistant":
+            self._task_buffers[task_id] = []
+        elif role == "thinking":
+            self._task_thinking_buffers[task_id] = []
+        self.query_one("#chat-log", ChatLog).finish_stream(role, task_id=task_id)
+
+    def _flush_pending_display(self) -> None:
+        self._flush_thinking()
+        self._flush_text("Assistant Output")
+        for task_id in set(self._task_buffers) | set(self._task_thinking_buffers):
+            self._flush_task_output(task_id)
 
     def _handle_tool_call(self, event: dict[str, Any], *, task_id: str | None = None) -> None:
         name = str(event.get("name") or "unknown")
@@ -952,10 +1055,18 @@ class PaiCliApp(App):
                 else:
                     chat_log.add_info(f"  {line}", style="dim")
 
-    def _flush_text(self, title: str = "Assistant Output") -> None:
+    def _flush_text(
+        self,
+        title: str = "Assistant Output",
+        *,
+        paced: bool = False,
+    ) -> None:
         del title
         if not self._text_buffer:
             return
+        if paced and self._finish_typewriter("assistant"):
+            return
+        self._flush_typewriter("assistant")
         self._text_buffer.clear()
         chat_log = self.query_one("#chat-log", ChatLog)
         chat_log.finish_stream("assistant")
@@ -963,6 +1074,7 @@ class PaiCliApp(App):
     def _flush_thinking(self) -> None:
         if not self._thinking_buffer:
             return
+        self._flush_typewriter("thinking")
         self._thinking_buffer.clear()
         chat_log = self.query_one("#chat-log", ChatLog)
         chat_log.finish_stream("thinking")
@@ -973,6 +1085,7 @@ class PaiCliApp(App):
         buf = self._task_buffers[task_id]
         if not buf:
             return
+        self._flush_typewriter("assistant", task_id=task_id)
         self._task_buffers[task_id] = []
         chat_log = self.query_one("#chat-log", ChatLog)
         chat_log.finish_stream("assistant", task_id=task_id)
@@ -983,6 +1096,7 @@ class PaiCliApp(App):
         buf = self._task_thinking_buffers[task_id]
         if not buf:
             return
+        self._flush_typewriter("thinking", task_id=task_id)
         self._task_thinking_buffers[task_id] = []
         chat_log = self.query_one("#chat-log", ChatLog)
         chat_log.finish_stream("thinking", task_id=task_id)
@@ -1920,6 +2034,7 @@ class PaiCliApp(App):
 
     def run_plan_task(self, message: str) -> None:
         """Launch a plan-and-execute loop via the TUI's native modal flow."""
+        self._flush_pending_display()
         self._agent_running = True
         self._phase = "plan"
         self._run_start_time = time.monotonic()
@@ -1930,6 +2045,8 @@ class PaiCliApp(App):
         self._cached_tokens = 0
         self._task_buffers.clear()
         self._task_thinking_buffers.clear()
+        self._typewriter_buffers.clear()
+        self._finishing_typewriters.clear()
         self._update_status_bar()
 
         chat_log = self.query_one("#chat-log", ChatLog)

@@ -39,6 +39,7 @@ from paicli.render._common import (
 from paicli.render._common import (
     tool_label as _tool_label,
 )
+from paicli.render.typewriter import TypewriterBuffer
 
 # ---------------------------------------------------------------------------
 # RichRenderer
@@ -52,11 +53,29 @@ class RichRenderer:
         *,
         live_markdown: bool = False,
         context_window: int | None = None,
+        typewriter_enabled: bool = False,
+        typewriter_chars_per_second: float = 80,
+        typewriter_max_chars_per_second: float = 320,
+        typewriter_frame_rate: float = 30,
     ):
         self.console = console or Console(no_color=_NO_COLOR)
         self._buffer: list[str] = []
         self._thinking_buffer: list[str] = []
         self._live_markdown = live_markdown
+        self._live_refresh_rate = float(typewriter_frame_rate)
+        paced = bool(live_markdown and typewriter_enabled)
+        self._text_typewriter = TypewriterBuffer(
+            enabled=paced,
+            chars_per_second=typewriter_chars_per_second,
+            max_chars_per_second=typewriter_max_chars_per_second,
+            frame_rate=typewriter_frame_rate,
+        )
+        self._thinking_typewriter = TypewriterBuffer(
+            enabled=paced,
+            chars_per_second=typewriter_chars_per_second,
+            max_chars_per_second=typewriter_max_chars_per_second,
+            frame_rate=typewriter_frame_rate,
+        )
         self._live: Live | None = None
         self._thinking_live: Live | None = None
         self._context_window = context_window or 0
@@ -97,6 +116,8 @@ class RichRenderer:
     def start_run(self) -> None:
         self._buffer.clear()
         self._thinking_buffer.clear()
+        self._text_typewriter.reset()
+        self._thinking_typewriter.reset()
         self._stop_live_markdown()
         self._stop_live_thinking()
         # Start a new accounting scope while preserving the last displayed
@@ -137,9 +158,7 @@ class RichRenderer:
                 {
                     "context_used_tokens": used_tokens,
                     "context_window": context_window,
-                    "context_ratio": (
-                        used_tokens / int(context_window) if context_window else 0.0
-                    ),
+                    "context_ratio": (used_tokens / int(context_window) if context_window else 0.0),
                     "context_estimated": bool(reading.get("estimated")),
                     "context_active_count": self._context_usage.active_count,
                     "pressure_ratio": reading.get("pressure_ratio"),
@@ -203,10 +222,12 @@ class RichRenderer:
             self._flush_thinking()
             text = str(event.get("text") or "")
             self._buffer.append(text)
+            self._text_typewriter.feed(text)
             self._update_live_markdown()
         elif event_type == "thinking_delta":
             thinking = str(event.get("thinking") or "")
             self._thinking_buffer.append(thinking)
+            self._thinking_typewriter.feed(thinking)
             self._update_live_thinking()
         elif event_type == "usage":
             self._record_usage(event.get("usage") or {})
@@ -249,7 +270,7 @@ class RichRenderer:
             # Java: answer marker "▪" before final output
             if stop_reason != "tool_use" and self._buffer:
                 self.console.print(Text("\u25aa", style="bold #22c55e"))
-            self._flush_markdown(title=title)
+            self._flush_markdown(title=title, paced=stop_reason != "tool_use")
         elif event_type == "tool_call":
             self._flush_thinking()
             self._flush_markdown(title="Assistant Output")
@@ -457,7 +478,7 @@ class RichRenderer:
             # Java: answer marker before final output
             if self._buffer:
                 self.console.print(Text("\u25aa", style="bold #22c55e"))
-            self._flush_markdown(title="Final Output")
+            self._flush_markdown(title="Final Output", paced=True)
             self._record_run_summary(event)
 
     def markdown(self, text: str) -> None:
@@ -468,12 +489,16 @@ class RichRenderer:
         self._flush_markdown(title="Final Output")
         self.console.print()
 
-    def _flush_markdown(self, *, title: str) -> None:
+    def _flush_markdown(self, *, title: str, paced: bool = False) -> None:
         if not self._buffer:
             return
         text = "".join(self._buffer)
         self._buffer.clear()
+        if paced:
+            self._drain_live_typewriter(self._text_typewriter, self._live)
+        self._text_typewriter.flush()
         self._stop_live_markdown()
+        self._text_typewriter.reset()
         if text.strip():
             self.console.print(
                 _output_panel(
@@ -483,30 +508,43 @@ class RichRenderer:
                 )
             )
 
+    def _drain_live_typewriter(
+        self,
+        buffer: TypewriterBuffer,
+        live: Live | None,
+    ) -> None:
+        if not buffer.enabled or live is None or buffer.pending_length == 0:
+            return
+        buffer.finish(within_seconds=0.25)
+        deadline = time.monotonic() + 0.3
+        while buffer.pending_length and time.monotonic() < deadline:
+            time.sleep(1 / self._live_refresh_rate)
+            live.refresh()
+
     def _update_live_markdown(self) -> None:
         if not self._live_markdown or not self.console.is_terminal:
             return
         # Only one Live instance per Console — stop thinking Live first
         self._stop_live_thinking()
-        text = "".join(self._buffer)
-        if not text.strip():
-            return
-        renderable = _output_panel(
-            Markdown(text),
-            title=Text("Assistant Output", style="bold #a8ff60"),
-            border_style="#3f3f46",
-        )
         if self._live is None:
             self._live = Live(
-                renderable,
                 console=self.console,
-                refresh_per_second=12,
+                refresh_per_second=self._live_refresh_rate,
                 transient=True,
                 vertical_overflow="visible",
+                get_renderable=self._live_markdown_renderable,
             )
             self._live.start(refresh=True)
             return
-        self._live.update(renderable, refresh=True)
+        self._live.refresh()
+
+    def _live_markdown_renderable(self) -> Any:
+        self._text_typewriter.advance()
+        return _output_panel(
+            Markdown(self._text_typewriter.visible_text or " "),
+            title=Text("Assistant Output", style="bold #a8ff60"),
+            border_style="#3f3f46",
+        )
 
     def _stop_live_markdown(self) -> None:
         if self._live is None:
@@ -519,7 +557,9 @@ class RichRenderer:
             return
         text = "".join(self._thinking_buffer)
         self._thinking_buffer.clear()
+        self._thinking_typewriter.flush()
         self._stop_live_thinking()
+        self._thinking_typewriter.reset()
         if text.strip():
             self.console.print(
                 _output_panel(
@@ -534,25 +574,25 @@ class RichRenderer:
             return
         # Only one Live instance per Console — stop text Live first
         self._stop_live_markdown()
-        text = "".join(self._thinking_buffer)
-        if not text.strip():
-            return
-        renderable = _output_panel(
-            Text(text, style="dim"),
-            title=Text("\U0001f9e0 \u601d\u8003\u8fc7\u7a0b", style="bold #c084fc"),
-            border_style="#6d28d9",
-        )
         if self._thinking_live is None:
             self._thinking_live = Live(
-                renderable,
                 console=self.console,
-                refresh_per_second=12,
+                refresh_per_second=self._live_refresh_rate,
                 transient=True,
                 vertical_overflow="visible",
+                get_renderable=self._live_thinking_renderable,
             )
             self._thinking_live.start(refresh=True)
             return
-        self._thinking_live.update(renderable, refresh=True)
+        self._thinking_live.refresh()
+
+    def _live_thinking_renderable(self) -> Any:
+        self._thinking_typewriter.advance()
+        return _output_panel(
+            Text(self._thinking_typewriter.visible_text or " ", style="dim"),
+            title=Text("\U0001f9e0 \u601d\u8003\u8fc7\u7a0b", style="bold #c084fc"),
+            border_style="#6d28d9",
+        )
 
     def _stop_live_thinking(self) -> None:
         if self._thinking_live is None:
