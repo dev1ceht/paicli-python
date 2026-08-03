@@ -222,11 +222,11 @@ def test_tool_use_and_result_render_as_structured_panels():
     console = Console(file=stream, color_system=None, width=120)
     renderer = RichRenderer(console=console)
 
-    renderer.handle({"type": "tool_call", "name": "list_dir", "input": {"path": "."}})
+    renderer.handle({"type": "tool_call", "name": "ls", "input": {"path": "."}})
     renderer.handle(
         {
             "type": "tool_result",
-            "name": "list_dir",
+            "name": "ls",
             "result": "README.md\nsrc/",
             "is_error": False,
         }
@@ -234,9 +234,9 @@ def test_tool_use_and_result_render_as_structured_panels():
 
     output = stream.getvalue()
     assert "Tool Use" in output
-    assert "list_dir" in output
+    assert "ls" in output
     assert '"path": "."' in output
-    assert "Tool Result · list_dir · ok" in output
+    assert "Tool Result · ls · ok" in output
     assert "README.md" in output
 
 
@@ -356,6 +356,8 @@ def test_tool_label_known_tools():
     assert "🩹 应用补丁" in _tool_label("apply_patch", {"patch": "*** Begin Patch"})
     assert "⚡ 执行命令" in _tool_label("bash", {"command": "ls"})
     assert "🌐 联网搜索" in _tool_label("web_search", {"query": "python"})
+    assert "*.py" in _tool_label("find", {"pattern": "*.py"})
+    assert "TODO" in _tool_label("grep", {"pattern": "TODO"})
     assert _tool_label("unknown_tool", {}) == "🔧 unknown_tool"
 
 

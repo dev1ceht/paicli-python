@@ -124,17 +124,17 @@ def get_builtin_tools() -> list[Tool]:
             requires_approval=True,
         ),
         Tool(
-            name="list_dir",
+            name="ls",
             description="List entries in a directory inside the current workspace.",
             parameters=object_schema(
                 {"path": {"type": "string", "description": "Directory path"}},
                 ["path"],
             ),
             required_keys=["path"],
-            handler=list_dir,
+            handler=ls,
         ),
         Tool(
-            name="glob_files",
+            name="find",
             description="Find files by glob pattern inside the current workspace.",
             parameters=object_schema(
                 {
@@ -144,10 +144,10 @@ def get_builtin_tools() -> list[Tool]:
                 ["pattern"],
             ),
             required_keys=["pattern"],
-            handler=glob_files,
+            handler=find,
         ),
         Tool(
-            name="grep_code",
+            name="grep",
             description="Search text in workspace files.",
             parameters=object_schema(
                 {
@@ -159,7 +159,7 @@ def get_builtin_tools() -> list[Tool]:
                 ["pattern"],
             ),
             required_keys=["pattern"],
-            handler=grep_code,
+            handler=grep,
         ),
         Tool(
             name="bash",
@@ -467,7 +467,7 @@ async def apply_patch(payload: dict[str, Any], context: ToolContext) -> ToolResu
     return ToolResult(f"{action} patch: {changed}", display_summary=f"{action} patch")
 
 
-async def list_dir(payload: dict[str, Any], context: ToolContext) -> ToolResult:
+async def ls(payload: dict[str, Any], context: ToolContext) -> ToolResult:
     path = _resolve_path(context, str(payload["path"]))
     if not path.is_dir():
         return ToolResult(f"Not a directory: {path}", is_error=True)
@@ -478,7 +478,7 @@ async def list_dir(payload: dict[str, Any], context: ToolContext) -> ToolResult:
     return ToolResult("\n".join(rows) or "(empty directory)")
 
 
-async def glob_files(payload: dict[str, Any], context: ToolContext) -> ToolResult:
+async def find(payload: dict[str, Any], context: ToolContext) -> ToolResult:
     root = Path(context.cwd).resolve()
     pattern = str(payload["pattern"])
     if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
@@ -497,7 +497,7 @@ async def glob_files(payload: dict[str, Any], context: ToolContext) -> ToolResul
     return ToolResult("\n".join(rels) or "(no matches)")
 
 
-async def grep_code(payload: dict[str, Any], context: ToolContext) -> ToolResult:
+async def grep(payload: dict[str, Any], context: ToolContext) -> ToolResult:
     root = Path(context.cwd).resolve()
     start = _resolve_path(context, str(payload.get("path") or "."))
     pattern = str(payload["pattern"])

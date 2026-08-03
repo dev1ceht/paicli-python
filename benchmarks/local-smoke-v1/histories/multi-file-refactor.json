@@ -14,8 +14,8 @@
           "id": "multi-file-refactor-search-1",
           "type": "function",
           "function": {
-            "name": "grep_code",
-            "arguments": "{\"query\":\"multi-file-refactor\",\"path\":\".\"}"
+            "name": "grep",
+            "arguments": "{\"pattern\":\"multi-file-refactor\",\"path\":\".\"}"
           }
         }
       ]
@@ -41,8 +41,8 @@
           "id": "multi-file-refactor-search-2",
           "type": "function",
           "function": {
-            "name": "grep_code",
-            "arguments": "{\"query\":\"multi-file-refactor\",\"path\":\".\"}"
+            "name": "grep",
+            "arguments": "{\"pattern\":\"multi-file-refactor\",\"path\":\".\"}"
           }
         }
       ]
@@ -68,8 +68,8 @@
           "id": "multi-file-refactor-search-3",
           "type": "function",
           "function": {
-            "name": "grep_code",
-            "arguments": "{\"query\":\"multi-file-refactor\",\"path\":\".\"}"
+            "name": "grep",
+            "arguments": "{\"pattern\":\"multi-file-refactor\",\"path\":\".\"}"
           }
         }
       ]
@@ -95,8 +95,8 @@
           "id": "multi-file-refactor-search-4",
           "type": "function",
           "function": {
-            "name": "grep_code",
-            "arguments": "{\"query\":\"multi-file-refactor\",\"path\":\".\"}"
+            "name": "grep",
+            "arguments": "{\"pattern\":\"multi-file-refactor\",\"path\":\".\"}"
           }
         }
       ]
@@ -122,8 +122,8 @@
           "id": "multi-file-refactor-search-5",
           "type": "function",
           "function": {
-            "name": "grep_code",
-            "arguments": "{\"query\":\"multi-file-refactor\",\"path\":\".\"}"
+            "name": "grep",
+            "arguments": "{\"pattern\":\"multi-file-refactor\",\"path\":\".\"}"
           }
         }
       ]
@@ -149,8 +149,8 @@
           "id": "multi-file-refactor-search-6",
           "type": "function",
           "function": {
-            "name": "grep_code",
-            "arguments": "{\"query\":\"multi-file-refactor\",\"path\":\".\"}"
+            "name": "grep",
+            "arguments": "{\"pattern\":\"multi-file-refactor\",\"path\":\".\"}"
           }
         }
       ]
@@ -176,8 +176,8 @@
           "id": "multi-file-refactor-search-7",
           "type": "function",
           "function": {
-            "name": "grep_code",
-            "arguments": "{\"query\":\"multi-file-refactor\",\"path\":\".\"}"
+            "name": "grep",
+            "arguments": "{\"pattern\":\"multi-file-refactor\",\"path\":\".\"}"
           }
         }
       ]
@@ -203,8 +203,8 @@
           "id": "multi-file-refactor-search-8",
           "type": "function",
           "function": {
-            "name": "grep_code",
-            "arguments": "{\"query\":\"multi-file-refactor\",\"path\":\".\"}"
+            "name": "grep",
+            "arguments": "{\"pattern\":\"multi-file-refactor\",\"path\":\".\"}"
           }
         }
       ]
