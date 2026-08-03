@@ -132,10 +132,41 @@ def test_read_write_tools(tmp_path, monkeypatch):
 def test_builtin_search_tools_have_one_canonical_name():
     names = {tool.name for tool in get_builtin_tools()}
 
-    assert "glob_files" in names
-    assert "grep_code" in names
-    assert "glob" not in names
-    assert "grep" not in names
+    assert "ls" in names
+    assert "list_dir" not in names
+    assert "find" in names
+    assert "grep" in names
+    assert "glob_files" not in names
+    assert "grep_code" not in names
+
+
+def test_find_and_grep_execute_under_canonical_names(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    source = tmp_path / "src" / "sample.py"
+    source.parent.mkdir()
+    source.write_text("TODO: verify canonical tools\n", encoding="utf-8")
+    config = load_config(project_root=tmp_path)
+    config.policy.hitl_mode = "never"
+    registry = ToolRegistry()
+    registry.register_all(get_builtin_tools())
+    context = ToolContext(cwd=str(tmp_path), config=config)
+
+    async def run():
+        find_tool = registry.get("find")
+        grep_tool = registry.get("grep")
+        assert find_tool and grep_tool
+        find_result = await find_tool.execute({"pattern": "src/**/*.py"}, context)
+        grep_result = await grep_tool.execute(
+            {"pattern": "TODO", "path": "src", "regex": False}, context
+        )
+        return find_result, grep_result
+
+    find_result, grep_result = asyncio.run(run())
+    assert not find_result.is_error
+    assert "sample.py" in find_result.content
+    assert not grep_result.is_error
+    assert "sample.py" in grep_result.content
+    assert "TODO" in grep_result.content
 
 
 def test_read_default_bounds_rendered_output(tmp_path, monkeypatch):

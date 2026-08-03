@@ -943,6 +943,6 @@ _TASK_SYSTEM = """\
 你是 Plan-and-Execute 中的任务执行专家。
 当前任务类型：{task_type}
 任务描述：{task_description}
-优先用 glob_files/grep_code/read 现用现查；
+优先用 find/grep/read 现用现查；
 ANALYSIS/VERIFICATION 类型且上下文足够时直接输出结果。\
 """

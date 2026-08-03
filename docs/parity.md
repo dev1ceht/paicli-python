@@ -54,9 +54,9 @@ This file tracks the Python port against the existing Java and TypeScript implem
   - `write`
   - `edit`
   - `apply_patch`
-  - `list_dir`
-  - `glob_files`
-  - `grep_code`
+  - `ls`
+  - `find`
+  - `grep`
   - `bash`
   - `web_search`
   - `web_fetch`

@@ -14,8 +14,8 @@
           "id": "debug-and-fix-search-1",
           "type": "function",
           "function": {
-            "name": "grep_code",
-            "arguments": "{\"query\":\"debug-and-fix\",\"path\":\".\"}"
+            "name": "grep",
+            "arguments": "{\"pattern\":\"debug-and-fix\",\"path\":\".\"}"
           }
         }
       ]
@@ -41,8 +41,8 @@
           "id": "debug-and-fix-search-2",
           "type": "function",
           "function": {
-            "name": "grep_code",
-            "arguments": "{\"query\":\"debug-and-fix\",\"path\":\".\"}"
+            "name": "grep",
+            "arguments": "{\"pattern\":\"debug-and-fix\",\"path\":\".\"}"
           }
         }
       ]
@@ -68,8 +68,8 @@
           "id": "debug-and-fix-search-3",
           "type": "function",
           "function": {
-            "name": "grep_code",
-            "arguments": "{\"query\":\"debug-and-fix\",\"path\":\".\"}"
+            "name": "grep",
+            "arguments": "{\"pattern\":\"debug-and-fix\",\"path\":\".\"}"
           }
         }
       ]
@@ -95,8 +95,8 @@
           "id": "debug-and-fix-search-4",
           "type": "function",
           "function": {
-            "name": "grep_code",
-            "arguments": "{\"query\":\"debug-and-fix\",\"path\":\".\"}"
+            "name": "grep",
+            "arguments": "{\"pattern\":\"debug-and-fix\",\"path\":\".\"}"
           }
         }
       ]
@@ -122,8 +122,8 @@
           "id": "debug-and-fix-search-5",
           "type": "function",
           "function": {
-            "name": "grep_code",
-            "arguments": "{\"query\":\"debug-and-fix\",\"path\":\".\"}"
+            "name": "grep",
+            "arguments": "{\"pattern\":\"debug-and-fix\",\"path\":\".\"}"
           }
         }
       ]
@@ -149,8 +149,8 @@
           "id": "debug-and-fix-search-6",
           "type": "function",
           "function": {
-            "name": "grep_code",
-            "arguments": "{\"query\":\"debug-and-fix\",\"path\":\".\"}"
+            "name": "grep",
+            "arguments": "{\"pattern\":\"debug-and-fix\",\"path\":\".\"}"
           }
         }
       ]
@@ -176,8 +176,8 @@
           "id": "debug-and-fix-search-7",
           "type": "function",
           "function": {
-            "name": "grep_code",
-            "arguments": "{\"query\":\"debug-and-fix\",\"path\":\".\"}"
+            "name": "grep",
+            "arguments": "{\"pattern\":\"debug-and-fix\",\"path\":\".\"}"
           }
         }
       ]
@@ -203,8 +203,8 @@
           "id": "debug-and-fix-search-8",
           "type": "function",
           "function": {
-            "name": "grep_code",
-            "arguments": "{\"query\":\"debug-and-fix\",\"path\":\".\"}"
+            "name": "grep",
+            "arguments": "{\"pattern\":\"debug-and-fix\",\"path\":\".\"}"
           }
         }
       ]

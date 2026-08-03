@@ -47,7 +47,7 @@ artifacts/context-cost/runs/<task-id>/<variant>/<repeat>/workspace/
 
 因此预录的写文件、补丁和命令调用只会改变副本，绝不改变源 fixture。每个任务保留初始 prompt、允许工具、step budget、期望产物及 verifier。
 
-现有 Pico 任务中的 `patch_file`、`run_shell`、`search` 等调用会适配为 PaiCLI 实际支持的工具协议和名称，例如 `read`、`write`、`edit`、`bash`、`grep_code`、`glob_files`。`write` 的脚本参数必须携带完整且确定的目标内容，避免依赖未实现的补丁工具。
+现有 Pico 任务中的 `patch_file`、`run_shell`、`search` 等调用会适配为 PaiCLI 实际支持的工具协议和名称，例如 `read`、`write`、`edit`、`bash`、`grep`、`find`。`write` 的脚本参数必须携带完整且确定的目标内容，避免依赖未实现的补丁工具。
 
 ## 三个策略变体
 

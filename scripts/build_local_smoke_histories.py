@@ -312,8 +312,8 @@ def _medium_history(task_id: str) -> list[dict]:
                     "tool_calls": [
                         _tool_call(
                             call_id,
-                            "grep_code",
-                            {"query": task_id, "path": "."},
+                            "grep",
+                            {"pattern": task_id, "path": "."},
                         )
                     ],
                 },
