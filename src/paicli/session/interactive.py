@@ -197,6 +197,7 @@ class InteractiveSession:
         model_turn: int,
         assistant_content: str,
         reasoning_content: str | None,
+        reasoning_duration: float | None = None,
         actions: list[dict[str, Any]],
     ) -> None:
         turn_id = self._require_active_turn()
@@ -206,6 +207,7 @@ class InteractiveSession:
             model_turn=model_turn,
             assistant_content=assistant_content,
             reasoning_content=reasoning_content,
+            reasoning_duration=reasoning_duration,
             actions=tuple(
                 ToolActionSpec(
                     tool_call_id=str(action["tool_call_id"]),
@@ -322,6 +324,7 @@ class InteractiveSession:
         assistant_text: str,
         *,
         reasoning_content: str | None = None,
+        reasoning_duration: float | None = None,
         context_checkpoint: dict[str, Any] | None = None,
     ) -> None:
         turn_id = self._require_active_turn()
@@ -330,6 +333,7 @@ class InteractiveSession:
             turn_id=turn_id,
             assistant_content=assistant_text,
             reasoning_content=reasoning_content,
+            reasoning_duration=reasoning_duration,
             context_checkpoint=context_checkpoint,
         )
         self._active_turn_id = None
@@ -340,6 +344,7 @@ class InteractiveSession:
         assistant_text: str,
         *,
         reasoning_content: str | None = None,
+        reasoning_duration: float | None = None,
         reason: str,
     ) -> None:
         if self._active_turn_id is None:
@@ -350,6 +355,7 @@ class InteractiveSession:
             turn_id=turn_id,
             assistant_content=assistant_text,
             reasoning_content=reasoning_content,
+            reasoning_duration=reasoning_duration,
             reason=reason,
         )
         self._active_turn_id = None

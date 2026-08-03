@@ -322,14 +322,19 @@ class ThinkingBlock(Static):
     }
     """
 
-    def __init__(self, *, task_id: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        task_id: str | None = None,
+        elapsed: float | None = None,
+    ) -> None:
         super().__init__()
         self.task_id = task_id
         self._content = ""
         self._collapsed = False
         self._complete = False
         self._started_at = time.monotonic()
-        self._elapsed = 0.0
+        self._elapsed = max(0.0, float(elapsed)) if elapsed is not None else None
         self._pulse_frame = 0
         self._pulse_timer: Any = None
         self._animation_active = False
@@ -337,6 +342,9 @@ class ThinkingBlock(Static):
         self._output_widget: Static | None = None
 
     def on_mount(self) -> None:
+        if self._complete:
+            self._animation_active = False
+            return
         self._animation_active = True
         self._pulse_timer = self.set_interval(0.6, self._tick_pulse)
 
@@ -359,10 +367,8 @@ class ThinkingBlock(Static):
     def _label(self) -> str:
         prefix = f"[{self.task_id}] " if self.task_id else ""
         if self._complete:
-            return (
-                f"{prefix}{status_glyph('thinking')} Thinking complete · "
-                f"{format_elapsed(self._elapsed)}"
-            )
+            elapsed = f" · {format_elapsed(self._elapsed)}" if self._elapsed is not None else ""
+            return f"{prefix}{status_glyph('thinking')} Thinking complete{elapsed}"
         pulse = "thinking" if self._pulse_frame % 2 == 0 else "idle"
         return f"{prefix}{status_glyph(pulse)} Thinking"
 
@@ -378,6 +384,10 @@ class ThinkingBlock(Static):
     def animation_active(self) -> bool:
         return self._animation_active
 
+    @property
+    def elapsed(self) -> float | None:
+        return self._elapsed
+
     def append(self, text: str) -> None:
         self._content += str(text or "")
         self._sync_state()
@@ -390,6 +400,24 @@ class ThinkingBlock(Static):
         self._elapsed = max(0.0, time.monotonic() - self._started_at)
         self._collapsed = collapsed
         self._sync_state()
+
+    def restore(self, *, collapsed: bool = True, elapsed: float | None = None) -> None:
+        """Mark a history item complete without measuring the restore operation."""
+        self._complete = True
+        self._animation_active = False
+        if self._pulse_timer is not None:
+            self._pulse_timer.pause()
+        self._elapsed = max(0.0, float(elapsed)) if elapsed is not None else None
+        self._collapsed = collapsed
+        self._sync_state()
+
+    def on_collapsible_expanded(self, event: Collapsible.Expanded) -> None:
+        if event.collapsible is self._collapsible:
+            self._collapsed = False
+
+    def on_collapsible_collapsed(self, event: Collapsible.Collapsed) -> None:
+        if event.collapsible is self._collapsible:
+            self._collapsed = True
 
     def _sync_state(self) -> None:
         if self._output_widget:
@@ -752,13 +780,14 @@ class ChatLog(VerticalScroll):
         *,
         task_id: str | None = None,
         collapsed: bool = False,
-    ) -> None:
+    ) -> float | None:
         key = self._stream_key(role, task_id=task_id)
         stream = self._active_streams.pop(key, None)
         if stream is None:
-            return
+            return None
         stream.finish(collapsed=collapsed or role == "thinking")
         self._follow_new_activity()
+        return getattr(stream, "elapsed", None)
 
     def add_tool_call(
         self,
@@ -837,10 +866,19 @@ class ChatLog(VerticalScroll):
         self.mount(widget)
         self._follow_new_activity()
 
-    def add_thinking(self, text: str) -> None:
-        widget = ThinkingBlock()
+    def add_thinking(
+        self,
+        text: str,
+        *,
+        elapsed: float | None = None,
+        restored: bool = False,
+    ) -> None:
+        widget = ThinkingBlock(elapsed=elapsed)
         widget.append(text)
-        widget.finish()
+        if restored:
+            widget.restore(elapsed=elapsed)
+        else:
+            widget.finish()
         self._activity_rail().add_activity(widget)
         self._follow_new_activity()
 

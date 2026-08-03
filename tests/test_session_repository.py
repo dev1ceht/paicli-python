@@ -19,6 +19,7 @@ def test_repository_creates_jsonl_session_and_replays_messages(tmp_path: Path) -
         turn_id="turn_1",
         assistant_content="hi",
         reasoning_content="considered the greeting",
+        reasoning_duration=0.25,
     )
 
     assert not (tmp_path / "sessions.db").exists()
@@ -31,6 +32,7 @@ def test_repository_creates_jsonl_session_and_replays_messages(tmp_path: Path) -
     assert view.model_messages[-1].parts[0].metadata["reasoning_content"] == (
         "considered the greeting"
     )
+    assert view.model_messages[-1].parts[0].metadata["reasoning_duration"] == 0.25
 
 
 def test_repository_persists_thinking_only_interruption(tmp_path: Path) -> None:

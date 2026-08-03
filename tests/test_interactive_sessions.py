@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from textual.widgets import Collapsible
 
 from paicli.config import PaiCliConfig
 from paicli.entrypoints.repl import start_repl
@@ -573,6 +574,7 @@ def test_tui_persists_completed_submission_and_turn_boundary(tmp_path: Path) -> 
             assert view.session_history[-1].parts[0].metadata["reasoning_content"] == (
                 "durable reasoning"
             )
+            assert view.session_history[-1].parts[0].metadata["reasoning_duration"] is not None
             assert "durable answer" in app.query_one(ChatLog).renderable_text()
 
     asyncio.run(run())
@@ -1315,6 +1317,8 @@ def test_tui_renders_restored_session_history_on_mount(tmp_path: Path) -> None:
             thinking = list(app.query(ThinkingBlock))
             assert len(thinking) == 2
             assert all(block.is_expanded is False for block in thinking)
+            assert all("· 0ms" not in block.plain_text for block in thinking)
+            assert all(block.animation_active is False for block in thinking)
             tool = app.query_one(ToolCard)
             assert tool.status == "success"
             assert tool.is_expanded is False
@@ -1360,6 +1364,7 @@ def test_tui_can_create_and_resume_workspace_sessions(tmp_path: Path) -> None:
         role="assistant",
         content="resumed answer",
         reasoning_content="resumed reasoning",
+        reasoning_duration=0.25,
     )
     agent = HistoryAgent()
 
@@ -1388,7 +1393,14 @@ def test_tui_can_create_and_resume_workspace_sessions(tmp_path: Path) -> None:
             assert "resume this history" in rendered
             assert "resumed reasoning" in rendered
             assert "resumed answer" in rendered
-            assert app.query_one(ThinkingBlock).is_expanded is False
+            thinking = app.query_one(ThinkingBlock)
+            assert thinking.is_expanded is False
+            assert "250ms" in thinking.plain_text
+
+            await pilot.click(thinking.query_one(Collapsible))
+            await pilot.pause(0.7)
+            assert thinking.is_expanded is True
+            assert "· 0ms" not in thinking.plain_text
 
     asyncio.run(run())
 

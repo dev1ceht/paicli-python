@@ -161,6 +161,7 @@ class SessionRepository:
         role: str,
         content: str,
         reasoning_content: str | None = None,
+        reasoning_duration: float | None = None,
         partial: bool = False,
         interruption_reason: str | None = None,
         turn_id: str | None = None,
@@ -175,6 +176,10 @@ class SessionRepository:
         )
         if reasoning_content:
             payload["parts"][0]["metadata"]["reasoning_content"] = reasoning_content
+        if reasoning_duration is not None:
+            payload["parts"][0]["metadata"]["reasoning_duration"] = max(
+                0.0, float(reasoning_duration)
+            )
         event = self.append_event(
             session_id,
             event_type,
@@ -206,6 +211,7 @@ class SessionRepository:
         turn_id: str,
         assistant_content: str,
         reasoning_content: str | None = None,
+        reasoning_duration: float | None = None,
         context_checkpoint: dict[str, Any] | None = None,
         **_: Any,
     ) -> SessionMessage:
@@ -214,6 +220,7 @@ class SessionRepository:
             role="assistant",
             content=assistant_content,
             reasoning_content=reasoning_content,
+            reasoning_duration=reasoning_duration,
             turn_id=turn_id,
         )
         self.append_event(
@@ -233,6 +240,7 @@ class SessionRepository:
         turn_id: str,
         assistant_content: str,
         reasoning_content: str | None = None,
+        reasoning_duration: float | None = None,
         reason: str,
         **_: Any,
     ) -> SessionMessage | None:
@@ -250,6 +258,7 @@ class SessionRepository:
                 role="assistant",
                 content=assistant_content,
                 reasoning_content=reasoning_content,
+                reasoning_duration=reasoning_duration,
                 partial=True,
                 interruption_reason=reason,
                 turn_id=turn_id,
@@ -303,6 +312,7 @@ class SessionRepository:
         model_turn: int,
         assistant_content: str,
         reasoning_content: str | None = None,
+        reasoning_duration: float | None = None,
         actions: tuple[ToolActionSpec, ...],
         **_: Any,
     ) -> tuple[PendingAction, ...]:
@@ -315,6 +325,10 @@ class SessionRepository:
         )
         if reasoning_content:
             message_payload["parts"][0]["metadata"]["reasoning_content"] = reasoning_content
+        if reasoning_duration is not None:
+            message_payload["parts"][0]["metadata"]["reasoning_duration"] = max(
+                0.0, float(reasoning_duration)
+            )
         for action in actions:
             message_payload["parts"].append(
                 {
