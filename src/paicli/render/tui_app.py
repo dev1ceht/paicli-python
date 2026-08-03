@@ -131,6 +131,7 @@ class PaiCliApp(App):
         self._session_text_buffer: list[str] = []
         self._thinking_buffer: list[str] = []
         self._session_thinking_buffer: list[str] = []
+        self._session_thinking_duration: float | None = None
         self._input_tokens = 0
         self._output_tokens = 0
         self._cached_tokens = 0
@@ -264,7 +265,12 @@ class PaiCliApp(App):
                     if part.kind == "text":
                         reasoning = str(part.metadata.get("reasoning_content") or "")
                         if reasoning:
-                            chat_log.add_thinking(reasoning)
+                            raw_duration = part.metadata.get("reasoning_duration")
+                            try:
+                                duration = float(raw_duration) if raw_duration is not None else None
+                            except (TypeError, ValueError):
+                                duration = None
+                            chat_log.add_thinking(reasoning, elapsed=duration, restored=True)
                         if part.content:
                             chat_log.add_assistant_text(part.content)
                     elif part.kind == "tool_call":
@@ -492,6 +498,7 @@ class PaiCliApp(App):
         self._session_text_buffer.clear()
         self._thinking_buffer.clear()
         self._session_thinking_buffer.clear()
+        self._session_thinking_duration = None
         self._input_tokens = 0
         self._output_tokens = 0
         self._cached_tokens = 0
@@ -579,6 +586,7 @@ class PaiCliApp(App):
                                     session.complete_turn,
                                     assistant_text,
                                     reasoning_content=reasoning_content,
+                                    **self._reasoning_duration_kwargs(),
                                 )
                             else:
                                 await self._run_session_call(
@@ -586,6 +594,7 @@ class PaiCliApp(App):
                                     assistant_text,
                                     reasoning_content=reasoning_content,
                                     context_checkpoint=context_checkpoint,
+                                    **self._reasoning_duration_kwargs(),
                                 )
                         else:
                             await self._run_session_call(
@@ -593,6 +602,7 @@ class PaiCliApp(App):
                                 assistant_text,
                                 reasoning_content=reasoning_content,
                                 reason=run_state["interruption_reason"],
+                                **self._reasoning_duration_kwargs(),
                             )
                 except Exception as persistence_error:
                     await self._recover_session_persistence_error(
@@ -695,9 +705,11 @@ class PaiCliApp(App):
                     assistant_content=str(message.get("content") or ""),
                     reasoning_content=reasoning_content,
                     actions=list(tool_actions),
+                    **self._reasoning_duration_kwargs(),
                 )
                 self._session_text_buffer.clear()
                 self._session_thinking_buffer.clear()
+                self._session_thinking_duration = None
             elif reasoning_content is not None:
                 self._session_thinking_buffer[:] = [reasoning_content]
         elif ui_event.kind == "tool_call":
@@ -1147,7 +1159,12 @@ class PaiCliApp(App):
         self._flush_typewriter("thinking")
         self._thinking_buffer.clear()
         chat_log = self.query_one("#chat-log", ChatLog)
-        chat_log.finish_stream("thinking")
+        self._session_thinking_duration = chat_log.finish_stream("thinking")
+
+    def _reasoning_duration_kwargs(self) -> dict[str, float]:
+        if self._session_thinking_duration is None:
+            return {}
+        return {"reasoning_duration": self._session_thinking_duration}
 
     def _flush_task_markdown(self, task_id: str | None) -> None:
         if not task_id or task_id not in self._task_buffers:
@@ -2112,6 +2129,7 @@ class PaiCliApp(App):
         self._run_start_time = time.monotonic()
         self._text_buffer.clear()
         self._thinking_buffer.clear()
+        self._session_thinking_duration = None
         self._input_tokens = 0
         self._output_tokens = 0
         self._cached_tokens = 0
