@@ -129,6 +129,15 @@ def test_read_write_tools(tmp_path, monkeypatch):
     assert "2: world" in read_result.content
 
 
+def test_builtin_search_tools_have_one_canonical_name():
+    names = {tool.name for tool in get_builtin_tools()}
+
+    assert "glob_files" in names
+    assert "grep_code" in names
+    assert "glob" not in names
+    assert "grep" not in names
+
+
 def test_read_default_bounds_rendered_output(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     target = tmp_path / "large.txt"
