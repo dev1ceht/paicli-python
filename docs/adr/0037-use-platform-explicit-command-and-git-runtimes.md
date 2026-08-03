@@ -1,3 +1,3 @@
 # Use platform-explicit command and Git runtimes
 
-PaiCLI exposes one production `execute_command` tool rather than a misleading `bash` alias. On Windows it invokes `powershell.exe -NoLogo -NoProfile -NonInteractive -Command` and identifies the runtime as Windows PowerShell 5.1; on POSIX it invokes `/bin/sh -lc`. The workspace is already the command working directory, and terminal input is disabled.
+PaiCLI exposes one production `bash` tool. It invokes a non-interactive Bash executable on every platform, streams stdout/stderr as tool progress events, persists those events for Runtime SSE replay, supports an optional per-call timeout, and terminates the complete process tree on cancellation or timeout. The workspace is the command working directory, and terminal input is disabled.

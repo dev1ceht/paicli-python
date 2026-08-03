@@ -791,6 +791,8 @@ class PaiCliApp(App):
             self._flush_thinking()
             self._flush_text("Assistant Output")
             self._handle_tool_call(payload)
+        elif event_type == "tool_output_delta":
+            self._handle_tool_output(payload)
         elif event_type == "tool_result":
             self._flush_thinking()
             self._flush_text("Assistant Output")
@@ -956,6 +958,8 @@ class PaiCliApp(App):
             self._flush_task_thinking(task_id)
             self._flush_task_markdown(task_id)
             self._handle_tool_call(payload, task_id=task_id)
+        elif event_type == "task_tool_output_delta":
+            self._handle_tool_output(payload, task_id=ui_event.task_id)
         elif event_type == "task_tool_result":
             task_id = ui_event.task_id
             self._flush_task_thinking(task_id)
@@ -1075,6 +1079,15 @@ class PaiCliApp(App):
             name,
             result,
             is_error=is_error,
+            task_id=task_id,
+            tool_call_id=(str(event["tool_call_id"]) if event.get("tool_call_id") else None),
+        )
+
+    def _handle_tool_output(self, event: dict[str, Any], *, task_id: str | None = None) -> None:
+        chat_log = self.query_one("#chat-log", ChatLog)
+        chat_log.append_tool_output(
+            str(event.get("name") or "bash"),
+            str(event.get("text") or ""),
             task_id=task_id,
             tool_call_id=(str(event["tool_call_id"]) if event.get("tool_call_id") else None),
         )

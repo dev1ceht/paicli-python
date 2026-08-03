@@ -11,7 +11,7 @@ def test_audit_log_writes_daily_jsonl_file(tmp_path):
     audit = AuditLog(audit_dir)
 
     audit.record(
-        tool_name="write_file",
+        tool_name="write",
         input_data={"path": "note.txt", "api_key": "secret"},
         outcome="allow",
         approver="hitl",
@@ -24,7 +24,7 @@ def test_audit_log_writes_daily_jsonl_file(tmp_path):
     assert files[0].name.endswith(".jsonl")
     assert files[0].name.count("-") == 3
     event = json.loads(files[0].read_text(encoding="utf-8").strip())
-    assert event["tool_name"] == "write_file"
+    assert event["tool_name"] == "write"
     assert event["input"]["api_key"] == "***"
     assert re.fullmatch(
         r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}",

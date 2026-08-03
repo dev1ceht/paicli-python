@@ -38,7 +38,7 @@ def model_endpoint():
                                             "index": 0,
                                             "id": "call_write",
                                             "function": {
-                                                "name": "write_file",
+                                                "name": "write",
                                                 "arguments": arguments,
                                             },
                                         }

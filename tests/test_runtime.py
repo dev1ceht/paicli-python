@@ -338,7 +338,7 @@ def test_waiting_approval_can_be_approved_or_canceled_atomically(tmp_path):
     approval = manager.wait_for_approval(
         task_id,
         checkpoint={"next_tool_index": 0, "messages": []},
-        request={"tool_name": "write_file", "input": {"path": "notes.txt"}},
+        request={"tool_name": "write", "input": {"path": "notes.txt"}},
     )
     assert approval is not None
     assert manager.get(task_id).status == "waiting_approval"  # type: ignore[union-attr]
@@ -596,6 +596,40 @@ def test_runtime_turns_restore_session_history_between_requests(
     ]
 
 
+def test_runtime_persists_tool_output_without_adding_it_to_model_history(tmp_path):
+    repository = SessionRepository(tmp_path / "sessions.db")
+    interactive = InteractiveSession(repository, tmp_path)
+    interactive.begin_turn("run a command")
+
+    class OutputEngine:
+        async def ask(self, *args, **kwargs):  # noqa: ARG002
+            yield {
+                "type": "tool_output_delta",
+                "tool_call_id": "call_bash",
+                "name": "bash",
+                "text": "hello\n",
+                "stream": "stdout",
+            }
+            yield {"type": "text_delta", "text": "done"}
+            yield {"type": "done"}
+
+    server = RuntimeApiServer(
+        cwd=str(tmp_path),
+        config=load_config(project_root=tmp_path),
+        api_key="test-key",
+        session_repository=repository,
+    )
+
+    assert asyncio.run(server._execute_session_turn(interactive, OutputEngine(), "run")) == "done"
+
+    events = repository.list_events(interactive.id)
+    output_events = [event for event in events if event.type == "tool_output_delta"]
+    assert len(output_events) == 1
+    assert output_events[0].payload["text"] == "hello\n"
+    assert all("hello\n" not in message.content for message in interactive.agent_history)
+    interactive.close()
+
+
 def test_runtime_api_denies_a_waiting_task(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path / "home"))
@@ -659,7 +693,7 @@ def test_task_cli_approves_and_shows_a_waiting_approval(tmp_path, monkeypatch):
         manager.wait_for_approval(
             task_id,
             checkpoint={},
-            request={"tool_name": "write_file", "input": {"path": "notes.txt"}},
+            request={"tool_name": "write", "input": {"path": "notes.txt"}},
         )
         is not None
     )

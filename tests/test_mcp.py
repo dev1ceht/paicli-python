@@ -20,8 +20,8 @@ def test_mcp_tools_list(tmp_path, monkeypatch):
 
     response = asyncio.run(run())
     tools = response["result"]["tools"]
-    assert any(tool["name"] == "read_file" for tool in tools)
-    assert any(tool["name"] == "execute_command" for tool in tools)
+    assert any(tool["name"] == "read" for tool in tools)
+    assert any(tool["name"] == "bash" for tool in tools)
 
 
 def test_mcp_client_registers_and_calls_stdio_tool(tmp_path, monkeypatch):

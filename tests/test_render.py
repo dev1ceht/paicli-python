@@ -162,7 +162,7 @@ def test_text_deltas_render_as_markdown_on_turn_complete():
 
     renderer.handle({"type": "thinking_delta", "thinking": "需要先确认项目结构"})
     renderer.handle({"type": "text_delta", "text": "你好，我是 **Pai"})
-    renderer.handle({"type": "text_delta", "text": "CLI**\n\n- `read_file`\n- **网页搜索**"})
+    renderer.handle({"type": "text_delta", "text": "CLI**\n\n- `read`\n- **网页搜索**"})
     renderer.handle({"type": "usage", "usage": {"input_tokens": 250, "output_tokens": 50}})
     renderer.handle({"type": "turn_complete"})
     renderer.handle({"type": "done", "total_turns": 1, "total_tokens": 300})
@@ -172,11 +172,11 @@ def test_text_deltas_render_as_markdown_on_turn_complete():
     assert "需要先确认项目结构" in output
     assert "Final Output" in output
     assert "PaiCLI" in output
-    assert "read_file" in output
+    assert "read" in output
     assert "网页搜索" in output
     assert "Run Summary" not in output
     assert "**PaiCLI**" not in output
-    assert "`read_file`" not in output
+    assert "`read`" not in output
 
     stats = renderer.toolbar_status()
     assert stats["turns"] == 1
@@ -350,9 +350,9 @@ def test_format_cost_formats_yuan():
 def test_tool_label_known_tools():
     from paicli.render.rich_renderer import _tool_label
 
-    assert "📖 读取" in _tool_label("read_file", {"path": "/tmp/x.py"})
-    assert "✏️ 写入" in _tool_label("write_file", {"path": "src/main.py"})
-    assert "✏️ 编辑" in _tool_label("edit_file", {"path": "src/main.py"})
+    assert "📖 读取" in _tool_label("read", {"path": "/tmp/x.py"})
+    assert "✏️ 写入" in _tool_label("write", {"path": "src/main.py"})
+    assert "✏️ 编辑" in _tool_label("edit", {"path": "src/main.py"})
     assert "🩹 应用补丁" in _tool_label("apply_patch", {"patch": "*** Begin Patch"})
     assert "⚡ 执行命令" in _tool_label("bash", {"command": "ls"})
     assert "🌐 联网搜索" in _tool_label("web_search", {"query": "python"})

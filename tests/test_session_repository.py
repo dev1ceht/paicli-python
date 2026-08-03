@@ -94,9 +94,9 @@ def test_repository_rebuilds_pending_tool_action_state_from_entries(tmp_path: Pa
         actions=(
             ToolActionSpec(
                 tool_call_id="call_1",
-                tool_name="read_file",
+                tool_name="read",
                 arguments={"path": "README.md"},
-                raw_call={"id": "call_1", "function": {"name": "read_file"}},
+                raw_call={"id": "call_1", "function": {"name": "read"}},
                 is_read_only=True,
                 is_idempotent=True,
             ),

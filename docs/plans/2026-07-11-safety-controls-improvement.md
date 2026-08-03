@@ -19,7 +19,7 @@ Make PaiCLI's approval, path safety, command policy, snapshot behavior, and audi
 
 1. **Model policy decisions**
    - Add explicit approval classifications: default approval, mandatory confirmation, session-allowlist eligible, and unattended eligible.
-   - Set `write_file` and all dynamically registered MCP tools to default approval. Preserve `revert_turn` as mandatory confirmation.
+   - Set `write`, `edit`, `apply_patch`, `bash`, and all dynamically registered MCP tools to default approval. Preserve `revert_turn` as mandatory confirmation.
    - Replace approval-screen `Approve All`/YOLO behavior with `Allow this tool for this session`, backed by an exact-name in-memory allowlist.
    - Keep `/hitl never` as the only route to unattended mode; show a persistent warning in both REPL and TUI.
 

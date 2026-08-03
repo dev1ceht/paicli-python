@@ -239,6 +239,29 @@ class InteractiveSession:
             is_error=is_error,
         )
 
+    def record_tool_output(
+        self,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        text: str,
+        stream: str,
+    ) -> None:
+        """Persist live tool output without adding it to model messages."""
+        if not text:
+            return
+        self.repository.append_event(
+            self.id,
+            "tool_output_delta",
+            {
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "text": text,
+                "stream": stream,
+            },
+            turn_id=self._require_active_turn(),
+        )
+
     def record_usage(self, record: UsageRecord) -> None:
         turn_id = self._require_active_turn()
         self.repository.record_usage(
