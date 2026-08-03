@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from paicli.retry import RetryPolicy, RetryPolicyOverride
+from paicli.thinking import THINKING_LEVEL_SET, THINKING_LEVELS
 
 
 def _home() -> Path:
@@ -21,15 +22,21 @@ class LlmConfig:
     model: str = "deepseek-v4-flash"
     api_key: str = ""
     base_url: str | None = None
-    max_tokens: int = 8192
-    thinking_budget: int | None = 4096
+    max_tokens: int = 16384
+    thinking_level: str | None = None
+    thinking_budget: int | None = 8192
     temperature: float = 0.7
     timeout: float = 120.0
     context_window: int | None = None
 
     def __post_init__(self) -> None:
+        if self.max_tokens <= 0:
+            raise ValueError("max_tokens must be positive")
         if self.thinking_budget is not None and self.thinking_budget <= 0:
             raise ValueError("thinking_budget must be positive")
+        if self.thinking_level is not None and self.thinking_level not in THINKING_LEVEL_SET:
+            values = ", ".join(THINKING_LEVELS)
+            raise ValueError(f"thinking_level must be one of: {values}")
         if self.context_window is not None and self.context_window <= 0:
             raise ValueError("context_window must be positive")
 
@@ -207,21 +214,20 @@ def load_config(
 
     user_config = _read_json(_home() / ".paicli" / "config.json")
     if user_config:
-        data = _deep_merge(data, user_config)
+        data = _merge_config(data, user_config)
 
     root = Path(project_root).resolve() if project_root else None
     if root:
         project_config = _read_json(root / ".paicli" / "config.json")
         if project_config:
-            data = _deep_merge(data, project_config)
+            data = _merge_config(data, project_config)
         project_env = _read_env(root / ".env")
         if project_env:
             data = _apply_env(data, project_env)
 
-    if overrides:
-        data = _deep_merge(data, overrides)
-
     data = _apply_env(data, env_map)
+    if overrides:
+        data = _merge_config(data, overrides)
     config = _dict_to_config(data)
     config.memory.long_term_path = _expand_home(config.memory.long_term_path)
     config.memory.long_term_db_path = _expand_home(config.memory.long_term_db_path)
@@ -237,11 +243,11 @@ def load_benchmark_config(
     """Load defaults plus process environment without host or project config files."""
 
     data = _config_to_dict(PaiCliConfig())
-    if overrides:
-        data = _deep_merge(data, overrides)
     process_env = env if env is not None else os.environ
     benchmark_env = {key: value for key, value in process_env.items() if key.startswith("PAICLI_")}
     data = _apply_env(data, benchmark_env)
+    if overrides:
+        data = _merge_config(data, overrides)
     config = _dict_to_config(data)
     config.memory.long_term_path = _expand_home(config.memory.long_term_path)
     config.memory.long_term_db_path = _expand_home(config.memory.long_term_db_path)
@@ -262,10 +268,10 @@ def load_llm_config_for_provider(
 
     user_config = _read_json(_home() / ".paicli" / "config.json")
     if user_config:
-        data = _deep_merge(data, user_config)
+        data = _merge_config(data, user_config)
     project_config = _read_json(root / ".paicli" / "config.json")
     if project_config:
-        data = _deep_merge(data, project_config)
+        data = _merge_config(data, project_config)
 
     resolved_env: dict[str, str | None] = _read_env(root / ".env")
     resolved_env.update(env if env is not None else os.environ)
@@ -286,6 +292,9 @@ def config_to_public_dict(config: PaiCliConfig) -> dict[str, Any]:
     data = _config_to_dict(config)
     if data.get("llm", {}).get("api_key"):
         data["llm"]["api_key"] = "***"
+    llm = data.get("llm", {})
+    llm.pop("thinking_budget", None)
+    llm["thinking_level"] = llm.get("thinking_level") or "auto"
     return data
 
 
@@ -334,7 +343,6 @@ def _apply_env(data: dict[str, Any], env: dict[str, str | None]) -> dict[str, An
         ("PAICLI_MODEL", "model", str),
         ("PAICLI_BASE_URL", "base_url", str),
         ("PAICLI_MAX_TOKENS", "max_tokens", int),
-        ("PAICLI_THINKING_BUDGET", "thinking_budget", int),
         ("PAICLI_TEMPERATURE", "temperature", float),
         ("PAICLI_CONTEXT_WINDOW", "context_window", int),
     ]
@@ -343,6 +351,30 @@ def _apply_env(data: dict[str, Any], env: dict[str, str | None]) -> dict[str, An
         if raw not in (None, ""):
             with suppress(TypeError, ValueError):
                 llm[config_key] = caster(raw)
+
+    thinking_level = env.get("PAICLI_THINKING_LEVEL")
+    if thinking_level not in (None, ""):
+        normalized_level = str(thinking_level).strip().lower()
+        if normalized_level not in THINKING_LEVEL_SET:
+            values = ", ".join(THINKING_LEVELS)
+            raise ValueError(f"PAICLI_THINKING_LEVEL (thinking_level) must be one of: {values}")
+        llm["thinking_level"] = normalized_level
+
+    thinking_budget = env.get("PAICLI_THINKING_BUDGET")
+    if thinking_budget not in (None, ""):
+        normalized_budget = str(thinking_budget).strip().lower()
+        if normalized_budget in {"null", "none"}:
+            llm["thinking_budget"] = None
+        else:
+            try:
+                parsed_budget = int(normalized_budget)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "PAICLI_THINKING_BUDGET must be a positive integer or null"
+                ) from exc
+            if parsed_budget <= 0:
+                raise ValueError("PAICLI_THINKING_BUDGET must be a positive integer or null")
+            llm["thinking_budget"] = parsed_budget
 
     provider = str(llm.get("provider") or "").lower()
     if not llm.get("api_key"):
@@ -457,6 +489,18 @@ def _deep_merge(target: dict[str, Any], source: dict[str, Any]) -> dict[str, Any
             result[key] = _deep_merge(old, value)
         else:
             result[key] = deepcopy(value)
+    return result
+
+
+def _merge_config(target: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
+    result = _deep_merge(target, source)
+    source_llm = source.get("llm")
+    if (
+        isinstance(source_llm, dict)
+        and "thinking_budget" in source_llm
+        and source_llm["thinking_budget"] is None
+    ):
+        result.setdefault("llm", {})["thinking_budget"] = None
     return result
 
 

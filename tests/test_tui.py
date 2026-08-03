@@ -13,6 +13,7 @@ from textual.binding import Binding
 from textual.widgets import Footer, Static, TextArea
 
 from paicli.config import PaiCliConfig
+from paicli.llm import create_llm_client
 from paicli.render.history import PromptHistory
 from paicli.render.textual_widgets import (
     ActivityRail,
@@ -844,6 +845,42 @@ def test_tui_model_command_rebuilds_the_idle_agent_and_refreshes_ui(tmp_path):
             assert (
                 "Model switched to qwen-turbo (qwen)." in app.query_one(ChatLog).renderable_text()
             )
+
+    asyncio.run(run())
+
+
+def test_tui_thinking_command_normalizes_level_updates_client_and_status():
+    config = PaiCliConfig(
+        llm=PaiCliConfig().llm.__class__(
+            provider="qwen",
+            model="qwen-plus",
+            api_key="key",
+        )
+    )
+    client = create_llm_client(config.llm)
+
+    class ThinkingAgent:
+        llm_client = client
+
+    async def run() -> None:
+        app = PaiCliApp(agent=ThinkingAgent(), config=config, cwd=".")
+        app._model = client.model_name
+        app._provider = client.provider_name
+        async with app.run_test(size=(100, 24)) as pilot:
+            app._handle_slash_command("/thinking medium")
+            await pilot.pause()
+
+            assert config.llm.thinking_level == "on"
+            assert client.thinking_level == "on"
+            assert app.query_one(StatusBar).thinking_level == "on"
+            assert "thinking: on" in app.query_one(ChatLog).renderable_text()
+
+            app._handle_slash_command("/thinking")
+            assert "available: off, on" in app.query_one(ChatLog).renderable_text()
+
+            app._handle_slash_command("/thinking auto")
+            assert config.llm.thinking_level is None
+            assert client.thinking_level is None
 
     asyncio.run(run())
 

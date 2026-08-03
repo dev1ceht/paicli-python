@@ -29,6 +29,7 @@ from paicli.llm import create_llm_client
 from paicli.mcp import load_mcp_server_specs, serve_http, serve_stdio, write_chrome_devtools_config
 from paicli.runtime import RuntimeApiServer
 from paicli.runtime.api import runtime_api_key
+from paicli.thinking import THINKING_LEVEL_SET
 
 app = typer.Typer(
     name="paicli",
@@ -58,6 +59,13 @@ def main(
     provider: Annotated[
         str | None,
         typer.Option("--provider", help="Override LLM provider"),
+    ] = None,
+    thinking: Annotated[
+        str | None,
+        typer.Option(
+            "--thinking",
+            help="Set thinking level: off, on, minimal, low, medium, high, xhigh, max",
+        ),
     ] = None,
     plain: Annotated[bool, typer.Option("--plain", help="Use plain text rendering")] = False,
     cwd: Annotated[Path | None, typer.Option("--cwd", help="Working directory")] = None,
@@ -93,6 +101,11 @@ def main(
     if ctx.invoked_subcommand is not None:
         return
     root = (cwd or Path.cwd()).resolve()
+    if thinking is not None:
+        thinking = thinking.strip().lower()
+        if thinking not in THINKING_LEVEL_SET:
+            values = ", ".join(sorted(THINKING_LEVEL_SET))
+            raise typer.BadParameter(f"thinking must be one of: {values}")
     benchmark_only_values = (
         benchmark_log_dir,
         max_turns,
@@ -129,7 +142,10 @@ def main(
         log_dir = benchmark_log_dir or Path(
             os.getenv("PAICLI_BENCHMARK_LOG_DIR", ".paicli/benchmark")
         )
-        config = load_benchmark_config(overrides={"render_mode": "plain"})
+        benchmark_overrides: dict[str, object] = {"render_mode": "plain"}
+        if thinking is not None:
+            benchmark_overrides["llm"] = {"thinking_level": thinking}
+        config = load_benchmark_config(overrides=benchmark_overrides)
         options = BenchmarkOptions(
             log_dir=log_dir,
             source_identity_file=benchmark_source_identity,
@@ -146,18 +162,20 @@ def main(
         typer.echo(result)
         return
     overrides: dict = {}
-    if provider or model or plain:
+    if provider or model or plain or thinking is not None:
         overrides = {
             "llm": {"provider": provider, "model": model},
             "render_mode": "plain" if plain else None,
         }
+        if thinking is not None:
+            overrides["llm"]["thinking_level"] = thinking
     config = load_config(project_root=root, overrides=overrides)
     if plain:
         config.render_mode = "plain"
     if prompt is not None:
         asyncio.run(_run_prompt(prompt, str(root), config))
     else:
-        asyncio.run(start_repl(str(root), config))
+        asyncio.run(start_repl(str(root), config, cli_thinking_level=thinking))
 
 
 @app.command("doctor")

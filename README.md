@@ -261,6 +261,18 @@ Runtime API 前，请确认工作区、权限和网络边界符合预期。
 - [本地 smoke 基准说明](docs/specs/local-smoke-v1.md)
 - [PaiCLI 学习路线](https://paicoding.com/paicli-learning-path)
 
+## Thinking control
+
+推理等级是固定选项，不支持自定义：`off`、`on`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`。
+
+- `thinking_level` 缺省为 `auto`；默认 `.env` 不写等级。
+- `PAICLI_THINKING_BUDGET` 默认 `8192`，可用 `null` 或 `none` 禁用。
+- `max_tokens` 默认 `16384`；budget 不会自动映射为 max tokens。
+- CLI 可使用 `--thinking high`；交互界面可使用 `/thinking`、`/thinking high`、`/thinking auto`。
+- 状态栏显示当前等级，不显示 budget。
+
+当前模型只展示自己支持的等级。Qwen 使用 `enable_thinking` / `thinking_budget`，DeepSeek 使用 `thinking` / `reasoning_effort`；这些字段由模型能力表决定，与 provider 无关。
+
 ## License
 
 [MIT](LICENSE)

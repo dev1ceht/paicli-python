@@ -19,6 +19,16 @@ def validate_event_payload(event_type: str, payload: dict[str, Any]) -> None:
         if title is not None and (not isinstance(title, str) or not title):
             raise TypeError("session title must be a non-empty string")
         return
+    if event_type == "session.thinking_level_changed":
+        if "thinking_level" not in payload:
+            raise TypeError("thinking_level must be present")
+        thinking_level = payload.get("thinking_level")
+        if thinking_level is not None:
+            from paicli.thinking import THINKING_LEVEL_SET
+
+            if not isinstance(thinking_level, str) or thinking_level not in THINKING_LEVEL_SET:
+                raise ValueError("session thinking_level must be a fixed level or null")
+        return
     if event_type == "context.compacted":
         _require_non_empty_string(payload, "checkpoint_id")
         _require_non_empty_string(payload, "summary")

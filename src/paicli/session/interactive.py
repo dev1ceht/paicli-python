@@ -52,6 +52,22 @@ class InteractiveSession:
         self._stats_snapshot = stats
         return stats
 
+    def thinking_level_state(self) -> tuple[bool, str | None]:
+        """Return whether this Session has an explicit thinking-level event."""
+        for event in reversed(self.repository.list_events(self.id)):
+            if event.type == "session.thinking_level_changed":
+                value = event.payload.get("thinking_level")
+                return True, value if isinstance(value, str) else None
+        return False, None
+
+    def record_thinking_level(self, thinking_level: str | None) -> None:
+        self._require_idle()
+        self.repository.append_event(
+            self.id,
+            "session.thinking_level_changed",
+            {"thinking_level": thinking_level},
+        )
+
     @property
     def agent_history(self) -> list[Message]:
         view = self.repository.rebuild_session_view(self.id)

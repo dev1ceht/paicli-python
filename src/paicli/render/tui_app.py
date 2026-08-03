@@ -97,6 +97,7 @@ class PaiCliApp(App):
         approval_callback: Any = None,
         session_repository: Any = None,
         session_id: str | None = None,
+        cli_thinking_level: str | None = None,
     ) -> None:
         driver_class = None
         if sys.platform == "win32":
@@ -126,6 +127,16 @@ class PaiCliApp(App):
             )
             if agent is not None:
                 self._interactive_session.restore_agent_history(agent)
+            if (
+                agent is not None
+                and config is not None
+                and cli_thinking_level is None
+                and callable(getattr(agent, "reconfigure_llm", None))
+            ):
+                has_session_level, session_level = self._interactive_session.thinking_level_state()
+                if has_session_level:
+                    config.llm.thinking_level = session_level
+                    agent.reconfigure_llm(config.llm)
         # State
         self._text_buffer: list[str] = []
         self._session_text_buffer: list[str] = []
@@ -386,6 +397,9 @@ class PaiCliApp(App):
             chat_log.add_info(
                 json.dumps(config_to_public_dict(self.config), ensure_ascii=False, indent=2)
             )
+            return
+        if command == "/thinking":
+            self._thinking_command(arg, chat_log)
             return
         if command == "/model":
             self._model_command(arg, chat_log)
@@ -1248,6 +1262,9 @@ class PaiCliApp(App):
         status_bar.model = (
             f"{self._provider}/{self._model}" if self._provider and self._model else self._model
         )
+        status_bar.thinking_level = (
+            getattr(getattr(self.config, "llm", None), "thinking_level", None) or "auto"
+        )
         status_bar.phase = self._phase
 
         reading = self._context_usage.current
@@ -1624,6 +1641,12 @@ class PaiCliApp(App):
             return
         if self.agent is not None:
             self._interactive_session.restore_agent_history(self.agent)
+            has_session_level, session_level = self._interactive_session.thinking_level_state()
+            if has_session_level and self.config is not None and callable(
+                getattr(self.agent, "reconfigure_llm", None)
+            ):
+                self.config.llm.thinking_level = session_level
+                self.agent.reconfigure_llm(self.config.llm)
         self.query_one("#chat-log", ChatLog).clear_conversation()
         self._show_restored_session_history()
         build_context_event = getattr(self.agent, "context_usage_event", None)
@@ -1767,6 +1790,8 @@ class PaiCliApp(App):
         from paicli.config import load_llm_config_for_provider
 
         llm_config = load_llm_config_for_provider(self.cwd, provider, model)
+        llm_config.thinking_level = self.config.llm.thinking_level
+        llm_config.thinking_budget = self.config.llm.thinking_budget
         if not llm_config.api_key:
             chat_log.add_info(
                 f"[red]Model switch failed:[/red] no API key configured for {provider}."
@@ -1783,7 +1808,42 @@ class PaiCliApp(App):
             self._context_usage.apply(context_event)
         self.query_one(StartupBanner).update_model(self._model, self._provider)
         self._update_status_bar()
+        if self._interactive_session is not None:
+            self._interactive_session.record_thinking_level(llm_config.thinking_level)
         chat_log.add_info(f"Model switched to {self._model} ({self._provider}).")
+
+    def _thinking_command(self, arg: str, chat_log: ChatLog) -> None:
+        if self.agent is None or self.config is None:
+            chat_log.add_info("[red]Agent is not initialized[/red]")
+            return
+        from paicli.llm.capabilities import available_thinking_levels, resolve_thinking_level
+        from paicli.thinking import THINKING_LEVEL_SET
+
+        model = self.agent.llm_client.model_name
+        available = available_thinking_levels(model)
+        current = self.config.llm.thinking_level or "auto"
+        if not arg:
+            chat_log.add_info(f"thinking: {current}\navailable: {', '.join(available)}")
+            return
+
+        requested = arg.strip().lower()
+        if requested == "auto":
+            normalized = resolve_thinking_level(model, None)
+            persisted = None
+        elif requested in THINKING_LEVEL_SET:
+            normalized = resolve_thinking_level(model, requested)
+            persisted = normalized
+        else:
+            values = ", ".join(sorted(THINKING_LEVEL_SET))
+            chat_log.add_info(f"[red]thinking must be one of: {values}, auto[/red]")
+            return
+
+        self.config.llm.thinking_level = normalized
+        self.agent.llm_client.thinking_level = normalized
+        if self._interactive_session is not None:
+            self._interactive_session.record_thinking_level(persisted)
+        self._update_status_bar()
+        chat_log.add_info(f"thinking: {normalized or 'auto'}")
 
     def _hitl_command(self, arg: str, chat_log: ChatLog) -> None:
         if arg in {"always", "auto", "never"}:
