@@ -134,7 +134,7 @@ def get_builtin_tools() -> list[Tool]:
             handler=list_dir,
         ),
         Tool(
-            name="glob",
+            name="glob_files",
             description="Find files by glob pattern inside the current workspace.",
             parameters=object_schema(
                 {
@@ -147,20 +147,7 @@ def get_builtin_tools() -> list[Tool]:
             handler=glob_files,
         ),
         Tool(
-            name="glob_files",
-            description="Alias of glob. Find files by glob pattern inside the current workspace.",
-            parameters=object_schema(
-                {
-                    "pattern": {"type": "string", "description": "Glob pattern"},
-                    "limit": {"type": "number", "description": "Maximum results"},
-                },
-                ["pattern"],
-            ),
-            required_keys=["pattern"],
-            handler=glob_files,
-        ),
-        Tool(
-            name="grep",
+            name="grep_code",
             description="Search text in workspace files.",
             parameters=object_schema(
                 {
@@ -172,22 +159,7 @@ def get_builtin_tools() -> list[Tool]:
                 ["pattern"],
             ),
             required_keys=["pattern"],
-            handler=grep,
-        ),
-        Tool(
-            name="grep_code",
-            description="Alias of grep. Search text in workspace files.",
-            parameters=object_schema(
-                {
-                    "pattern": {"type": "string", "description": "Regex or plain text pattern"},
-                    "path": {"type": "string", "description": "Optional path to search"},
-                    "regex": {"type": "boolean", "description": "Treat pattern as regex"},
-                    "limit": {"type": "number", "description": "Maximum matches"},
-                },
-                ["pattern"],
-            ),
-            required_keys=["pattern"],
-            handler=grep,
+            handler=grep_code,
         ),
         Tool(
             name="bash",
@@ -525,7 +497,7 @@ async def glob_files(payload: dict[str, Any], context: ToolContext) -> ToolResul
     return ToolResult("\n".join(rels) or "(no matches)")
 
 
-async def grep(payload: dict[str, Any], context: ToolContext) -> ToolResult:
+async def grep_code(payload: dict[str, Any], context: ToolContext) -> ToolResult:
     root = Path(context.cwd).resolve()
     start = _resolve_path(context, str(payload.get("path") or "."))
     pattern = str(payload["pattern"])
