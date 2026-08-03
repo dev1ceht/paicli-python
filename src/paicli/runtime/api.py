@@ -288,6 +288,13 @@ class RuntimeApiServer:
                         content=str(event.get("result") or ""),
                         is_error=bool(event.get("is_error")),
                     )
+                elif event_type == "tool_output_delta":
+                    interactive.record_tool_output(
+                        tool_call_id=str(event.get("tool_call_id") or ""),
+                        tool_name=str(event.get("name") or "bash"),
+                        text=str(event.get("text") or ""),
+                        stream=str(event.get("stream") or "stdout"),
+                    )
                 elif event_type == "error":
                     raise event["error"]
                 elif event_type == "done":

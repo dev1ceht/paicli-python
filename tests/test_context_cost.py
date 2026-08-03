@@ -20,18 +20,17 @@ def test_scripted_context_cost_runner_executes_isolated_fixture_and_writes_artif
                 "id": "rename-message",
                 "prompt": "Replace the message text and verify it.",
                 "fixture_repo": "fixtures/rename",
-                "allowed_tools": ["read_file", "write_file"],
+                "allowed_tools": ["read", "write"],
                 "step_budget": 4,
                 "scripted_outputs": [
-                    {"type": "tool", "name": "read_file", "arguments": {"path": "message.txt"}},
+                    {"type": "tool", "name": "read", "arguments": {"path": "message.txt"}},
                         {
                             "type": "tool",
-                            "name": "write_file",
-                            "arguments": {
-                                "path": "message.txt",
-                                "content": "after\n",
-                                "overwrite": True,
-                            },
+                            "name": "write",
+                                "arguments": {
+                                    "path": "message.txt",
+                                    "content": "after\n",
+                                },
                         },
                     {"type": "final", "text": "Updated and verified message.txt."},
                 ],
@@ -156,7 +155,7 @@ def test_project_context_cost_manifest_contains_five_isolated_native_tool_tasks(
         assert task["verifier"]
         assert all(action["type"] in {"tool", "final"} for action in task["scripted_outputs"])
         assert all(
-            action.get("name") in {"read_file", "write_file"}
+            action.get("name") in {"read", "write"}
             for action in task["scripted_outputs"]
             if action["type"] == "tool"
         )

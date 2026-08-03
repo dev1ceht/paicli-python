@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from dataclasses import replace
 from typing import Any, cast
 from uuid import uuid4
 
@@ -105,10 +106,11 @@ class ToolExecutor:
             if tool.requires_approval or context.config.policy.hitl_mode == "always":
                 approver = "hitl"
 
+            execution_context = replace(context, tool_call_id=tool_call_id or None)
             result = await self._execute_with_retry(
                 tool,
                 data,
-                context,
+                execution_context,
                 logical_call_id=tool_call_id or f"tool_{uuid4().hex}",
                 audit=audit,
             )
@@ -273,7 +275,7 @@ class ToolExecutor:
         return cast(ToolDecision, result)
 
     def _preflight(self, tool: Tool, payload: dict[str, Any], context: ToolContext) -> None:
-        if tool.name in {"bash", "execute_command"}:
+        if tool.name == "bash":
             CommandGuard(context.config.policy.command_blacklist).validate(str(payload["command"]))
 
 

@@ -643,7 +643,7 @@ class FakeClient:
                 "tool_call": {
                     "index": 0,
                     "id": "call_1",
-                    "function": {"name": "read_file", "arguments": '{"path":"note.txt"}'},
+                    "function": {"name": "read", "arguments": '{"path":"note.txt"}'},
                 },
             }
             yield {"type": "message_end", "stop_reason": "tool_use"}
@@ -788,6 +788,100 @@ def test_query_engine_executes_tool_and_replays_result(tmp_path, monkeypatch):
     result = asyncio.run(run())
     assert result.text == "done"
     assert result.turns == 2
+
+
+def test_query_forwards_live_tool_output_without_adding_deltas_to_model_history(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("PAICLI_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    config = load_config(project_root=tmp_path)
+    config.features.memory = False
+    config.policy.hitl_mode = "never"
+    config.policy.audit_log_path = str(tmp_path / "audit")
+    seen_messages: list[list[Message]] = []
+
+    async def streaming_bash(_payload, context):
+        assert context.progress_sink is not None
+        context.progress_sink(
+            {
+                "type": "tool_output_delta",
+                "tool_call_id": context.tool_call_id or "",
+                "name": "bash",
+                "text": "first\n",
+                "stream": "stdout",
+            }
+        )
+        await asyncio.sleep(0)
+        context.progress_sink(
+            {
+                "type": "tool_output_delta",
+                "tool_call_id": context.tool_call_id or "",
+                "name": "bash",
+                "text": "second\n",
+                "stream": "stdout",
+            }
+        )
+        return ToolResult("final command result")
+
+    class StreamingClient:
+        model_name = "fake-model"
+        provider_name = "fake-provider"
+        max_context_window = 128_000
+
+        def __init__(self):
+            self.calls = 0
+
+        async def chat(self, messages, tools, *, system_prompt):  # noqa: ARG002
+            seen_messages.append(list(messages))
+            self.calls += 1
+            if self.calls == 1:
+                yield {
+                    "type": "tool_call_delta",
+                    "tool_call": {
+                        "index": 0,
+                        "id": "call_bash",
+                        "function": {"name": "bash", "arguments": '{"command":"echo hi"}'},
+                    },
+                }
+                yield {"type": "message_end", "stop_reason": "tool_use"}
+                return
+            assert messages[-1].content == "final command result"
+            yield {"type": "text_delta", "text": "done"}
+            yield {"type": "message_end", "stop_reason": "end_turn"}
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="bash",
+            description="streaming bash",
+            parameters={
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+            handler=streaming_bash,
+            is_read_only=False,
+        )
+    )
+    engine = QueryEngine(
+        llm_client=StreamingClient(),
+        tool_registry=registry,
+        config=config,
+        cwd=str(tmp_path),
+    )
+
+    async def run() -> list[dict[str, Any]]:
+        return [event async for event in engine.ask("run command")]
+
+    events = asyncio.run(run())
+    output_events = [event for event in events if event["type"] == "tool_output_delta"]
+    result_index = next(
+        index for index, event in enumerate(events) if event["type"] == "tool_result"
+    )
+    assert [event["text"] for event in output_events] == ["first\n", "second\n"]
+    assert all(event["tool_call_id"] == "call_bash" for event in output_events)
+    assert all(events.index(event) < result_index for event in output_events)
+    assert seen_messages[1][-1].content == "final command result"
 
 
 def test_agent_run_does_not_emit_an_uncanonical_pending_estimate(tmp_path, monkeypatch):

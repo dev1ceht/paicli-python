@@ -682,7 +682,7 @@ def test_compaction_delta_preserves_assistant_tool_call_name_and_arguments():
                 {
                     "id": "call-1",
                     "function": {
-                        "name": "read_file",
+                        "name": "read",
                         "arguments": '{"path":"notes.txt"}',
                     },
                 }
@@ -693,7 +693,7 @@ def test_compaction_delta_preserves_assistant_tool_call_name_and_arguments():
     delta, protected = extract_delta_items(messages, protected_turns=0)
 
     assert not protected
-    assert "read_file" in delta[0].content
+    assert "read" in delta[0].content
     assert "notes.txt" in delta[0].content
 
 
@@ -1206,7 +1206,7 @@ class TestCompaction:
             DeltaItem(
                 turn_id=2,
                 role="tool",
-                content="read_file: /path/to/file.py",
+                content="read: /path/to/file.py",
                 tool_call_id="call_1",
             ),
         ]

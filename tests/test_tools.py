@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 from threading import Event
 
 import pytest
@@ -15,9 +14,7 @@ from paicli.tools.base import Tool, ToolContext, ToolResult
 from paicli.tools.executor import ToolExecutor
 
 
-def test_execute_command_uses_windows_powershell_without_terminal_input(
-    tmp_path, monkeypatch
-):
+def test_bash_uses_noninteractive_bash_without_terminal_input(tmp_path, monkeypatch):
     config = load_config(project_root=tmp_path)
     config.policy.hitl_mode = "never"
     registry = ToolRegistry()
@@ -27,9 +24,20 @@ def test_execute_command_uses_windows_powershell_without_terminal_input(
 
     class FakeProcess:
         returncode = 0
+        pid = 123
 
-        async def communicate(self):
-            return b"ok", b""
+        class Stream:
+            def __init__(self, chunks):
+                self._chunks = iter(chunks)
+
+            async def read(self, _size):
+                return next(self._chunks, b"")
+
+        stdout = Stream([b"ok", b""])
+        stderr = Stream([b""])
+
+        async def wait(self):
+            return self.returncode
 
     captured_args = ()
 
@@ -40,9 +48,10 @@ def test_execute_command_uses_windows_powershell_without_terminal_input(
         return FakeProcess()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr("paicli.tools.command_runner.resolve_bash", lambda: "bash")
 
     async def run():
-        tool = registry.get("execute_command")
+        tool = registry.get("bash")
         assert tool
         return await tool.execute({"command": "date"}, context)
 
@@ -50,47 +59,52 @@ def test_execute_command_uses_windows_powershell_without_terminal_input(
 
     assert result.content == "ok"
     assert captured_options["stdin"] is asyncio.subprocess.DEVNULL
-    execute_tool = registry.get("execute_command")
+    execute_tool = registry.get("bash")
     assert execute_tool
-    if sys.platform == "win32":
-        assert captured_args == (
-            "powershell.exe",
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "date",
-        )
-        assert "Windows PowerShell 5.1" in execute_tool.description
-        assert registry.get("bash") is None
-    else:
-        assert captured_args == ("/bin/sh", "-lc", "date")
+    assert captured_args == ("bash", "--noprofile", "--norc", "-c", "date")
+    assert "Bash command" in execute_tool.description
+    assert registry.get("bash") is not None
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows shell encoding regression")
-def test_execute_command_decodes_windows_output_without_replacement_characters(tmp_path):
+def test_bash_accepts_an_optional_timeout(tmp_path, monkeypatch):
     config = load_config(project_root=tmp_path)
     config.policy.hitl_mode = "never"
     registry = ToolRegistry()
     registry.register_all(get_builtin_tools())
     context = ToolContext(cwd=str(tmp_path), config=config)
-    command = (
-        f'& "{sys.executable}" -c "import sys;'
-        "sys.stdout.buffer.write(bytes.fromhex('b5b1c7b0c8d5c6da'))\""
-    )
+    command = "printf ok"
+
+    class FakeProcess:
+        returncode = 0
+        pid = 123
+
+        class Stream:
+            async def read(self, _size):
+                return b""
+
+        stdout = Stream()
+        stderr = Stream()
+
+        async def wait(self):
+            return self.returncode
+
+    async def create_process(*_args, **_options):
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr("paicli.tools.command_runner.resolve_bash", lambda: "bash")
 
     async def run():
-        tool = registry.get("execute_command")
+        tool = registry.get("bash")
         assert tool
-        return await tool.execute({"command": command}, context)
+        return await tool.execute({"command": command, "timeout": 5}, context)
 
     result = asyncio.run(run())
 
-    assert result.content == "当前日期"
-    assert "\ufffd" not in result.content
+    assert not result.is_error
 
 
-def test_read_write_file_tool(tmp_path, monkeypatch):
+def test_read_write_tools(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     config = load_config(project_root=tmp_path)
     config.policy.hitl_mode = "never"
@@ -99,8 +113,8 @@ def test_read_write_file_tool(tmp_path, monkeypatch):
     context = ToolContext(cwd=str(tmp_path), config=config)
 
     async def run():
-        write = registry.get("write_file")
-        read = registry.get("read_file")
+        write = registry.get("write")
+        read = registry.get("read")
         assert write and read
         write_result = await write.execute(
             {"path": "hello.txt", "content": "hello\nworld\n"},
@@ -115,12 +129,10 @@ def test_read_write_file_tool(tmp_path, monkeypatch):
     assert "2: world" in read_result.content
 
 
-def test_write_file_refuses_to_overwrite_existing_file_without_explicit_opt_in(
-    tmp_path, monkeypatch
-):
+def test_read_default_bounds_rendered_output(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    target = tmp_path / "module.py"
-    target.write_text("VALUE = 1\n", encoding="utf-8")
+    target = tmp_path / "large.txt"
+    target.write_text("\n".join("x" * 100 for _ in range(1000)), encoding="utf-8")
     config = load_config(project_root=tmp_path)
     config.policy.hitl_mode = "never"
     registry = ToolRegistry()
@@ -128,23 +140,21 @@ def test_write_file_refuses_to_overwrite_existing_file_without_explicit_opt_in(
     context = ToolContext(cwd=str(tmp_path), config=config)
 
     async def run():
-        tool = registry.get("write_file")
+        tool = registry.get("read")
         assert tool
-        return await tool.execute(
-            {"path": "module.py", "content": "VALUE = 2\n"},
-            context,
-        )
+        return await tool.execute({"path": "large.txt"}, context)
 
     result = asyncio.run(run())
+    body = result.content.split("\n\n[Output truncated", 1)[0]
 
-    assert result.is_error
-    assert "overwrite=true" in result.content
-    assert target.read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert "[Output truncated" in result.content
+    assert len(body.encode()) <= 50 * 1024
 
 
-def test_write_file_overwrites_existing_file_with_explicit_opt_in(tmp_path, monkeypatch):
+def test_write_overwrites_existing_file_and_creates_parent_directories(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    target = tmp_path / "module.py"
+    target = tmp_path / "nested" / "module.py"
+    target.parent.mkdir()
     target.write_text("VALUE = 1\n", encoding="utf-8")
     config = load_config(project_root=tmp_path)
     config.policy.hitl_mode = "never"
@@ -153,10 +163,10 @@ def test_write_file_overwrites_existing_file_with_explicit_opt_in(tmp_path, monk
     context = ToolContext(cwd=str(tmp_path), config=config)
 
     async def run():
-        tool = registry.get("write_file")
+        tool = registry.get("write")
         assert tool
         return await tool.execute(
-            {"path": "module.py", "content": "VALUE = 2\n", "overwrite": True},
+            {"path": "nested/module.py", "content": "VALUE = 2\n"},
             context,
         )
 
@@ -166,10 +176,10 @@ def test_write_file_overwrites_existing_file_with_explicit_opt_in(tmp_path, monk
     assert target.read_text(encoding="utf-8") == "VALUE = 2\n"
 
 
-def test_edit_file_replaces_one_unique_text_block(tmp_path, monkeypatch):
+def test_edit_replaces_multiple_unique_nonoverlapping_text_blocks(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     target = tmp_path / "module.py"
-    target.write_text("before\nVALUE = 1\nafter\n", encoding="utf-8")
+    target.write_text("before\nVALUE = 1\nmiddle\nVALUE = 2\nafter\n", encoding="utf-8")
     config = load_config(project_root=tmp_path)
     config.policy.hitl_mode = "never"
     registry = ToolRegistry()
@@ -177,20 +187,52 @@ def test_edit_file_replaces_one_unique_text_block(tmp_path, monkeypatch):
     context = ToolContext(cwd=str(tmp_path), config=config)
 
     async def run():
-        tool = registry.get("edit_file")
+        tool = registry.get("edit")
         assert tool
         return await tool.execute(
-            {"path": "module.py", "old": "VALUE = 1", "new": "VALUE = 2"},
+            {
+                "path": "module.py",
+                "edits": [
+                    {"oldText": "VALUE = 1", "newText": "VALUE = 10"},
+                    {"oldText": "VALUE = 2", "newText": "VALUE = 20"},
+                ],
+            },
             context,
         )
 
     result = asyncio.run(run())
 
     assert not result.is_error
-    assert target.read_text(encoding="utf-8") == "before\nVALUE = 2\nafter\n"
+    assert target.read_text(encoding="utf-8") == "before\nVALUE = 10\nmiddle\nVALUE = 20\nafter\n"
 
 
-def test_edit_file_rejects_an_ambiguous_text_block(tmp_path, monkeypatch):
+def test_edit_preserves_crlf_line_endings(tmp_path):
+    target = tmp_path / "module.py"
+    target.write_bytes(b"before\r\nVALUE = 1\r\nafter\r\n")
+    config = load_config(project_root=tmp_path)
+    config.policy.hitl_mode = "never"
+    registry = ToolRegistry()
+    registry.register_all(get_builtin_tools())
+    context = ToolContext(cwd=str(tmp_path), config=config)
+
+    async def run():
+        tool = registry.get("edit")
+        assert tool
+        return await tool.execute(
+            {
+                "path": "module.py",
+                "edits": [{"oldText": "VALUE = 1", "newText": "VALUE = 2"}],
+            },
+            context,
+        )
+
+    result = asyncio.run(run())
+
+    assert not result.is_error
+    assert target.read_bytes() == b"before\r\nVALUE = 2\r\nafter\r\n"
+
+
+def test_edit_rejects_an_ambiguous_text_block(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     target = tmp_path / "module.py"
     target.write_text("same\nsame\n", encoding="utf-8")
@@ -201,10 +243,10 @@ def test_edit_file_rejects_an_ambiguous_text_block(tmp_path, monkeypatch):
     context = ToolContext(cwd=str(tmp_path), config=config)
 
     async def run():
-        tool = registry.get("edit_file")
+        tool = registry.get("edit")
         assert tool
         return await tool.execute(
-            {"path": "module.py", "old": "same", "new": "changed"},
+            {"path": "module.py", "edits": [{"oldText": "same", "newText": "changed"}]},
             context,
         )
 
@@ -213,6 +255,35 @@ def test_edit_file_rejects_an_ambiguous_text_block(tmp_path, monkeypatch):
     assert result.is_error
     assert "matched 2 times" in result.content
     assert target.read_text(encoding="utf-8") == "same\nsame\n"
+
+
+def test_edit_rejects_overlapping_replacements_without_writing(tmp_path, monkeypatch):
+    target = tmp_path / "module.py"
+    target.write_text("abcdef\n", encoding="utf-8")
+    config = load_config(project_root=tmp_path)
+    config.policy.hitl_mode = "never"
+    registry = ToolRegistry()
+    registry.register_all(get_builtin_tools())
+    context = ToolContext(cwd=str(tmp_path), config=config)
+
+    async def run():
+        tool = registry.get("edit")
+        assert tool
+        return await tool.execute(
+            {
+                "path": "module.py",
+                "edits": [
+                    {"oldText": "abc", "newText": "ABC"},
+                    {"oldText": "bcd", "newText": "BCD"},
+                ],
+            },
+            context,
+        )
+
+    result = asyncio.run(run())
+    assert result.is_error
+    assert "overlap" in result.content
+    assert target.read_text(encoding="utf-8") == "abcdef\n"
 
 
 def test_apply_patch_updates_existing_file(tmp_path, monkeypatch):
@@ -309,7 +380,7 @@ def test_tool_registry_unregisters_prefix():
         return "ok"
 
     registry = ToolRegistry()
-    registry.register(Tool(name="read_file", description="", parameters={}, handler=handler))
+    registry.register(Tool(name="custom_read", description="", parameters={}, handler=handler))
     registry.register(Tool(name="mcp__fake__echo", description="", parameters={}, handler=handler))
     registry.register(Tool(name="mcp__other__echo", description="", parameters={}, handler=handler))
 

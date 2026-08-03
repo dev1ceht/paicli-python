@@ -66,7 +66,7 @@ class ToolCompletingAgent(HistoryAgent):
         call = {
             "id": "call_1",
             "type": "function",
-            "function": {"name": "read_file", "arguments": '{"path":"note.txt"}'},
+            "function": {"name": "read", "arguments": '{"path":"note.txt"}'},
         }
         yield {"type": "text_delta", "text": "I will inspect."}
         yield {
@@ -84,7 +84,7 @@ class ToolCompletingAgent(HistoryAgent):
             "tool_actions": [
                 {
                     "tool_call_id": "call_1",
-                    "tool_name": "read_file",
+                    "tool_name": "read",
                     "arguments": {"path": "note.txt"},
                     "raw_call": call,
                     "is_read_only": True,
@@ -95,7 +95,7 @@ class ToolCompletingAgent(HistoryAgent):
         yield {
             "type": "tool_call",
             "tool_call_id": "call_1",
-            "name": "read_file",
+            "name": "read",
             "input": {"path": "note.txt"},
             "raw_call": call,
             "is_read_only": True,
@@ -104,7 +104,7 @@ class ToolCompletingAgent(HistoryAgent):
         yield {
             "type": "tool_result",
             "tool_call_id": "call_1",
-            "name": "read_file",
+            "name": "read",
             "result": "1: hello",
             "is_error": False,
         }
@@ -176,7 +176,7 @@ class SafeRecoveringAgent(HistoryAgent):
         yield {
             "type": "tool_call",
             "tool_call_id": "call_read",
-            "name": "read_file",
+            "name": "read",
             "input": {"path": "note.txt"},
             "raw_call": call,
             "is_read_only": True,
@@ -185,7 +185,7 @@ class SafeRecoveringAgent(HistoryAgent):
         yield {
             "type": "tool_result",
             "tool_call_id": "call_read",
-            "name": "read_file",
+            "name": "read",
             "result": "1: hello",
             "is_error": False,
         }
@@ -815,13 +815,13 @@ def test_tui_restart_discards_an_uncertain_write_action(tmp_path: Path) -> None:
         actions=(
             ToolActionSpec(
                 tool_call_id="call_write",
-                tool_name="write_file",
+                tool_name="write",
                 arguments={"path": "note.txt"},
                 raw_call={
                     "id": "call_write",
                     "type": "function",
                     "function": {
-                        "name": "write_file",
+                        "name": "write",
                         "arguments": '{"path":"note.txt"}',
                     },
                 },
@@ -867,13 +867,13 @@ def test_tui_restart_discards_an_idempotent_read_action(tmp_path: Path) -> None:
         actions=(
             ToolActionSpec(
                 tool_call_id="call_read",
-                tool_name="read_file",
+                tool_name="read",
                 arguments={"path": "note.txt"},
                 raw_call={
                     "id": "call_read",
                     "type": "function",
                     "function": {
-                        "name": "read_file",
+                        "name": "read",
                         "arguments": '{"path":"note.txt"}',
                     },
                 },
@@ -921,13 +921,13 @@ def test_tui_restart_closes_a_turn_after_a_durable_tool_result(tmp_path: Path) -
         actions=(
             ToolActionSpec(
                 tool_call_id="call_read",
-                tool_name="read_file",
+                tool_name="read",
                 arguments={"path": "note.txt"},
                 raw_call={
                     "id": "call_read",
                     "type": "function",
                     "function": {
-                        "name": "read_file",
+                        "name": "read",
                         "arguments": '{"path":"note.txt"}',
                     },
                 },
@@ -979,7 +979,7 @@ def test_restart_preserves_a_durable_denial_without_reasking_or_executing(
         actions=(
             ToolActionSpec(
                 tool_call_id="call_write",
-                tool_name="write_file",
+                tool_name="write",
                 arguments={"path": "note.txt"},
                 raw_call={"id": "call_write"},
                 is_read_only=False,
@@ -1018,7 +1018,7 @@ def test_restart_reuses_a_durable_approval_for_a_safe_replay(tmp_path: Path) -> 
         actions=(
             ToolActionSpec(
                 tool_call_id="call_read",
-                tool_name="read_file",
+                tool_name="read",
                 arguments={"path": "note.txt"},
                 raw_call={"id": "call_read"},
                 is_read_only=True,
@@ -1046,8 +1046,8 @@ def test_approval_request_uses_tool_call_id_for_duplicate_calls(tmp_path: Path) 
     interactive = InteractiveSession(repository, workspace)
     interactive.begin_turn("write twice")
     raw_calls = (
-        {"id": "call_1", "function": {"name": "write_file", "arguments": "{}"}},
-        {"id": "call_2", "function": {"name": "write_file", "arguments": "{}"}},
+        {"id": "call_1", "function": {"name": "write", "arguments": "{}"}},
+        {"id": "call_2", "function": {"name": "write", "arguments": "{}"}},
     )
     interactive.record_tool_batch(
         model_turn=1,
@@ -1056,7 +1056,7 @@ def test_approval_request_uses_tool_call_id_for_duplicate_calls(tmp_path: Path) 
         actions=[
             {
                 "tool_call_id": raw["id"],
-                "tool_name": "write_file",
+                "tool_name": "write",
                 "arguments": {},
                 "raw_call": raw,
                 "is_read_only": False,
@@ -1067,7 +1067,7 @@ def test_approval_request_uses_tool_call_id_for_duplicate_calls(tmp_path: Path) 
     )
 
     matched = interactive.request_tool_approval(
-        {"tool_call_id": "call_2", "tool_name": "write_file", "input": {}}
+        {"tool_call_id": "call_2", "tool_name": "write", "input": {}}
     )
 
     assert matched == "call_2"
@@ -1094,7 +1094,7 @@ def test_tui_persists_inline_tool_approval_decision(tmp_path: Path) -> None:
                 "id": "call_write",
                 "type": "function",
                 "function": {
-                    "name": "write_file",
+                    "name": "write",
                     "arguments": '{"path":"note.txt"}',
                 },
             }
@@ -1111,7 +1111,7 @@ def test_tui_persists_inline_tool_approval_decision(tmp_path: Path) -> None:
                 "tool_actions": [
                     {
                         "tool_call_id": "call_write",
-                        "tool_name": "write_file",
+                        "tool_name": "write",
                         "arguments": {"path": "note.txt"},
                         "raw_call": call,
                         "is_read_only": False,
@@ -1124,7 +1124,7 @@ def test_tui_persists_inline_tool_approval_decision(tmp_path: Path) -> None:
             tool_event = {
                 "type": "tool_call",
                 "tool_call_id": "call_write",
-                "name": "write_file",
+                "name": "write",
                 "input": {"path": "note.txt"},
             }
             await app._persist_session_event(app._interactive_session, tool_event)
@@ -1134,7 +1134,7 @@ def test_tui_persists_inline_tool_approval_decision(tmp_path: Path) -> None:
                 nonlocal decision
                 decision = await app.request_approval(
                     {
-                        "tool_name": "write_file",
+                        "tool_name": "write",
                         "input": {"path": "note.txt"},
                         "danger_level": "medium",
                         "description": "Write a file",
@@ -1271,11 +1271,11 @@ def test_tui_renders_restored_session_history_on_mount(tmp_path: Path) -> None:
         actions=(
             ToolActionSpec(
                 tool_call_id="call_restore",
-                tool_name="read_file",
+                tool_name="read",
                 arguments={"path": "note.txt"},
                 raw_call={
                     "id": "call_restore",
-                    "function": {"name": "read_file", "arguments": '{"path":"note.txt"}'},
+                    "function": {"name": "read", "arguments": '{"path":"note.txt"}'},
                 },
                 is_read_only=True,
                 is_idempotent=True,
@@ -1309,7 +1309,7 @@ def test_tui_renders_restored_session_history_on_mount(tmp_path: Path) -> None:
             assert "restored partial" in rendered
             assert "restored tool reasoning" in rendered
             assert "restored final reasoning" in rendered
-            assert "read_file" in rendered
+            assert "read" in rendered
             assert "restored tool result" in rendered
             assert "restored final answer" in rendered
             thinking = list(app.query(ThinkingBlock))

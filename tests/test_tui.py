@@ -32,7 +32,7 @@ from paicli.render.tui_app import PaiCliApp
 def test_startup_banner_counts_builtin_tools_skills_and_enabled_mcp_servers(monkeypatch):
     class FakeRegistry:
         def list_names(self):
-            return ["read_file", "write_file", "mcp__github__search", "mcp__browser__tabs"]
+            return ["read", "write", "mcp__github__search", "mcp__browser__tabs"]
 
     class FakeMcpManager:
         specs = {
@@ -54,7 +54,7 @@ def test_startup_banner_counts_builtin_tools_skills_and_enabled_mcp_servers(monk
 def test_tui_renders_compact_full_width_startup_banner(monkeypatch):
     class FakeRegistry:
         def list_names(self):
-            return ["read_file", "mcp__github__search"]
+            return ["read", "mcp__github__search"]
 
     class FakeMcpManager:
         specs = {"github": SimpleNamespace(enabled=True)}
@@ -884,9 +884,9 @@ def test_tool_success_card_collapses_after_result():
     async def run() -> None:
         app = PaiCliApp(cwd=".")
         async with app.run_test(size=(80, 24)) as pilot:
-            app.handle_event({"type": "tool_call", "name": "read_file", "input": {"path": "a.py"}})
+            app.handle_event({"type": "tool_call", "name": "read", "input": {"path": "a.py"}})
             app.handle_event(
-                {"type": "tool_result", "name": "read_file", "result": "ok", "is_error": False}
+                {"type": "tool_result", "name": "read", "result": "ok", "is_error": False}
             )
             await pilot.pause()
 
@@ -904,11 +904,11 @@ def test_tool_error_card_stays_expanded_and_retains_full_result():
         app = PaiCliApp(cwd=".")
         async with app.run_test(size=(80, 24)) as pilot:
             result = "Permission denied: a.py\n" + "x" * 5000
-            app.handle_event({"type": "tool_call", "name": "read_file", "input": {"path": "a.py"}})
+            app.handle_event({"type": "tool_call", "name": "read", "input": {"path": "a.py"}})
             app.handle_event(
                 {
                     "type": "tool_result",
-                    "name": "read_file",
+                    "name": "read",
                     "result": result,
                     "is_error": True,
                 }
@@ -930,11 +930,11 @@ def test_expanded_tool_result_uses_its_full_content_height():
         app = PaiCliApp(cwd=".")
         async with app.run_test(size=(80, 40)) as pilot:
             result = "\n".join(f"line {index}" for index in range(20))
-            app.handle_event({"type": "tool_call", "name": "read_file", "input": {}})
+            app.handle_event({"type": "tool_call", "name": "read", "input": {}})
             app.handle_event(
                 {
                     "type": "tool_result",
-                    "name": "read_file",
+                    "name": "read",
                     "result": result,
                     "is_error": True,
                 }
@@ -954,14 +954,14 @@ def test_ui_event_from_agent_preserves_task_id():
         {
             "type": "task_tool_result",
             "task_id": "task-7",
-            "name": "read_file",
+            "name": "read",
             "result": "done",
         }
     )
 
     assert event.kind == "task_tool_result"
     assert event.task_id == "task-7"
-    assert event.payload["name"] == "read_file"
+    assert event.payload["name"] == "read"
 
 
 def test_prompt_history_round_trips_utf8_messages(tmp_path):
@@ -1131,12 +1131,12 @@ def test_tool_retries_are_grouped_into_the_running_activity():
     async def run() -> None:
         app = PaiCliApp(cwd=".")
         async with app.run_test(size=(80, 24)) as pilot:
-            app.handle_event({"type": "tool_call", "name": "read_file", "input": {"path": "a.py"}})
+            app.handle_event({"type": "tool_call", "name": "read", "input": {"path": "a.py"}})
             app.handle_event(
                 {
                     "type": "retry",
                     "scope": "tool",
-                    "tool_name": "read_file",
+                    "tool_name": "read",
                     "attempt": 1,
                     "max_retries": 3,
                     "delay": 0.25,
@@ -1158,9 +1158,9 @@ def test_thinking_and_consecutive_tool_work_share_one_activity_rail():
         app = PaiCliApp(cwd=".")
         async with app.run_test(size=(80, 24)) as pilot:
             app.handle_event({"type": "thinking_delta", "thinking": "inspect structure"})
-            app.handle_event({"type": "tool_call", "name": "read_file", "input": {"path": "a.py"}})
+            app.handle_event({"type": "tool_call", "name": "read", "input": {"path": "a.py"}})
             app.handle_event(
-                {"type": "tool_result", "name": "read_file", "result": "ok", "is_error": False}
+                {"type": "tool_result", "name": "read", "result": "ok", "is_error": False}
             )
             await pilot.pause()
 
@@ -1199,7 +1199,7 @@ def test_running_activity_pulse_stops_when_the_activity_completes():
             thinking = app.query_one(ThinkingBlock)
             assert thinking.animation_active is True
 
-            app.handle_event({"type": "tool_call", "name": "read_file", "input": {"path": "a.py"}})
+            app.handle_event({"type": "tool_call", "name": "read", "input": {"path": "a.py"}})
             await pilot.pause()
             tool = app.query_one(ToolCard)
 
@@ -1207,7 +1207,7 @@ def test_running_activity_pulse_stops_when_the_activity_completes():
             assert tool.animation_active is True
 
             app.handle_event(
-                {"type": "tool_result", "name": "read_file", "result": "ok", "is_error": False}
+                {"type": "tool_result", "name": "read", "result": "ok", "is_error": False}
             )
             await pilot.pause()
 
@@ -1538,7 +1538,7 @@ def test_approval_screen_approve_returns_approve():
 
     async def run() -> None:
         request = {
-            "tool_name": "read_file",
+            "tool_name": "read",
             "danger_level": "safe",
             "input": "test.txt",
         }
@@ -1635,7 +1635,7 @@ def test_app_requests_approval_inline_without_changing_screen():
                 nonlocal result
                 result = await app.request_approval(
                     {
-                        "tool_name": "write_file",
+                        "tool_name": "write",
                         "danger_level": "write",
                         "description": "Write a file",
                         "input": {"path": "a.py", "content": "hello"},
@@ -1671,7 +1671,7 @@ def test_approval_screen_deny_returns_deny():
 
     async def run() -> None:
         request = {
-            "tool_name": "read_file",
+            "tool_name": "read",
             "danger_level": "safe",
             "input": "test.txt",
         }
@@ -1924,13 +1924,13 @@ def test_agent_session_persistence_runs_off_ui_thread_in_event_order():
             yield {
                 "type": "tool_call",
                 "tool_call_id": "call-1",
-                "name": "read_file",
+                "name": "read",
                 "input": {"path": "a.py"},
             }
             yield {
                 "type": "tool_result",
                 "tool_call_id": "call-1",
-                "name": "read_file",
+                "name": "read",
                 "result": "ok",
                 "is_error": False,
             }

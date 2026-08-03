@@ -41,6 +41,8 @@ class ToolContext:
     llm_client: LlmClient | None = None
     cancellation_check: CancellationCheck | None = None
     event_sink: Callable[[dict[str, Any]], None] | None = None
+    progress_sink: Callable[[dict[str, Any]], None] | None = None
+    tool_call_id: str | None = None
 
     def raise_if_cancelled(self) -> None:
         raise_if_cancelled(self.cancellation_check)
@@ -58,7 +60,7 @@ class Tool:
     danger_level: DangerLevel = "safe"
     requires_approval: bool = False
     mandatory_confirmation: bool = False
-    timeout: float = 60.0
+    timeout: float | None = 60.0
     required_keys: list[str] = field(default_factory=list)
 
     def definition(self) -> dict[str, Any]:
@@ -90,15 +92,23 @@ class Tool:
     async def execute(self, payload: dict[str, Any], context: ToolContext) -> ToolResult:
         context.raise_if_cancelled()
         data = self.validate(payload)
-        return await asyncio.wait_for(self.handler(data, context), timeout=self.timeout)
+        operation = self.handler(data, context)
+        if self.timeout is None:
+            return await operation
+        return await asyncio.wait_for(operation, timeout=self.timeout)
 
 
 def object_schema(
     properties: dict[str, dict[str, Any]],
     required: list[str] | None = None,
+    *,
+    additional_properties: bool | None = None,
 ) -> dict[str, Any]:
-    return {
+    schema = {
         "type": "object",
         "properties": properties,
         "required": required or [],
     }
+    if additional_properties is not None:
+        schema["additionalProperties"] = additional_properties
+    return schema

@@ -43,9 +43,9 @@ class _ScriptedWriteClient:
                     "index": 0,
                     "id": "write_value",
                     "function": {
-                        "name": "write_file",
+                        "name": "write",
                         "arguments": (
-                            '{"path":"module.py","content":"VALUE = 2\\n","overwrite":true}'
+                            '{"path":"module.py","content":"VALUE = 2\\n"}'
                         ),
                     },
                 },
@@ -196,7 +196,7 @@ class _SecretPatchClient:
                     "index": 0,
                     "id": "write_secret",
                     "function": {
-                        "name": "write_file",
+                        "name": "write",
                         "arguments": json.dumps({"path": "credential.txt", "content": self.secret}),
                     },
                 },
@@ -229,7 +229,7 @@ class _EnvironmentProbeClient:
                     "index": 0,
                     "id": "probe_environment",
                     "function": {
-                        "name": "execute_command",
+                        "name": "bash",
                         "arguments": json.dumps({"command": command}),
                     },
                 },
@@ -259,7 +259,7 @@ class _PolicyViolationClient:
                     "index": 0,
                     "id": "policy_violation",
                     "function": {
-                        "name": "execute_command",
+                        "name": "bash",
                         "arguments": json.dumps({"command": self.command}),
                     },
                 },
@@ -311,9 +311,9 @@ class _ReferenceSolutionClient:
                     "index": 0,
                     "id": f"reference_write_{self.calls}",
                     "function": {
-                        "name": "write_file",
+                        "name": "write",
                         "arguments": json.dumps(
-                            {"path": path, "content": content, "overwrite": True}
+                            {"path": path, "content": content}
                         ),
                     },
                 },
@@ -474,7 +474,7 @@ def _write_context_suite(root: Path) -> Path:
                                 "id": "history_read_1",
                                 "type": "function",
                                 "function": {
-                                    "name": "read_file",
+                                    "name": "read",
                                     "arguments": '{"path":"module.py"}',
                                 },
                             }

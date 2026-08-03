@@ -281,6 +281,8 @@ class RichRenderer:
             self._flush_thinking()
             self._flush_markdown(title="Assistant Output")
             self._print_tool_call(event)
+        elif event_type == "tool_output_delta":
+            self._print_tool_output_delta(event)
         elif event_type == "tool_result":
             self._flush_thinking()
             self._flush_markdown(title="Assistant Output")
@@ -453,6 +455,8 @@ class RichRenderer:
                     border_style="#facc15",
                 )
             )
+        elif event_type == "task_tool_output_delta":
+            self._print_tool_output_delta(event, task_id=str(event.get("task_id") or ""))
         elif event_type == "task_tool_result":
             task_id = event.get("task_id")
             self._flush_task_thinking(task_id)
@@ -675,6 +679,13 @@ class RichRenderer:
                 border_style=border_style,
             )
         )
+
+    def _print_tool_output_delta(self, event: dict[str, Any], *, task_id: str = "") -> None:
+        text = str(event.get("text") or "")
+        if not text:
+            return
+        prefix = f"[{task_id}] " if task_id else ""
+        self.console.print(prefix + text, end="", markup=False, highlight=False)
 
     # -- Diff rendering (Java-style InlineDiffRenderer) -------------------
 

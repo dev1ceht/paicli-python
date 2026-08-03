@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import time
@@ -55,6 +56,7 @@ async def query(
     tool_definitions = tool_registry.definitions()
     executor = ToolExecutor(tool_registry)
     tool_retry_events: list[dict[str, Any]] = []
+    tool_progress_events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
     total_tokens = int(restored_state.get("total_tokens") or 0)
     turn = int(restored_state.get("turn") or 0)
@@ -123,6 +125,7 @@ async def query(
         session_allowed_tools=session_allowed_tools if session_allowed_tools is not None else set(),
         cancellation_check=cancellation_check,
         event_sink=tool_retry_events.append,
+        progress_sink=tool_progress_events.put_nowait,
     )
 
     turn_limit = max_turns if max_turns is not None else config.agent.max_turns
@@ -144,7 +147,31 @@ async def query(
                     "is_read_only": bool(tool and tool.is_read_only),
                     "is_idempotent": bool(tool and tool.is_idempotent),
                 }
-                results = await executor.execute_all([call], context)
+                execution = asyncio.create_task(executor.execute_all([call], context))
+                progress_waiter: asyncio.Task[dict[str, Any]] | None = None
+                try:
+                    while True:
+                        progress_waiter = asyncio.create_task(tool_progress_events.get())
+                        done, _ = await asyncio.wait(
+                            {execution, progress_waiter},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if progress_waiter in done:
+                            yield progress_waiter.result()
+                            continue
+                        progress_waiter.cancel()
+                        await asyncio.gather(progress_waiter, return_exceptions=True)
+                        results = execution.result()
+                        while not tool_progress_events.empty():
+                            yield tool_progress_events.get_nowait()
+                        break
+                except asyncio.CancelledError:
+                    if progress_waiter is not None and not progress_waiter.done():
+                        progress_waiter.cancel()
+                        await asyncio.gather(progress_waiter, return_exceptions=True)
+                    execution.cancel()
+                    await asyncio.gather(execution, return_exceptions=True)
+                    raise
                 raise_if_cancelled(cancellation_check)
                 for retry_event in tool_retry_events:
                     yield retry_event

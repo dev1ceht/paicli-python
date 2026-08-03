@@ -1,13 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import glob as glob_module
-import locale
-import os
+import math
 import re
-import signal
-import subprocess
-from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +14,7 @@ from paicli.rag import CodeIndex
 from paicli.skill import SkillRegistry
 from paicli.snapshot import SnapshotService
 from paicli.tools.base import Tool, ToolContext, ToolResult, object_schema
+from paicli.tools.command_runner import CommandRunner
 from paicli.tools.structured_patch import apply_structured_patch
 from paicli.web import fetch_url, search_web
 
@@ -26,8 +22,11 @@ from paicli.web import fetch_url, search_web
 def get_builtin_tools() -> list[Tool]:
     tools = [
         Tool(
-            name="read_file",
-            description="Read a text file from the current workspace.",
+            name="read",
+            description=(
+                "Read a text file from the current workspace. Output is limited to 2000 lines "
+                "or 50KB; use offset/limit to continue through larger files."
+            ),
             parameters=object_schema(
                 {
                     "path": {"type": "string", "description": "Path to read"},
@@ -35,55 +34,67 @@ def get_builtin_tools() -> list[Tool]:
                     "limit": {"type": "number", "description": "Maximum number of lines"},
                 },
                 ["path"],
+                additional_properties=False,
             ),
             required_keys=["path"],
-            handler=read_file,
+            handler=read,
         ),
         Tool(
-            name="write_file",
+            name="write",
             description=(
-                "Create a UTF-8 text file inside the current workspace. Existing files are "
-                "rejected unless overwrite=true; prefer edit_file or apply_patch for changes."
+                "Write a UTF-8 text file inside the current workspace. Parent directories are "
+                "created automatically and existing files are overwritten."
             ),
             parameters=object_schema(
                 {
                     "path": {"type": "string", "description": "Path to write"},
                     "content": {"type": "string", "description": "File content"},
-                    "append": {"type": "boolean", "description": "Append instead of overwrite"},
-                    "overwrite": {
-                        "type": "boolean",
-                        "description": "Explicitly replace an existing file",
-                    },
                 },
                 ["path", "content"],
+                additional_properties=False,
             ),
             required_keys=["path", "content"],
-            handler=write_file,
+            handler=write,
             is_read_only=False,
             is_concurrency_safe=False,
             danger_level="medium",
             requires_approval=True,
         ),
         Tool(
-            name="edit_file",
+            name="edit",
             description=(
-                "Replace an exact UTF-8 text block in one existing workspace file. "
-                "The old text must match exactly once unless replace_all=true."
+                "Edit one existing workspace file using exact text replacements. Each "
+                "edits[].oldText must occur exactly once in the original file and edits "
+                "must not overlap."
             ),
             parameters=object_schema(
                 {
                     "path": {"type": "string", "description": "Existing file to edit"},
-                    "old": {"type": "string", "description": "Exact text to replace"},
-                    "new": {"type": "string", "description": "Replacement text"},
-                    "replace_all": {
-                        "type": "boolean",
-                        "description": "Replace every exact match",
+                    "edits": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "oldText": {
+                                    "type": "string",
+                                    "description": "Exact unique text to replace",
+                                },
+                                "newText": {
+                                    "type": "string",
+                                    "description": "Replacement text",
+                                },
+                            },
+                            "required": ["oldText", "newText"],
+                            "additionalProperties": False,
+                        },
                     },
                 },
-                ["path", "old", "new"],
+                ["path", "edits"],
+                additional_properties=False,
             ),
-            required_keys=["path", "old", "new"],
-            handler=edit_file,
+            required_keys=["path", "edits"],
+            handler=edit,
             is_read_only=False,
             is_concurrency_safe=False,
             danger_level="medium",
@@ -179,7 +190,7 @@ def get_builtin_tools() -> list[Tool]:
             handler=grep,
         ),
         Tool(
-            name="execute_command",
+            name="bash",
             description=_command_tool_description(),
             parameters=object_schema(
                 {
@@ -187,13 +198,15 @@ def get_builtin_tools() -> list[Tool]:
                     "timeout": {"type": "number", "description": "Timeout seconds"},
                 },
                 ["command"],
+                additional_properties=False,
             ),
             required_keys=["command"],
-            handler=execute_command,
+            handler=bash,
             is_read_only=False,
             is_concurrency_safe=False,
             danger_level="high",
             requires_approval=True,
+            timeout=None,
         ),
         Tool(
             name="web_search",
@@ -327,29 +340,65 @@ def get_builtin_tools() -> list[Tool]:
     return tools
 
 
-async def read_file(payload: dict[str, Any], context: ToolContext) -> ToolResult:
+async def read(payload: dict[str, Any], context: ToolContext) -> ToolResult:
     path = _resolve_path(context, str(payload["path"]))
     offset = max(int(payload.get("offset") or 1), 1)
-    limit = int(payload.get("limit") or 500)
-    content = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    selected = content[offset - 1 : offset - 1 + limit]
-    numbered = "\n".join(f"{idx + offset}: {line}" for idx, line in enumerate(selected))
-    return ToolResult(numbered, display_summary=f"Read {path.relative_to(context.cwd)}")
+    limit = min(max(int(payload.get("limit") or 2000), 1), 2000)
+    max_bytes = 50 * 1024
+    selected: list[str] = []
+    selected_bytes = 0
+    total_lines = 0
+    truncated = False
+    with path.open("rb") as handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            total_lines = line_number
+            if line_number < offset:
+                continue
+            if len(selected) >= limit:
+                truncated = True
+                break
+            line = raw_line.rstrip(b"\r\n").decode("utf-8", errors="replace")
+            prefix_bytes = len(f"{line_number}: ".encode())
+            separator_bytes = 1 if selected else 0
+            line_bytes = prefix_bytes + len(line.encode("utf-8")) + separator_bytes
+            if selected and selected_bytes + line_bytes > max_bytes:
+                truncated = True
+                break
+            if not selected and line_bytes > max_bytes:
+                available = max(max_bytes - prefix_bytes, 0)
+                selected.append(
+                    f"{line_number}: "
+                    f"{line.encode('utf-8')[:available].decode('utf-8', errors='ignore')}"
+                )
+                selected_bytes = max_bytes
+                truncated = True
+                break
+            selected.append(f"{line_number}: {line}")
+            selected_bytes += line_bytes
+        else:
+            total_lines = max(total_lines, offset - 1)
+    if not selected and offset > max(total_lines, 1):
+        return ToolResult(
+            f"read rejected: offset {offset} is beyond end of file ({total_lines} lines)",
+            is_error=True,
+        )
+    content = "\n".join(selected)
+    if truncated:
+        next_offset = offset + len(selected)
+        content += (
+            f"\n\n[Output truncated at {len(selected)} lines or 50KB. "
+            f"Use offset={next_offset} to continue.]"
+        )
+    return ToolResult(content, display_summary=f"Read {path.relative_to(context.cwd)}")
 
 
-async def write_file(payload: dict[str, Any], context: ToolContext) -> ToolResult:
+async def write(payload: dict[str, Any], context: ToolContext) -> ToolResult:
     path = _resolve_path(context, str(payload["path"]))
     content = str(payload["content"])
     if len(content.encode("utf-8")) > 5 * 1024 * 1024:
-        return ToolResult("write_file rejected: content exceeds 5MB", is_error=True)
-    if path.exists() and not payload.get("append") and not payload.get("overwrite"):
-        return ToolResult(
-            "write_file rejected: file exists; use edit_file/apply_patch or set overwrite=true",
-            is_error=True,
-        )
+        return ToolResult("write rejected: content exceeds 5MB", is_error=True)
     path.parent.mkdir(parents=True, exist_ok=True)
-    mode = "a" if payload.get("append") else "w"
-    with path.open(mode, encoding="utf-8") as handle:
+    with path.open("w", encoding="utf-8", newline="") as handle:
         handle.write(content)
     rel = path.relative_to(context.cwd)
     diagnostics = diagnose_file(path)
@@ -359,29 +408,75 @@ async def write_file(payload: dict[str, Any], context: ToolContext) -> ToolResul
     return ToolResult(f"Wrote {rel}{suffix}", display_summary=f"Wrote {rel}")
 
 
-async def edit_file(payload: dict[str, Any], context: ToolContext) -> ToolResult:
+async def edit(payload: dict[str, Any], context: ToolContext) -> ToolResult:
     path = _resolve_path(context, str(payload["path"]))
     if not path.is_file():
-        return ToolResult(f"edit_file rejected: file does not exist: {path}", is_error=True)
-    old = str(payload["old"])
-    if not old:
-        return ToolResult("edit_file rejected: old text cannot be empty", is_error=True)
-    text = path.read_text(encoding="utf-8")
-    count = text.count(old)
-    if count == 0:
-        return ToolResult("edit_file rejected: old text was not found", is_error=True)
-    if count > 1 and not payload.get("replace_all"):
+        return ToolResult(f"edit rejected: file does not exist: {path}", is_error=True)
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        raw_text = handle.read()
+    bom = "\ufeff" if raw_text.startswith("\ufeff") else ""
+    raw_text = raw_text.removeprefix(bom)
+    line_ending = "\r\n" if "\r\n" in raw_text else "\n"
+    text = raw_text.replace("\r\n", "\n").replace("\r", "\n")
+    replacements: list[tuple[int, int, str]] = []
+    edits = payload.get("edits")
+    if not isinstance(edits, list) or not edits:
         return ToolResult(
-            f"edit_file rejected: old text matched {count} times; "
-            "provide more context or set replace_all=true",
+            "edit rejected: edits must contain at least one replacement",
             is_error=True,
         )
-    new = str(payload["new"])
-    updated = text.replace(old, new) if payload.get("replace_all") else text.replace(old, new, 1)
-    path.write_text(updated, encoding="utf-8")
+    for index, item in enumerate(edits):
+        if not isinstance(item, dict):
+            return ToolResult(f"edit rejected: edits[{index}] must be an object", is_error=True)
+        old = item.get("oldText")
+        new = item.get("newText")
+        if not isinstance(old, str) or not isinstance(new, str):
+            return ToolResult(
+                f"edit rejected: edits[{index}] requires oldText and newText strings",
+                is_error=True,
+            )
+        old = old.replace("\r\n", "\n").replace("\r", "\n")
+        new = new.replace("\r\n", "\n").replace("\r", "\n")
+        if not old:
+            return ToolResult(
+                f"edit rejected: edits[{index}].oldText cannot be empty",
+                is_error=True,
+            )
+        positions: list[int] = []
+        start = 0
+        while True:
+            position = text.find(old, start)
+            if position < 0:
+                break
+            positions.append(position)
+            start = position + 1
+        if not positions:
+            return ToolResult(f"edit rejected: edits[{index}].oldText was not found", is_error=True)
+        if len(positions) > 1:
+            return ToolResult(
+                f"edit rejected: edits[{index}].oldText matched {len(positions)} times; "
+                "provide more context so every oldText is unique",
+                is_error=True,
+            )
+        position = positions[0]
+        replacements.append((position, position + len(old), new))
+    replacements.sort(key=lambda item: item[0])
+    for previous, current in zip(replacements, replacements[1:], strict=False):
+        if current[0] < previous[1]:
+            return ToolResult(
+                "edit rejected: edits overlap; merge overlapping regions",
+                is_error=True,
+            )
+    updated = text
+    for start, end, new in reversed(replacements):
+        updated = updated[:start] + new + updated[end:]
+    if line_ending == "\r\n":
+        updated = updated.replace("\n", "\r\n")
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(bom + updated)
     rel = path.relative_to(context.cwd)
     return ToolResult(
-        f"Edited {rel}",
+        f"Successfully replaced {len(replacements)} block(s) in {rel}",
         display_summary=f"Edited {rel}",
     )
 
@@ -459,128 +554,64 @@ async def grep(payload: dict[str, Any], context: ToolContext) -> ToolResult:
     return ToolResult("\n".join(matches) or "(no matches)")
 
 
-async def execute_command(payload: dict[str, Any], context: ToolContext) -> ToolResult:
+async def bash(payload: dict[str, Any], context: ToolContext) -> ToolResult:
     command = str(payload["command"])
     CommandGuard(context.config.policy.command_blacklist).validate(command)
-    timeout = float(payload.get("timeout") or context.config.tools.timeout)
-    process_options: dict[str, Any] = {}
-    if os.name == "nt":
-        process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        process_options["start_new_session"] = True
-    shell_args = (
-        (
-            "powershell.exe",
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            command,
+    raw_timeout = payload.get("timeout")
+    timeout = float(raw_timeout) if raw_timeout is not None else None
+    if timeout is not None and (timeout <= 0 or not math.isfinite(timeout)):
+        return ToolResult("bash rejected: timeout must be a positive number", is_error=True)
+
+    def on_output(text: str, stream: str) -> None:
+        if context.progress_sink:
+            context.progress_sink(
+                {
+                    "type": "tool_output_delta",
+                    "tool_call_id": context.tool_call_id or "",
+                    "name": "bash",
+                    "text": text,
+                    "stream": stream,
+                }
+            )
+
+    result = await CommandRunner(
+        context.cwd,
+        storage_dir=context.config.context.tool_result_storage_dir,
+    ).run(
+        command,
+        timeout=timeout,
+        on_output=on_output,
+        cancellation_check=context.cancellation_check,
+    )
+    output = result.output
+    if result.truncated:
+        output += (
+            "\n\n[Output truncated to the last 2000 lines or 50KB."
+            + (f" Full output: {result.full_output_path}]" if result.full_output_path else "]")
         )
-        if os.name == "nt"
-        else ("/bin/sh", "-lc", command)
+    if result.timed_out:
+        timeout_text = "without a timeout" if timeout is None else f"after {timeout:g}s"
+        output = (
+            f"{output}\n\nCommand timed out {timeout_text}"
+            if output
+            else f"Command timed out {timeout_text}"
+        )
+    content = output or (
+        "(no output)" if result.exit_code == 0 else f"Command exited with code {result.exit_code}"
     )
-    proc = await asyncio.create_subprocess_exec(
-        *shell_args,
-        cwd=context.cwd,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=os.environ.copy(),
-        **process_options,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError:
-        await _stop_process_tree(proc)
-        return ToolResult(f"Command timed out after {timeout:.0f}s", is_error=True)
-    except asyncio.CancelledError:
-        if context.cancellation_check and proc.returncode is None:
-            await _stop_process_tree(proc)
-        raise
-    output = _decode_shell_output(stdout + stderr)
-    if len(output) > 20_000:
-        output = output[:20_000] + "\n... [truncated]"
     return ToolResult(
-        output or f"(exit {proc.returncode}, no output)",
-        is_error=proc.returncode != 0,
+        content,
+        is_error=result.timed_out or (result.exit_code not in (0, None)),
     )
 
 
 def _command_tool_description() -> str:
-    if os.name == "nt":
-        return (
-            "Execute a non-interactive Windows PowerShell 5.1 command in the current "
-            "workspace using powershell.exe. Do not use Bash-only syntax such as &&, "
-            "sed, or head. Commands cannot read terminal input."
-        )
     return (
-        "Execute a non-interactive POSIX shell command in the current workspace using "
-        "/bin/sh. Commands cannot read terminal input."
+        "Execute a non-interactive Bash command in the current workspace. Output is "
+        "streamed while running, truncated to the last 2000 lines or 50KB when returned, "
+        "and full truncated output is saved to a temporary file. Optionally provide a "
+        "timeout in seconds. Commands cannot read terminal input."
     )
-
-
-def _decode_shell_output(data: bytes) -> str:
-    """Decode shell bytes without corrupting localized Windows output."""
-    try:
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
-        if os.name != "nt":
-            return data.decode("utf-8", errors="replace")
-
-    encodings: list[str] = []
-    try:
-        import ctypes
-
-        kernel32 = ctypes.windll.kernel32
-        for getter_name in ("GetConsoleOutputCP", "GetOEMCP"):
-            code_page = getattr(kernel32, getter_name)()
-            if code_page:
-                encodings.append(f"cp{code_page}")
-    except (AttributeError, OSError):
-        pass
-    encodings.append(locale.getpreferredencoding(False))
-
-    for encoding in dict.fromkeys(encodings):
-        try:
-            return data.decode(encoding)
-        except (LookupError, UnicodeDecodeError):
-            continue
-    return data.decode(encodings[-1], errors="replace")
-
-
-async def _stop_process_tree(proc: asyncio.subprocess.Process) -> None:
-    if proc.returncode is not None:
-        return
-    if os.name == "nt":
-        try:
-            killer = await asyncio.create_subprocess_exec(
-                "taskkill",
-                "/PID",
-                str(proc.pid),
-                "/T",
-                "/F",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await killer.wait()
-        except OSError:
-            with suppress(ProcessLookupError):
-                proc.kill()
-    else:
-        with suppress(ProcessLookupError):
-            os.killpg(proc.pid, signal.SIGTERM)
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=3)
-    except TimeoutError:
-        if os.name != "nt":
-            with suppress(ProcessLookupError):
-                os.killpg(proc.pid, signal.SIGKILL)
-        else:
-            with suppress(ProcessLookupError):
-                proc.kill()
-        with suppress(TimeoutError):
-            await asyncio.wait_for(proc.wait(), timeout=3)
 
 
 async def web_search(payload: dict[str, Any], _context: ToolContext) -> ToolResult:

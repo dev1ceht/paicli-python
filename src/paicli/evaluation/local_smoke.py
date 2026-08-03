@@ -46,16 +46,16 @@ TOOL_PROFILE_NAME = "network-tool-free-coding-v2"
 TOOL_PROFILE = frozenset(
     {
         "apply_patch",
-        "edit_file",
-        "execute_command",
+        "edit",
+        "bash",
         "glob",
         "glob_files",
         "grep",
         "grep_code",
         "list_dir",
-        "read_file",
+        "read",
         "search_code",
-        "write_file",
+        "write",
     }
 )
 CONTEXT_VARIANTS = ("full-history", "optimized")
@@ -949,7 +949,7 @@ def _benchmark_tool_registry() -> ToolRegistry:
     for tool in get_builtin_tools():
         if tool.name not in TOOL_PROFILE:
             continue
-        if tool.name == "execute_command":
+        if tool.name == "bash":
             original_handler = tool.handler
 
             async def restricted_command(payload, context, *, handler=original_handler):
@@ -1106,7 +1106,7 @@ def _benchmark_policy_violations(events: list[dict[str, Any]]) -> list[str]:
         normalized = value.replace("\\\\", "/").replace("\\", "/").lower()
         if "acceptance/" in normalized and "acceptance_access" not in violations:
             violations.append("acceptance_access")
-        if event.get("name") == "execute_command":
+        if event.get("name") == "bash":
             violation = _benchmark_command_policy_violation(
                 str((event.get("input") or {}).get("command") or "")
             )

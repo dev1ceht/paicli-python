@@ -50,12 +50,14 @@ This file tracks the Python port against the existing Java and TypeScript implem
   - process env
   - provider-specific keys such as `DEEPSEEK_API_KEY`, `GLM_API_KEY`, `STEP_API_KEY`, `KIMI_API_KEY`
 - Tools:
-  - `read_file`
-  - `write_file`
+  - `read`
+  - `write`
+  - `edit`
+  - `apply_patch`
   - `list_dir`
   - `glob` / `glob_files`
   - `grep` / `grep_code`
-  - `bash` / `execute_command`
+  - `bash`
   - `web_search`
   - `web_fetch`
   - `browser_status`
@@ -136,7 +138,7 @@ This file tracks the Python port against the existing Java and TypeScript implem
   - transparent PNG white background handling
   - provider/model capability fallback
 - Diagnostics:
-  - Python syntax diagnostics after `write_file`
+  - Python syntax diagnostics after `write`
 
 ## Live Dependencies
 

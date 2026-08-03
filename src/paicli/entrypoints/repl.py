@@ -289,8 +289,21 @@ async def _run_plan_agent(
                         {
                             "type": "task_tool_call",
                             "task_id": task.id,
+                            "tool_call_id": event.get("tool_call_id"),
                             "name": event.get("name"),
                             "input": event.get("input"),
+                        }
+                    )
+            elif event_type == "tool_output_delta":
+                if event_sink:
+                    event_sink(
+                        {
+                            "type": "task_tool_output_delta",
+                            "task_id": task.id,
+                            "tool_call_id": event.get("tool_call_id"),
+                            "name": event.get("name"),
+                            "text": event.get("text"),
+                            "stream": event.get("stream"),
                         }
                     )
             elif event_type == "tool_result":
@@ -299,6 +312,7 @@ async def _run_plan_agent(
                         {
                             "type": "task_tool_result",
                             "task_id": task.id,
+                            "tool_call_id": event.get("tool_call_id"),
                             "name": event.get("name"),
                             "result": event.get("result"),
                             "is_error": event.get("is_error"),

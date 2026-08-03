@@ -556,7 +556,7 @@ def _extract_files_read(delta_items: list[DeltaItem]) -> list[str]:
     """提取读取的文件"""
     files = []
     for item in delta_items:
-        if item.role == "assistant" and "read_file" in item.content:
+        if item.role == "assistant" and "read" in item.content:
             # 尝试从 tool call 中提取路径
             match = re.search(r'"path"\s*:\s*"([^"]+)"', item.content)
             if match:
@@ -569,7 +569,7 @@ def _extract_files_modified(delta_items: list[DeltaItem]) -> list[str]:
     files = []
     for item in delta_items:
         if item.role == "assistant" and any(
-            name in item.content for name in ("write_file", "edit_file", "apply_patch")
+            name in item.content for name in ("write", "edit", "apply_patch")
         ):
             match = re.search(r'"path"\s*:\s*"([^"]+)"', item.content)
             if match:

@@ -557,6 +557,12 @@ class ToolCard(Static):
         self._content = str(content or "")
         self._sync_state()
 
+    def append_output(self, content: str) -> None:
+        if not content:
+            return
+        self._content += str(content)
+        self._sync_state()
+
     def _sync_state(self) -> None:
         self.remove_class("tool-running", "tool-success", "tool-error")
         self.add_class(f"tool-{self.status}")
@@ -797,6 +803,26 @@ class ChatLog(VerticalScroll):
             card.set_error(content)
         else:
             card.set_success(content)
+        self._follow_new_activity()
+
+    def append_tool_output(
+        self,
+        name: str,
+        content: str,
+        *,
+        task_id: str | None = None,
+        tool_call_id: str | None = None,
+    ) -> None:
+        key = f"{task_id or ''}:{tool_call_id or name}"
+        card = self._running_tool_cards.get(key)
+        if card is None:
+            for candidate in reversed(list(self._running_tool_cards.values())):
+                if candidate.tool_name == name:
+                    card = candidate
+                    break
+        if card is None:
+            return
+        card.append_output(content)
         self._follow_new_activity()
 
     def add_user_message(self, text: str) -> None:
