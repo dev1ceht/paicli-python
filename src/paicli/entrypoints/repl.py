@@ -19,6 +19,7 @@ from paicli.browser import BrowserSession
 from paicli.config import PaiCliConfig, config_to_public_dict
 from paicli.context.telemetry import rounded_context_percent
 from paicli.llm import create_llm_client
+from paicli.llm.capabilities import available_thinking_levels, resolve_thinking_level
 from paicli.mcp import McpClientManager
 from paicli.memory import MemoryManager
 from paicli.plan import (
@@ -41,6 +42,7 @@ from paicli.runtime import DurableTaskManager
 from paicli.session import SessionRepository, default_session_directory
 from paicli.skill import SkillRegistry
 from paicli.snapshot import SnapshotService
+from paicli.thinking import THINKING_LEVEL_SET
 from paicli.tools import ToolRegistry
 from paicli.types import Message
 
@@ -54,6 +56,7 @@ SLASH_COMMANDS = [
     "/memory",
     "/save",
     "/config",
+    "/thinking",
     "/tools",
     "/hitl",
     "/policy",
@@ -113,6 +116,7 @@ HELP_LINES = [
     "/save <事实> - 保存项目级长期记忆",
     "/save --global <事实> - 保存全局长期记忆",
     "/config - 查看当前配置",
+    "/thinking [level|auto] - 查看或切换当前推理等级",
     "/tools - 查看可用工具",
     "/model - 查看当前模型",
     "/model <模型名> - 热切换当前 provider 的模型（空闲时立即生效）",
@@ -172,7 +176,12 @@ HELP_LINES = [
 ]
 
 
-async def start_repl(cwd: str, config: PaiCliConfig) -> None:
+async def start_repl(
+    cwd: str,
+    config: PaiCliConfig,
+    *,
+    cli_thinking_level: str | None = None,
+) -> None:
     console = Console()
     registry, mcp_manager = await build_tool_registry(config=config, cwd=cwd)
     client = create_llm_client(
@@ -206,6 +215,7 @@ async def start_repl(cwd: str, config: PaiCliConfig) -> None:
         mcp_manager=mcp_manager,
         console=console,
         session_repository=SessionRepository(default_session_directory()),
+        cli_thinking_level=cli_thinking_level,
     )
     tui_app._model = client.model_name
     tui_app._context_window = client.max_context_window
@@ -661,6 +671,8 @@ async def _handle_slash(
                 console.print(f"Saved memory {result.memory_id} ({save_scope})")
     elif command == "/config":
         console.print_json(json.dumps(config_to_public_dict(config), ensure_ascii=False))
+    elif command == "/thinking":
+        _thinking_command(arg, console, config, agent)
     elif command == "/tools":
         console.print("\n".join(registry.list_names()))
     elif command == "/hitl":
@@ -812,12 +824,45 @@ def _model_command(
 
     from paicli.config import load_llm_config_for_provider
 
+    current_level = config.llm.thinking_level
+    current_budget = config.llm.thinking_budget
     llm_config = load_llm_config_for_provider(cwd, provider, model)
+    llm_config.thinking_level = current_level
+    llm_config.thinking_budget = current_budget
     if not llm_config.api_key:
         console.print(f"[red]Model switch failed:[/red] no API key configured for {provider}.")
         return
     client = agent.reconfigure_llm(llm_config)
     console.print(f"Model switched to {client.model_name} ({client.provider_name}).")
+
+
+def _thinking_command(
+    arg: str,
+    console: Console,
+    config: PaiCliConfig,
+    agent: Agent,
+) -> None:
+    model = agent.llm_client.model_name
+    current = config.llm.thinking_level or "auto"
+    available = available_thinking_levels(model)
+    if not arg:
+        console.print(f"thinking: {current}")
+        console.print(f"available: {', '.join(available)}")
+        return
+
+    requested = arg.strip().lower()
+    if requested == "auto":
+        normalized = resolve_thinking_level(model, None)
+    elif requested in THINKING_LEVEL_SET:
+        normalized = resolve_thinking_level(model, requested)
+    else:
+        values = ", ".join(sorted(THINKING_LEVEL_SET))
+        console.print(f"[red]thinking must be one of: {values}, auto[/red]")
+        return
+
+    config.llm.thinking_level = normalized
+    agent.llm_client.thinking_level = normalized
+    console.print(f"thinking: {normalized or 'auto'}")
 
 
 def _skill_command(arg: str, console: Console, cwd: str) -> None:
@@ -1087,6 +1132,7 @@ def _prompt_message(
     mcp_servers: int,
     skills: int,
     stats: dict[str, Any] | None = None,
+    thinking_level: str | None = None,
 ) -> list[tuple[str, str]]:
     return [
         ("class:prompt.count.agents", str(agents_files)),
@@ -1097,7 +1143,7 @@ def _prompt_message(
         ("class:prompt.dim", f" {_plural_label(skills, 'skill')} · Tools "),
         ("class:prompt.tools", str(tools)),
         ("class:prompt.dim", "\n"),
-        *_bottom_toolbar(cwd, model, stats),
+        *_bottom_toolbar(cwd, model, stats, thinking_level=thinking_level),
         ("class:prompt.dim", "\n\n"),
         ("class:prompt", "* "),
     ]
@@ -1107,6 +1153,8 @@ def _bottom_toolbar(
     cwd: str,
     model: str,
     stats: dict[str, Any] | None = None,
+    *,
+    thinking_level: str | None = None,
 ) -> list[tuple[str, str]]:
     from paicli.render._common import format_cost, format_elapsed, format_tokens
 
@@ -1138,6 +1186,8 @@ def _bottom_toolbar(
         ("class:toolbar.gap", " "),
         # Model name
         ("class:toolbar.model", model),
+        ("class:toolbar.gap", "  "),
+        ("class:toolbar.thinking", f"thinking:{thinking_level or 'auto'}"),
         ("class:toolbar.gap", "  "),
         # Last outbound model request context usage
         (

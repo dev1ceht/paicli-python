@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -14,6 +15,11 @@ import httpx
 from paicli.context.telemetry import current_context_scope
 from paicli.context.token_estimator import TokenEstimator
 from paicli.llm.base import PreparedOutboundRequest
+from paicli.llm.capabilities import (
+    RequestFormat,
+    get_model_capability,
+    resolve_thinking_level,
+)
 from paicli.policy import AuditLog
 from paicli.retry import RetryPolicy, classify_transient_error, compute_retry_delay
 from paicli.types import Message
@@ -28,20 +34,31 @@ class OpenAICompatibleClient:
     model: str
     api_key: str
     base_url: str
-    max_tokens: int = 8192
+    max_tokens: int = 16384
+    thinking_level: str | None = None
     thinking_budget: int | None = None
+    request_format: RequestFormat = "none"
+    budget_supported: bool = False
     temperature: float = 0.7
     timeout: float = 120.0
     max_context_window: int = 128_000
     context_window_known: bool = True
     prompt_cache: bool = False
     supports_reasoning_content: bool = False
-    supports_thinking_budget: bool = False
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     transport: httpx.AsyncBaseTransport | None = field(default=None, repr=False)
     retry_audit_path: str | Path = field(default="~/.paicli/audit", repr=False)
     retry_cwd: str = field(default="", repr=False)
     context_estimator: TokenEstimator = field(default_factory=TokenEstimator, repr=False)
+
+    def __post_init__(self) -> None:
+        capability = get_model_capability(self.model)
+        self.thinking_level = resolve_thinking_level(self.model, self.thinking_level)
+        self.request_format = capability.request_format
+        self.budget_supported = capability.budget_supported
+        self.supports_reasoning_content = capability.supports_reasoning_content
+        if self.thinking_budget is not None and self.thinking_budget <= 0:
+            raise ValueError("thinking_budget must be positive")
 
     @property
     def model_name(self) -> str:
@@ -83,10 +100,10 @@ class OpenAICompatibleClient:
             "stream": True,
             "stream_options": {"include_usage": True},
             "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
         }
-        if self.supports_thinking_budget and self.thinking_budget is not None:
-            payload["thinking_budget"] = self.thinking_budget
+        if not self._deepseek_thinking_enabled:
+            payload["temperature"] = self.temperature
+        payload.update(self._reasoning_payload())
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -101,6 +118,37 @@ class OpenAICompatibleClient:
             payload_json=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             estimated_input_tokens=estimated_input,
         )
+
+    @property
+    def _deepseek_thinking_enabled(self) -> bool:
+        return self.request_format == "deepseek" and self.thinking_level != "off"
+
+    def _reasoning_payload(self) -> dict[str, Any]:
+        if self.request_format == "qwen":
+            if self.thinking_level == "off":
+                return {"enable_thinking": False}
+            if self.thinking_level == "on" or (
+                self.thinking_level is None
+                and self.budget_supported
+                and self.thinking_budget is not None
+            ):
+                payload: dict[str, Any] = {"enable_thinking": True}
+                if self.budget_supported and self.thinking_budget is not None:
+                    payload["thinking_budget"] = self.thinking_budget
+                return payload
+            return {}
+
+        if self.request_format == "deepseek":
+            if self.thinking_level == "off":
+                return {"thinking": {"type": "disabled"}}
+            if self.thinking_level is None or self.thinking_level == "on":
+                return {"thinking": {"type": "enabled"}} if self.thinking_level == "on" else {}
+            return {
+                "thinking": {"type": "enabled"},
+                "reasoning_effort": self.thinking_level,
+            }
+
+        return {}
 
     async def send_prepared(
         self,
@@ -146,6 +194,7 @@ class OpenAICompatibleClient:
         message_started = False
         attempt = 0
         skip_shared_cooldown_once = False
+        reasoning_fallback_used = False
 
         while True:
             if skip_shared_cooldown_once:
@@ -274,6 +323,33 @@ class OpenAICompatibleClient:
                     }
                 return
             except Exception as exc:
+                fallback_payload = None
+                if not reasoning_fallback_used and not visible_stream_started:
+                    fallback_payload = _unsupported_reasoning_fallback(payload, exc)
+                if fallback_payload is not None:
+                    reasoning_fallback_used = True
+                    payload = fallback_payload
+                    retry_number = attempt + 1
+                    AuditLog(self.retry_audit_path).record_retry(
+                        scope="llm",
+                        operation=f"{self.provider_name}/{self.model}",
+                        logical_call_id=logical_call_id,
+                        attempt=retry_number,
+                        error_kind="unsupported_reasoning_parameter",
+                        retry_delay=0.0,
+                        cwd=self.retry_cwd,
+                    )
+                    yield {
+                        "type": "retry",
+                        "scope": "llm",
+                        "provider": self.provider_name,
+                        "model": self.model,
+                        "attempt": retry_number,
+                        "max_retries": self.retry_policy.max_retries,
+                        "error_kind": "unsupported_reasoning_parameter",
+                        "delay": 0.0,
+                    }
+                    continue
                 decision = classify_transient_error(exc)
                 retry_enabled = self.retry_policy.enabled and decision.retryable
                 if retry_enabled and (
@@ -537,6 +613,30 @@ def _model_cooldown_remaining(key: tuple[str, str, str]) -> float:
         _MODEL_COOLDOWNS.pop(key, None)
         return 0.0
     return max(remaining, 0.0)
+
+
+def _unsupported_reasoning_fallback(
+    payload: dict[str, Any],
+    error: Exception,
+) -> dict[str, Any] | None:
+    response = getattr(error, "response", None)
+    if response is None or getattr(response, "status_code", 0) not in {400, 422}:
+        return None
+    body = str(getattr(response, "text", "") or "").lower()
+    if not body:
+        return None
+
+    for field_name in ("reasoning_effort", "thinking_budget", "enable_thinking", "thinking"):
+        if field_name in payload and _contains_parameter_name(body, field_name):
+            fallback = dict(payload)
+            fallback.pop(field_name, None)
+            return fallback
+    return None
+
+
+def _contains_parameter_name(body: str, field_name: str) -> bool:
+    pattern = rf"(?<![a-z0-9_]){re.escape(field_name)}(?![a-z0-9_])"
+    return re.search(pattern, body, flags=re.IGNORECASE) is not None
 
 
 def _context_output_fragment(event: dict[str, Any]) -> str:

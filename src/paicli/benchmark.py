@@ -143,6 +143,7 @@ def _runtime_metadata(config, options, tools, manager) -> dict[str, Any]:
         "base_url_hash": _hash_text(config.llm.base_url or ""),
         "temperature": config.llm.temperature,
         "max_tokens": config.llm.max_tokens,
+        "thinking_level": config.llm.thinking_level,
         "thinking_budget": config.llm.thinking_budget,
         "context_window": config.llm.context_window,
         "tools": sorted(tools),

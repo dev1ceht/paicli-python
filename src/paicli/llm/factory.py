@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from paicli.config import LlmConfig
+from paicli.llm.capabilities import get_model_capability, resolve_thinking_level
 from paicli.llm.openai_compatible import OpenAICompatibleClient
 from paicli.retry import RetryPolicy
 
@@ -39,6 +40,8 @@ def create_llm_client(
     retry_cwd: str = "",
 ) -> OpenAICompatibleClient:
     provider = config.provider.lower()
+    capability = get_model_capability(config.model)
+    config.thinking_level = resolve_thinking_level(config.model, config.thinking_level)
     retry = retry_policy or RetryPolicy()
     audit_path = retry_audit_path or "~/.paicli/audit"
     reported_context = config.context_window or MODEL_CONTEXT_WINDOWS.get(config.model)
@@ -59,14 +62,16 @@ def create_llm_client(
         api_key=config.api_key,
         base_url=base_url,
         max_tokens=config.max_tokens,
+        thinking_level=config.thinking_level,
         thinking_budget=config.thinking_budget,
+        request_format=capability.request_format,
+        budget_supported=capability.budget_supported,
         temperature=config.temperature,
         timeout=config.timeout,
         max_context_window=context,
         context_window_known=reported_context is not None,
         prompt_cache=provider == "deepseek",
-        supports_reasoning_content=provider == "deepseek",
-        supports_thinking_budget=provider in {"aliyun", "bailian", "dashscope", "qwen"},
+        supports_reasoning_content=capability.supports_reasoning_content,
         retry_policy=retry,
         retry_audit_path=audit_path,
         retry_cwd=retry_cwd,

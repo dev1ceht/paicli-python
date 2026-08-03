@@ -37,7 +37,7 @@ def test_model_endpoint_retries_transient_status_before_streaming(tmp_path, monk
     monkeypatch.setattr("paicli.retry.random.uniform", lambda _a, b: b)
     client = OpenAICompatibleClient(
         provider_name="test",
-        model="test-model",
+        model="deepseek-v4-flash",
         api_key="key",
         base_url="https://retry.example/v1",
         retry_policy=RetryPolicy(max_retries=3, base_delay=1.0, max_delay=8.0),
@@ -119,6 +119,128 @@ def test_model_endpoint_honors_retry_after_and_does_not_retry_bad_request(tmp_pa
     with pytest.raises(httpx.HTTPStatusError):
         asyncio.run(collect(bad_request))
     assert bad_requests == 1
+
+
+def test_model_endpoint_retries_once_after_unsupported_reasoning_parameter(tmp_path):
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if len(requests) == 1:
+            return httpx.Response(
+                400,
+                json={"error": {"message": "reasoning_effort is not supported"}},
+            )
+        return httpx.Response(
+            200,
+            content=_sse({"choices": [{"delta": {"content": "done"}, "finish_reason": "stop"}]}),
+        )
+
+    client = OpenAICompatibleClient(
+        provider_name="test",
+        model="deepseek-v4-flash",
+        api_key="key",
+        base_url="https://reasoning-fallback.example/v1",
+        request_format="deepseek",
+        thinking_level="high",
+        transport=httpx.MockTransport(handler),
+        retry_audit_path=tmp_path / "audit",
+    )
+
+    async def run() -> list[dict]:
+        return [
+            event
+            async for event in client.chat(
+                [Message(role="user", content="hello")], [], system_prompt="system"
+            )
+        ]
+
+    events = asyncio.run(run())
+
+    assert len(requests) == 2
+    assert requests[0]["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in requests[1]
+    assert requests[1]["thinking"] == {"type": "enabled"}
+    assert [event["error_kind"] for event in events if event["type"] == "retry"] == [
+        "unsupported_reasoning_parameter"
+    ]
+
+
+def test_model_endpoint_does_not_fallback_reasoning_after_visible_output(tmp_path):
+    requests = 0
+
+    class _VisibleThenBad(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            payload = json.dumps({"choices": [{"delta": {"content": "partial"}}]})
+            yield f"data: {payload}\n\n".encode()
+            raise httpx.ReadError("stream dropped")
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, stream=_VisibleThenBad())
+
+    client = OpenAICompatibleClient(
+        provider_name="test",
+        model="test-model",
+        api_key="key",
+        base_url="https://reasoning-stream.example/v1",
+        request_format="deepseek",
+        thinking_level="high",
+        transport=httpx.MockTransport(handler),
+        retry_audit_path=tmp_path / "audit",
+    )
+
+    async def run() -> list[dict]:
+        events = []
+        with pytest.raises(httpx.ReadError):
+            async for event in client.chat(
+                [Message(role="user", content="hello")], [], system_prompt="system"
+            ):
+                events.append(event)
+        return events
+
+    events = asyncio.run(run())
+
+    assert requests == 1
+    assert not [event for event in events if event["type"] == "retry"]
+
+
+def test_model_endpoint_does_not_fallback_for_unpresent_reasoning_field(tmp_path):
+    requests = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(
+            400,
+            json={"error": {"message": "thinking_budget is not supported"}},
+        )
+
+    client = OpenAICompatibleClient(
+        provider_name="test",
+        model="deepseek-v4-flash",
+        api_key="key",
+        base_url="https://reasoning-budget.example/v1",
+        thinking_level="high",
+        transport=httpx.MockTransport(handler),
+        retry_audit_path=tmp_path / "audit",
+    )
+
+    async def run() -> list[dict]:
+        events = []
+        with pytest.raises(httpx.HTTPStatusError):
+            async for event in client.chat(
+                [Message(role="user", content="hello")], [], system_prompt="system"
+            ):
+                events.append(event)
+        return events
+
+    events = asyncio.run(run())
+
+    assert requests == 1
+    assert not [event for event in events if event["type"] == "retry"]
 
 
 class _DropsAfterVisibleDelta(httpx.AsyncByteStream):

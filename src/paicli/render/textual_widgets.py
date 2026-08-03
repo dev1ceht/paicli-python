@@ -966,6 +966,7 @@ class StatusBar(Static):
     pressure_text: reactive[str] = reactive("pressure:—")
     elapsed_text: reactive[str] = reactive("")
     session_text: reactive[str] = reactive("")
+    thinking_level: reactive[str] = reactive("")
 
     def render(self) -> Text:
         width = self.size.width or 120
@@ -1007,6 +1008,10 @@ class StatusBar(Static):
             if live:
                 live.append("   ")
             live.append(model, style=f"bold {PI_DARK.text}")
+        if self.thinking_level:
+            if live:
+                live.append("   ")
+            live.append(f"thinking:{self.thinking_level}", style=PI_DARK.muted)
 
         first = self._aligned_line(workspace, runtime)
         second = self._aligned_line(usage, live)
