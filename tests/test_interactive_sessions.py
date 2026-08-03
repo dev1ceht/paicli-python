@@ -55,6 +55,15 @@ class CompletingAgent(HistoryAgent):
         yield {"type": "done", "total_tokens": 3, "total_turns": 1}
 
 
+class TimedThinkingAgent(HistoryAgent):
+    async def run(self, message: str):
+        assert message == "measure me"
+        yield {"type": "thinking_delta", "thinking": "measured reasoning"}
+        await asyncio.sleep(0.02)
+        yield {"type": "text_delta", "text": "measured answer"}
+        yield {"type": "done", "total_tokens": 3, "total_turns": 1}
+
+
 class EmptyCompletingAgent(HistoryAgent):
     async def run(self, message: str):
         assert message == "tool-only completion"
@@ -576,6 +585,41 @@ def test_tui_persists_completed_submission_and_turn_boundary(tmp_path: Path) -> 
             )
             assert view.session_history[-1].parts[0].metadata["reasoning_duration"] is not None
             assert "durable answer" in app.query_one(ChatLog).renderable_text()
+
+    asyncio.run(run())
+
+
+def test_tui_restores_real_thinking_duration_after_session_switch(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = SessionRepository(tmp_path / "sessions.db")
+
+    async def run() -> None:
+        app = PaiCliApp(
+            agent=TimedThinkingAgent(),
+            cwd=str(workspace),
+            session_repository=repository,
+        )
+        async with app.run_test(size=(100, 24)) as pilot:
+            app.run_agent_task("measure me")
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+
+            original_id = app.session_id
+            assert original_id is not None
+            assert "Thinking complete · " in app.query_one(ChatLog).renderable_text()
+            view = repository.rebuild_session_view(original_id)
+            duration = view.session_history[-1].parts[0].metadata["reasoning_duration"]
+            assert duration >= 0.015
+
+            app._handle_slash_command("/session new Fresh")
+            await pilot.pause()
+            app._handle_slash_command(f"/session resume {original_id}")
+            await pilot.pause()
+
+            thinking = app.query_one(ThinkingBlock)
+            assert thinking.elapsed == pytest.approx(duration)
+            assert "Thinking complete · " in thinking.plain_text
 
     asyncio.run(run())
 
