@@ -115,18 +115,6 @@ async def start_repl(
         agent.close()
 
 
-async def _run_agent(agent: Agent, renderer: RichRenderer, message: str) -> None:
-    renderer.set_context_window(agent.llm_client.max_context_window)
-    renderer.start_run()
-    renderer.newline()
-    async for event in agent.run(message):
-        renderer.handle(event)
-        if event.get("type") == "error":
-            break
-    await renderer.finish_run()
-    renderer.newline()
-
-
 PlanReviewInput = Callable[[ExecutionPlan, bool], Awaitable[PlanReviewDecision]]
 
 
@@ -651,16 +639,6 @@ async def _handle_slash_legacy(
                 agent,
                 _interactive_renderer(config, provider=agent.llm_client.provider_name),
                 arg,
-            )
-    elif command == "/team":
-        if not arg:
-            console.print("[red]Usage:[/red] /team <task>")
-        else:
-            await _run_agent(
-                agent,
-                _interactive_renderer(config, provider=agent.llm_client.provider_name),
-                "Act as planner, worker, and reviewer. "
-                "Execute this task and review the result:\n" + arg,
             )
     elif command == "/skill":
         _skill_command(arg, console, cwd)

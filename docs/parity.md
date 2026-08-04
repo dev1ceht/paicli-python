@@ -27,7 +27,6 @@ This file tracks the Python port against the existing Java and TypeScript implem
   - `/index`
   - `/search`
   - `/plan`
-  - `/team`
   - `/task`
   - `/snapshot`
   - `/restore`

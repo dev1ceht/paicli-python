@@ -136,7 +136,7 @@ PAICLI_API_KEY=local-key
 | --- | --- |
 | `/help`、`/config`、`/tools` | 查看帮助、配置和工具 |
 | `/clear`、`/reset`、`/context`、`/compact` | 管理界面、会话和上下文 |
-| `/plan <task>`、`/team <task>` | 规划或拆分任务 |
+| `/plan <task>` | 规划任务 |
 | `/memory`、`/save <fact>` | 查询或保存长期记忆 |
 | `/index [path]`、`/search <query>` | 建立索引并搜索代码 |
 | `/mcp`、`/skill`、`/model` | 管理扩展与当前模型 |
