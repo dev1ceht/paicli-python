@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import sys
 from collections.abc import Awaitable, Callable
@@ -16,7 +15,18 @@ from rich.table import Table
 from paicli.agent import Agent
 from paicli.bootstrap import build_tool_registry
 from paicli.browser import BrowserSession
-from paicli.config import PaiCliConfig, config_to_public_dict
+from paicli.commands import (
+    ClearScreen,
+    CommandContext,
+    CommandExecutor,
+    CommandResult,
+    ExitApp,
+    ParsedCommand,
+    default_registry,
+    legacy_argument_text,
+    render_help,
+)
+from paicli.config import PaiCliConfig
 from paicli.context.telemetry import rounded_context_percent
 from paicli.llm import create_llm_client
 from paicli.llm.capabilities import available_thinking_levels, resolve_thinking_level
@@ -33,7 +43,6 @@ from paicli.plan import (
     build_task_context,
     parse_plan_review_input,
 )
-from paicli.policy import AuditLog
 from paicli.prompt import PromptAssembler
 from paicli.prompt.project_memory import ProjectMemoryLoader
 from paicli.rag import CodeIndex
@@ -46,134 +55,10 @@ from paicli.thinking import THINKING_LEVEL_SET
 from paicli.tools import ToolRegistry
 from paicli.types import Message
 
-SLASH_COMMANDS = [
-    "/help",
-    "/exit",
-    "/clear",
-    "/reset",
-    "/context",
-    "/compact",
-    "/memory",
-    "/save",
-    "/config",
-    "/thinking",
-    "/tools",
-    "/hitl",
-    "/policy",
-    "/audit",
-    "/index",
-    "/search",
-    "/plan",
-    "/team",
-    "/model",
-    "/skill",
-    "/mcp",
-    "/browser",
-    "/task",
-    "/snapshot",
-    "/restore",
-    "/session",
-]
-
-HELP_LINES = [
-    "会话与后台任务：",
-    "/session list - 查看当前工作区的会话",
-    "/session show [session-id] - 查看会话详情与 catalog 摘要",
-    "/session stats - 查看当前会话的持久化用量与活动统计",
-    "/session rename <title> - 重命名当前会话",
-    "/session new [title] - 创建并切换到新会话",
-    "/session resume <session-id> - 恢复指定会话",
-    "/session resume - 打开交互式会话选择器",
-    "/session share [session-id] [--include-tool-results] - 导出脱敏 Markdown",
-    "/session fork [title] - 从当前边界派生新会话",
-    "/session archive - 归档当前会话",
-    "/session delete - 将当前会话移入回收站",
-    "/session restore <session-id> - 从回收站恢复会话",
-    (
-        "持久化：完整 Session 保存在 ~/.paicli/sessions/*.jsonl，"
-        "后台任务状态保存在 ~/.paicli/runtime/tasks.db"
-    ),
-    "后台任务是提交会话的 child Session",
-    "后台任务的对话历史、工具调用状态和待审批状态会持久化",
-    "中断的运行中任务不会自动重试，可使用 /task retry",
-    "状态：queued | running | waiting_approval | completed | failed | canceled",
-    "",
-    "可用命令：",
-    "/help - 查看命令帮助",
-    "/exit - 退出 PaiCLI",
-    "/clear - 清空屏幕显示（保留 Session history 和模型上下文）",
-    "/reset - 清空屏幕与后续模型上下文（保留 Session history）",
-    "/context - 查看当前上下文状态",
-    "/compact - 立即摘要较早的模型上下文并保留最近回合",
-    "/memory - 查看记忆系统状态",
-    "/memory list - 查看长期记忆列表",
-    "/memory search <关键词> - 搜索当前项目可见长期记忆",
-    "/memory delete <id> - 删除单条长期记忆",
-    "/memory clear - 清空全部长期记忆",
-    "/memory pending - 查看待确认的记忆变更",
-    "/memory apply <id> - 确认待处理记忆变更",
-    "/memory reject <id> - 拒绝待处理记忆变更",
-    "/save <事实> - 保存项目级长期记忆",
-    "/save --global <事实> - 保存全局长期记忆",
-    "/config - 查看当前配置",
-    "/thinking [level|auto] - 查看或切换当前推理等级",
-    "/tools - 查看可用工具",
-    "/model - 查看当前模型",
-    "/model <模型名> - 热切换当前 provider 的模型（空闲时立即生效）",
-    "/model <provider> <model> - 热切换 provider 和模型，并读取该 provider 的 .env 凭据",
-    "/plan - 查看计划模式用法",
-    "/plan <任务内容> - 直接用计划模式执行这条任务",
-    "/team - 查看 Multi-Agent 模式用法",
-    "/team <任务内容> - 直接用多 Agent 协作执行这条任务",
-    "/hitl - 查看 HITL 状态",
-    "/hitl on - 启用危险操作人工审批",
-    "/hitl off - 关闭 HITL 审批",
-    "/hitl always|auto|never - 设置 HITL 模式",
-    "/policy - 查看安全策略",
-    "/audit [N] - 查看最近 N 条审计记录",
-    "/browser - 查看浏览器会话状态",
-    "/browser connect - 复用已允许远程调试的登录态 Chrome",
-    "/browser connect <port> - 旧式 CDP 端口连接",
-    "/browser status - 查看浏览器会话状态",
-    "/browser tabs - 查看 shared 模式真实 Chrome tab",
-    "/browser disconnect - 切回 isolated 浏览器模式",
-    "/task - 查看后台任务列表",
-    "/task add <任务内容> - 提交后台任务",
-    "/task approve <task_id|N|latest> - 批准等待中的后台任务操作",
-    "/task deny <task_id|N|latest> - 拒绝等待中的后台任务操作",
-    "/task cancel <task_id|N|latest> - 取消后台任务",
-    "/task retry <task_id|N|latest> - 重试失败的后台任务",
-    "/task log <task_id|N|latest> - 查看后台任务结果",
-    "/mcp - 查看 MCP server 状态",
-    "/mcp restart <name> - 重启 MCP server",
-    "/mcp logs <name> - 查看 MCP server 日志",
-    "/mcp disable <name> - 禁用 MCP server",
-    "/mcp enable <name> - 启用 MCP server",
-    "/mcp resources <name> - 查看 MCP resources",
-    "/mcp prompts <name> - 查看 MCP prompts",
-    "/skill - 查看可用 Skill",
-    "/skill show <name> - 查看指定 Skill 内容",
-    "/index [path] - 索引代码库",
-    "/search <查询> - 搜索本地代码索引",
-    "/snapshot - 查看最近 Side-History 快照",
-    "/snapshot status - 查看 Side-Git 快照状态",
-    "/snapshot clean - 清理当前项目快照",
-    "/restore <snapshot-id-or-index> - 恢复到指定快照",
-    "",
-    "快捷键：",
-    "  Enter       - 发送消息",
-    "  Shift+Enter - 换行",
-    "  Ctrl+C      - 中断运行中任务 / 空闲时退出",
-    "  Ctrl+Q      - 立即退出",
-    "  Ctrl+L      - 清屏",
-    "  Ctrl+Y      - 切换 HITL / YOLO",
-    "  Ctrl+End    - 返回最新消息并恢复跟随",
-    "  Up/Down     - 历史浏览",
-    "  Tab         - 补全 slash 命令",
-    "",
-    "内联审批：Y 批准 / N 拒绝 / A 本会话允许 / S 跳过",
-    "内联计划：Enter 执行 / Ctrl+O 展开 / I 补充 / Esc 取消",
-]
+# Compatibility exports for callers that imported the old constants. The
+# command catalog and generated help are now owned by paicli.commands.
+COMMAND_REGISTRY = default_registry()
+SLASH_COMMANDS = COMMAND_REGISTRY.root_command_names()
 
 
 async def start_repl(
@@ -595,6 +480,48 @@ async def _prompt_plan_supplement() -> str:
     return await session.prompt_async("补充> ")
 
 
+class _ReplCommandHost:
+    """Adapter that keeps the legacy Rich command body behind the registry."""
+
+    def __init__(
+        self,
+        *,
+        console: Console,
+        cwd: str,
+        config: PaiCliConfig,
+        agent: Agent,
+        registry: ToolRegistry,
+        mcp_manager: McpClientManager | None,
+        checkpoint_callback: Callable[[dict[str, Any]], Awaitable[Any]] | None,
+        usage_callback: Callable[[list[dict[str, Any]]], Awaitable[Any]] | None,
+    ) -> None:
+        self.console = console
+        self.cwd = cwd
+        self.config = config
+        self.agent = agent
+        self.registry = registry
+        self.mcp_manager = mcp_manager
+        self.checkpoint_callback = checkpoint_callback
+        self.usage_callback = usage_callback
+
+    async def dispatch_registered_command(self, invocation: ParsedCommand) -> CommandResult:
+        should_exit = await _handle_slash_legacy(
+            invocation.raw,
+            self.console,
+            self.cwd,
+            self.config,
+            self.agent,
+            self.registry,
+            self.mcp_manager,
+            self.checkpoint_callback,
+            self.usage_callback,
+            invocation,
+        )
+        if should_exit:
+            return CommandResult(effects=(ExitApp(),))
+        return CommandResult.empty()
+
+
 async def _handle_slash(
     raw: str,
     console: Console,
@@ -606,18 +533,58 @@ async def _handle_slash(
     checkpoint_callback: Callable[[dict[str, Any]], Awaitable[Any]] | None = None,
     usage_callback: Callable[[list[dict[str, Any]]], Awaitable[Any]] | None = None,
 ) -> bool:
-    command, _, rest = raw.partition(" ")
-    arg = rest.strip()
-    if command in {"/exit", "/quit"}:
-        return True
-    if command == "/help":
-        console.print(help_text())
-    elif command == "/clear":
-        console.clear()
-    elif command == "/reset":
-        agent.clear_history()
-        console.clear()
-    elif command == "/context":
+    """Resolve and execute a slash command through the shared registry."""
+    host = _ReplCommandHost(
+        console=console,
+        cwd=cwd,
+        config=config,
+        agent=agent,
+        registry=registry,
+        mcp_manager=mcp_manager,
+        checkpoint_callback=checkpoint_callback,
+        usage_callback=usage_callback,
+    )
+    result = await CommandExecutor(COMMAND_REGISTRY).execute(
+        raw,
+        CommandContext(
+            cwd=Path(cwd).expanduser().resolve(),
+            host=host,
+            registry=COMMAND_REGISTRY,
+            config=config,
+            agent=agent,
+            tool_registry=registry,
+            mcp_manager=mcp_manager,
+        ),
+    )
+    for message in result.messages:
+        console.print(message.text)
+    for effect in result.effects:
+        if isinstance(effect, ExitApp):
+            return True
+        if isinstance(effect, ClearScreen):
+            console.clear()
+    return False
+
+
+async def _handle_slash_legacy(
+    raw: str,
+    console: Console,
+    cwd: str,
+    config: PaiCliConfig,
+    agent: Agent,
+    registry: ToolRegistry,
+    mcp_manager: McpClientManager | None,
+    checkpoint_callback: Callable[[dict[str, Any]], Awaitable[Any]] | None = None,
+    usage_callback: Callable[[list[dict[str, Any]]], Awaitable[Any]] | None = None,
+    invocation: ParsedCommand | None = None,
+) -> bool:
+    if invocation is None:
+        command, _, rest = raw.partition(" ")
+        arg = rest.strip()
+    else:
+        command = f"/{invocation.path[0]}"
+        arg = legacy_argument_text(invocation)
+    if command == "/context":
         memories = MemoryManager(config.memory.long_term_path, project_path=cwd).list(limit=5)
         table = Table(title="PaiCLI Context")
         table.add_column("Field")
@@ -669,21 +636,6 @@ async def _handle_slash(
                 console.print(f"Memory already exists: {result.memory_id}")
             else:
                 console.print(f"Saved memory {result.memory_id} ({save_scope})")
-    elif command == "/config":
-        console.print_json(json.dumps(config_to_public_dict(config), ensure_ascii=False))
-    elif command == "/thinking":
-        _thinking_command(arg, console, config, agent)
-    elif command == "/tools":
-        console.print("\n".join(registry.list_names()))
-    elif command == "/hitl":
-        _hitl_command(arg, console, config)
-    elif command == "/policy":
-        console.print_json(json.dumps(config_to_public_dict(config)["policy"], ensure_ascii=False))
-    elif command == "/audit":
-        limit = int(arg or "20") if (arg or "20").isdigit() else 20
-        console.print_json(
-            json.dumps(AuditLog(config.policy.audit_log_path).tail(limit), ensure_ascii=False)
-        )
     elif command == "/index":
         count = CodeIndex(cwd).rebuild(arg or ".")
         console.print(f"Indexed {count} code lines.")
@@ -710,8 +662,6 @@ async def _handle_slash(
                 "Act as planner, worker, and reviewer. "
                 "Execute this task and review the result:\n" + arg,
             )
-    elif command == "/model":
-        _model_command(arg, console, cwd, config, agent)
     elif command == "/skill":
         _skill_command(arg, console, cwd)
     elif command == "/mcp":
@@ -1305,7 +1255,7 @@ def _format_pressure_tier(tier: object) -> str:
 
 
 def help_text() -> str:
-    return "\n".join(HELP_LINES)
+    return render_help(COMMAND_REGISTRY)
 
 
 def _extract_project_memory(agent: Agent, query: str) -> str:

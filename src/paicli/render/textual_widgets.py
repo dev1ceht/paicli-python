@@ -24,6 +24,7 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Collapsible, Static, TextArea
 
+from paicli.commands import CommandContext, CommandRegistry, CompletionRequest
 from paicli.render._common import TOOL_LABELS as _TOOL_LABELS
 from paicli.render._common import format_elapsed
 from paicli.render.history import PromptHistory
@@ -1119,13 +1120,23 @@ class InputBar(Horizontal):
     }
     """
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        command_registry: CommandRegistry | None = None,
+        command_context: CommandContext | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.prompt_history = PromptHistory(_default_prompt_history_path())
+        self.command_registry = command_registry
+        self.command_context = command_context
 
     def compose(self) -> ComposeResult:
         yield CommandInput(
             history=self.prompt_history,
+            command_registry=self.command_registry,
+            command_context=self.command_context,
             placeholder="输入消息，Enter 发送，Shift+Enter 换行",
             compact=True,
         )
@@ -1157,11 +1168,19 @@ class CommandInput(TextArea):
         *args: Any,
         history: PromptHistory | None = None,
         slash_commands: list[str] | None = None,
+        command_registry: CommandRegistry | None = None,
+        command_context: CommandContext | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.prompt_history = history
-        self.slash_commands = slash_commands or ["/help"]
+        self.command_registry = command_registry
+        self.command_context = command_context
+        self.slash_commands = (
+            slash_commands
+            if slash_commands is not None
+            else (command_registry.root_command_names() if command_registry else ["/help"])
+        )
 
     def _is_single_line_or_empty(self) -> bool:
         return "\n" not in self.text
@@ -1215,7 +1234,27 @@ class CommandInput(TextArea):
         self._set_text_value(self.prompt_history.next())
 
     def action_complete_slash_command(self) -> None:
-        if not self.text.startswith("/") or " " in self.text.strip():
+        if not self.text.startswith("/"):
+            self.insert("\t")
+            return
+
+        if self.command_registry is not None:
+            request = CompletionRequest(text=self.text, cursor=len(self.text))
+            items = self.command_registry.complete_sync(
+                request,
+                self.command_context or CommandContext(cwd=Path.cwd()),
+            )
+            if len(items) == 1:
+                value = items[0].insert_text
+                if any(char.isspace() for char in self.text.strip()):
+                    separator = max(self.text.rfind(" "), self.text.rfind("\t"))
+                    value = f"{self.text[: separator + 1]}{value}"
+                self._set_text_value(value)
+                return
+            self.insert("\t")
+            return
+
+        if " " in self.text.strip():
             self.insert("\t")
             return
         matches = [command for command in self.slash_commands if command.startswith(self.text)]

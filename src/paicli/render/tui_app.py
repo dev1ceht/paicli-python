@@ -7,7 +7,6 @@ provides interactive, mouse-driven collapsible tool results.
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 import time
 from contextlib import suppress
@@ -22,6 +21,22 @@ from textual.binding import Binding
 from textual.css.query import NoMatches
 from textual.widgets import TextArea
 
+from paicli.commands import (
+    ClearScreen,
+    CommandContext,
+    CommandExecutor,
+    CommandRegistry,
+    CommandResult,
+    ExitApp,
+    ModelChanged,
+    ParsedCommand,
+    RefreshContextUsage,
+    RefreshHitlBanner,
+    RefreshStatus,
+    default_registry,
+    legacy_argument_text,
+    render_help,
+)
 from paicli.context.telemetry import ContextUsageState, rounded_context_percent
 from paicli.render._common import estimate_cost, format_elapsed, format_tokens, shorten_home
 from paicli.render.textual_widgets import (
@@ -91,6 +106,7 @@ class PaiCliApp(App):
         config: Any = None,
         cwd: str = ".",
         registry: Any = None,
+        command_registry: CommandRegistry | None = None,
         mcp_manager: Any = None,
         console: Any = None,
         handle_slash: Any = None,
@@ -113,6 +129,8 @@ class PaiCliApp(App):
         self._workspace_text = shorten_home(workspace)
         self._git_branch = _git_branch_name(workspace)
         self.registry = registry
+        self.command_registry = command_registry or default_registry()
+        self.command_executor = CommandExecutor(self.command_registry)
         self.mcp_manager = mcp_manager
         self._handle_slash = handle_slash
         self._approval_callback = approval_callback
@@ -192,7 +210,11 @@ class PaiCliApp(App):
 
     def compose(self) -> ComposeResult:
         yield ChatLog(id="chat-log")
-        yield InputBar(id="input-bar")
+        yield InputBar(
+            id="input-bar",
+            command_registry=self.command_registry,
+            command_context=self._command_context(),
+        )
         yield StatusBar(id="status-bar")
 
     def on_mount(self) -> None:
@@ -348,36 +370,90 @@ class PaiCliApp(App):
             return
         if message.startswith("/"):
             self._handle_slash_command(message)
-        else:
-            self.run_agent_task(message)
+            return
+        self.run_agent_task(message)
+
+    def _command_context(self) -> CommandContext:
+        return CommandContext(
+            cwd=Path(self.cwd).expanduser().resolve(),
+            host=self,
+            registry=self.command_registry,
+            config=self.config,
+            agent=self.agent,
+            session=self._interactive_session,
+            tool_registry=self.registry,
+            mcp_manager=self.mcp_manager,
+            agent_running=self._agent_running,
+        )
+
+    def dispatch_registered_command(self, invocation: ParsedCommand) -> CommandResult:
+        """Bridge registered commands to the existing TUI implementation."""
+        self._handle_slash_command_legacy(invocation.raw, invocation)
+        return CommandResult.empty()
+
+    def _render_command_result(self, result: CommandResult) -> None:
+        chat_log = self.query_one("#chat-log", ChatLog)
+        for message in result.messages:
+            prefix = {
+                "error": "[red]Error:[/red] ",
+                "warning": "[yellow]Warning:[/yellow] ",
+                "success": "[green]Success:[/green] ",
+            }.get(message.level, "")
+            chat_log.add_info(f"{prefix}{message.text}")
+        for effect in result.effects:
+            if isinstance(effect, ExitApp):
+                self.exit()
+            elif isinstance(effect, ClearScreen):
+                chat_log.clear_conversation()
+            elif isinstance(effect, RefreshHitlBanner):
+                self._refresh_hitl_banner()
+            elif isinstance(effect, RefreshContextUsage):
+                self._refresh_context_usage()
+            elif isinstance(effect, RefreshStatus):
+                self._update_status_bar()
+            elif isinstance(effect, ModelChanged):
+                self._apply_model_changed(effect)
+
+    def _apply_model_changed(self, effect: ModelChanged) -> None:
+        self._model = effect.model
+        self._provider = effect.provider
+        self._context_window = effect.context_window
+        self._context_usage = ContextUsageState()
+        build_context_event = getattr(self.agent, "context_usage_event", None)
+        context_event = build_context_event() if callable(build_context_event) else None
+        if context_event:
+            self._context_usage.apply(context_event)
+        self.query_one(StartupBanner).update_model(self._model, self._provider)
+        self._update_status_bar()
+        if self._interactive_session is not None and self.config is not None:
+            self._interactive_session.record_thinking_level(self.config.llm.thinking_level)
+
+    def _refresh_context_usage(self) -> None:
+        self._context_usage = ContextUsageState()
+        build_context_event = getattr(self.agent, "context_usage_event", None)
+        context_event = build_context_event() if callable(build_context_event) else None
+        if context_event:
+            self._context_usage.apply(context_event)
 
     def _handle_slash_command(self, raw: str) -> None:
-        """Handle slash commands in the TUI."""
-        chat_log = self.query_one("#chat-log", ChatLog)
-        command, _, rest = raw.partition(" ")
-        arg = rest.strip()
+        """Resolve and execute one registered slash command."""
+        result = self.command_executor.execute_sync(raw, self._command_context())
+        self._render_command_result(result)
 
-        if command in {"/exit", "/quit"}:
-            self.exit()
-            return
-        if command == "/help":
-            chat_log.add_info(self._help_text())
-            return
-        if command == "/clear":
-            chat_log.clear_conversation()
-            return
-        if command == "/reset":
-            if self._interactive_session is not None:
-                self._interactive_session.reset_context()
-            if self.agent:
-                self.agent.clear_history()
-                build_context_event = getattr(self.agent, "context_usage_event", None)
-                context_event = build_context_event() if callable(build_context_event) else None
-                if context_event:
-                    self._context_usage.apply(context_event)
-            chat_log.clear_conversation()
-            self._update_status_bar()
-            return
+    def _handle_slash_command_legacy(
+        self,
+        raw: str,
+        invocation: ParsedCommand | None = None,
+    ) -> None:
+        """Legacy TUI command implementation retained during migration."""
+        chat_log = self.query_one("#chat-log", ChatLog)
+        if invocation is None:
+            command, _, rest = raw.partition(" ")
+            arg = rest.strip()
+        else:
+            command = f"/{invocation.path[0]}"
+            arg = legacy_argument_text(invocation)
+
         if command == "/context":
             self._show_context(chat_log)
             return
@@ -386,26 +462,6 @@ class PaiCliApp(App):
                 self._compact_command_async(chat_log),
                 exclusive=True,
             )
-            return
-        if command == "/tools":
-            if self.registry:
-                chat_log.add_info("\n".join(self.registry.list_names()))
-            return
-        if command == "/config":
-            from paicli.config import config_to_public_dict
-
-            chat_log.add_info(
-                json.dumps(config_to_public_dict(self.config), ensure_ascii=False, indent=2)
-            )
-            return
-        if command == "/thinking":
-            self._thinking_command(arg, chat_log)
-            return
-        if command == "/model":
-            self._model_command(arg, chat_log)
-            return
-        if command == "/hitl":
-            self._hitl_command(arg, chat_log)
             return
         if command == "/memory":
             self._memory_command(arg, chat_log)
@@ -464,27 +520,6 @@ class PaiCliApp(App):
 
                 record = SnapshotService(self.cwd).restore(arg)
                 chat_log.add_info(f"Restored {record.id}")
-            return
-        if command == "/policy":
-            from paicli.config import config_to_public_dict
-
-            chat_log.add_info(
-                json.dumps(
-                    config_to_public_dict(self.config)["policy"], ensure_ascii=False, indent=2
-                )
-            )
-            return
-        if command == "/audit":
-            limit = int(arg or "20") if (arg or "20").isdigit() else 20
-            from paicli.policy import AuditLog
-
-            chat_log.add_info(
-                json.dumps(
-                    AuditLog(self.config.policy.audit_log_path).tail(limit),
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
             return
         if command == "/skill":
             self._skill_command_info(arg, chat_log)
@@ -1656,9 +1691,8 @@ class PaiCliApp(App):
         self._update_status_bar()
 
     def _help_text(self) -> str:
-        from paicli.entrypoints.repl import help_text
-
-        return help_text()
+        registry = self.command_registry if self is not None else default_registry()
+        return render_help(registry)
 
     async def _compact_command_async(self, chat_log: ChatLog) -> None:
         if self.agent is None:
