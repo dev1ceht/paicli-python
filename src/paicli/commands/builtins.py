@@ -474,13 +474,6 @@ def build_builtin_specs() -> tuple[CommandSpec, ...]:
             help_variants=(("/plan <任务内容>", "直接用计划模式执行这条任务"),),
         ),
         _command(
-            "team",
-            "查看 Multi-Agent 模式用法",
-            args=(_rest("任务内容"),),
-            usage="/team",
-            help_variants=(("/team <任务内容>", "直接用多 Agent 协作执行这条任务"),),
-        ),
-        _command(
             "hitl",
             "查看 HITL 状态",
             args=(_choice("mode", ("on", "off", "always", "auto", "never")),),

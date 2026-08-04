@@ -475,15 +475,6 @@ class PaiCliApp(App):
             else:
                 self.run_plan_task(arg)
             return
-        if command == "/team":
-            if not arg:
-                chat_log.add_info("[red]Usage:[/red] /team <task>")
-            else:
-                self.run_agent_task(
-                    "Act as planner, worker, and reviewer. "
-                    "Execute this task and review the result:\n" + arg,
-                )
-            return
         if command == "/index":
             from paicli.rag import CodeIndex
 

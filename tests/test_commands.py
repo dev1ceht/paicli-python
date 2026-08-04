@@ -66,6 +66,7 @@ def test_help_is_derived_from_the_registry() -> None:
 
     assert "/model - 查看当前模型" in text
     assert "/plan <任务内容> - 直接用计划模式执行这条任务" in text
+    assert "/team" not in text
     assert "/session resume <session-id> - 恢复指定会话" in text
     assert "/browser connect <port> - 旧式 CDP 端口连接" in text
 

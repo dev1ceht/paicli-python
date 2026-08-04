@@ -14,6 +14,7 @@ def test_help_text_lists_commands_with_descriptions():
     assert "/task retry <task_id|N|latest> - 重试失败的后台任务" in text
     assert "/mcp restart <name> - 重启 MCP server" in text
     assert "/wechat" not in text
+    assert "/team" not in text
 
 
 def test_help_lists_every_slash_command_in_repl_and_tui():
