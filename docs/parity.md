@@ -78,8 +78,9 @@ This file tracks the Python port against the existing Java and TypeScript implem
   - `/memory list`, `/memory search`, `/memory delete`, `/memory clear`, `/save --global`
   - Java-style retrieval: exact containment priority, keyword overlap, recency decay,
     long-term weighting, and token-budget truncation
-  - project memory files `~/.paicli/PAI.md`, `PAI.md`, `.paicli/PAI.md`, local variants,
-    and safe `@file` imports
+- Project instructions:
+  - Pi-compatible project instructions from `~/.paicli/AGENTS.md` or `CLAUDE.md`,
+    plus matching files discovered from the current directory through its ancestors
 - Skills:
   - user/project `.paicli/skills/*/SKILL.md`
   - `load_skill`

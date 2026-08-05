@@ -484,10 +484,10 @@ class JsonPlanner:
         self,
         llm_client: LlmClient | None = None,
         *,
-        project_memory: str = "",
+        project_context: str = "",
     ):
         self.llm_client = llm_client
-        self.project_memory = project_memory
+        self.project_context = project_context
         self.last_raw_plan = ""
         self.last_thinking = ""
 
@@ -504,8 +504,8 @@ class JsonPlanner:
             raise ValueError("JsonPlanner needs an LLM client")
 
         system_prompt = _PLANNER_SYSTEM
-        if self.project_memory:
-            system_prompt += f"\n\n项目上下文:\n{self.project_memory[:2000]}"
+        if self.project_context:
+            system_prompt += f"\n\n项目上下文:\n{self.project_context}"
 
         text = ""
         thinking = ""

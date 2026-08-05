@@ -49,7 +49,12 @@ def test_startup_banner_counts_builtin_tools_skills_and_enabled_mcp_servers(monk
 
     app = PaiCliApp(registry=FakeRegistry(), mcp_manager=FakeMcpManager(), cwd=".")
 
-    assert app._startup_capability_counts() == {"tools": 2, "skills": 2, "mcp_servers": 2}
+    assert app._startup_capability_counts() == {
+        "tools": 2,
+        "skills": 2,
+        "mcp_servers": 2,
+        "instruction_files": 0,
+    }
 
 
 def test_tui_renders_compact_full_width_startup_banner(monkeypatch):

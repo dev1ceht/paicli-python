@@ -155,6 +155,7 @@ class StartupBanner(Vertical):
         tools: int,
         skills: int,
         mcp_servers: int,
+        instruction_files: int = 0,
         cwd: str,
     ) -> None:
         super().__init__()
@@ -165,6 +166,7 @@ class StartupBanner(Vertical):
         self._tools = tools
         self._skills = skills
         self._mcp_servers = mcp_servers
+        self._instruction_files = instruction_files
         self._cwd = cwd
         self._compact = False
 
@@ -223,6 +225,7 @@ class StartupBanner(Vertical):
         text = Text()
         text.append("PAICLI", style=f"bold {PI_DARK.accent}")
         text.append(f"  v{self._version}", style=PI_DARK.muted)
+        text.append(f" · Instructions: {self._instruction_files}", style=PI_DARK.muted)
         text.append(" — Ready to build", style=PI_DARK.text)
         text.append("\n")
         text.append(self._model, style=PI_DARK.text)

@@ -44,7 +44,7 @@ from paicli.plan import (
     parse_plan_review_input,
 )
 from paicli.prompt import PromptAssembler
-from paicli.prompt.project_memory import ProjectMemoryLoader
+from paicli.prompt.project_instructions import ProjectInstructionLoader
 from paicli.rag import CodeIndex
 from paicli.render import PaiCliApp, RichRenderer
 from paicli.runtime import DurableTaskManager
@@ -124,8 +124,8 @@ async def _run_plan_agent(
     message: str,
     review_input: PlanReviewInput | None = None,
 ) -> None:
-    # Build project memory for the planner
-    project_memory = _extract_project_memory(agent, message)
+    # Build project context for the planner
+    project_context = _extract_project_context(agent, message)
 
     async def run_task(
         task: PlanTask,
@@ -230,7 +230,7 @@ async def _run_plan_agent(
     def event_sink(event: dict[str, Any]) -> None:
         renderer.handle(event)
 
-    planner = JsonPlanner(agent.llm_client, project_memory=project_memory)
+    planner = JsonPlanner(agent.llm_client, project_context=project_context)
     executor = PlanExecutor()
     renderer.set_context_window(agent.llm_client.max_context_window)
     renderer.start_run()
@@ -1236,13 +1236,13 @@ def help_text() -> str:
     return render_help(COMMAND_REGISTRY)
 
 
-def _extract_project_memory(agent: Agent, query: str) -> str:
-    """Extract project and relevant long-term memory text for planner context."""
+def _extract_project_context(agent: Agent, query: str) -> str:
+    """Extract project instructions and relevant long-term memory for the planner."""
     parts: list[str] = []
     cwd = getattr(agent, "cwd", ".")
-    project_memory = ProjectMemoryLoader.create_default(cwd).load_for_prompt()
-    if project_memory:
-        parts.append(project_memory)
+    project_instructions = ProjectInstructionLoader.create_default(cwd).load_for_prompt()
+    if project_instructions:
+        parts.append(project_instructions)
     config = getattr(agent, "config", None)
     if config and config.features.memory and config.memory.long_term_enabled:
         try:
@@ -1252,7 +1252,7 @@ def _extract_project_memory(agent: Agent, query: str) -> str:
                 parts.append(long_term)
         except Exception:
             pass
-    return "\n\n".join(parts)[:8000]
+    return "\n\n".join(parts)
 
 
 def _completed_task_context(completed: dict[str, str]) -> str:

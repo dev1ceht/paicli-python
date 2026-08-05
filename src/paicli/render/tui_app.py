@@ -38,6 +38,7 @@ from paicli.commands import (
     render_help,
 )
 from paicli.context.telemetry import ContextUsageState, rounded_context_percent
+from paicli.prompt.project_instructions import ProjectInstructionLoader
 from paicli.render._common import estimate_cost, format_elapsed, format_tokens, shorten_home
 from paicli.render.textual_widgets import (
     ChatLog,
@@ -280,6 +281,7 @@ class PaiCliApp(App):
                 tools=counts["tools"],
                 skills=counts["skills"],
                 mcp_servers=counts["mcp_servers"],
+                instruction_files=counts["instruction_files"],
                 cwd=_shorten_home(self.cwd),
             )
         )
@@ -353,7 +355,13 @@ class PaiCliApp(App):
         skills = len(SkillRegistry(self.cwd).list())
         specs = getattr(self.mcp_manager, "specs", {}).values() if self.mcp_manager else []
         mcp_servers = sum(bool(getattr(spec, "enabled", False)) for spec in specs)
-        return {"tools": tools, "skills": skills, "mcp_servers": mcp_servers}
+        instruction_files = len(ProjectInstructionLoader.create_default(self.cwd).load())
+        return {
+            "tools": tools,
+            "skills": skills,
+            "mcp_servers": mcp_servers,
+            "instruction_files": instruction_files,
+        }
 
     def action_submit_message(self) -> None:
         """Fallback action for callers that submit through the application."""
