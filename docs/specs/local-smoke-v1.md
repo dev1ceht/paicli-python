@@ -36,7 +36,7 @@ comparison suite, not a broad coding-capability leaderboard.
 - The task prompt is sent verbatim through PaiCLI's production `QueryEngine`/`Agent` path. No benchmark-only prompt wrapper is added.
 - Every attempt starts from a fresh copied fixture, initialized as a Git repository with a recorded base commit and a fresh Agent session.
 - The baseline tool profile includes workspace file read/write/list/search and shell tools, while excluding web, browser, MCP, skill, memory, and snapshot-restoration tools.
-- Benchmark configuration uses `temperature=0`, `hitl_mode=never`, and the production Agent limits: 20 turns, 40 tool calls, 600 seconds, and 100000 tokens. Tasks cannot override these limits.
+- Benchmark configuration uses `temperature=0`, `hitl_mode=never`, and the production Agent limits: 20 turns, 40 tool calls, and 600 seconds. Per-request model output limits and context management govern token use; tasks cannot override these safeguards.
 - Live execution requires explicit `allow_unsandboxed`; artifacts record `filesystem_isolation=false`, `network_isolation=false`, and whether the risk was acknowledged. This suite is not safe for untrusted models or tasks.
 - Attempts run serially. Repetitions default to one; formal comparisons should use three. Every repetition gets a fresh workspace and client.
 - Context comparison schedules both variants for each task/repetition and alternates

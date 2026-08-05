@@ -44,7 +44,6 @@ class PaiCliHarborAgent(BaseInstalledAgent):
         max_turns: int | str = 100,
         max_tool_calls: int | str = 200,
         max_elapsed_seconds: float | str = 1800,
-        max_total_tokens: int | str = 1_000_000,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -60,7 +59,6 @@ class PaiCliHarborAgent(BaseInstalledAgent):
         self._max_turns = _positive_int(max_turns, "max_turns")
         self._max_tool_calls = _positive_int(max_tool_calls, "max_tool_calls")
         self._max_elapsed_seconds = _positive_float(max_elapsed_seconds, "max_elapsed_seconds")
-        self._max_total_tokens = _positive_int(max_total_tokens, "max_total_tokens")
         self._remote_identity_path = f"{_REMOTE_SOURCE_DIR}/.paicli-source-identity.json"
         if self._mcp_config_path is not None:
             _validate_mcp_config(self._mcp_config_path)
@@ -226,7 +224,6 @@ class PaiCliHarborAgent(BaseInstalledAgent):
             f"--max-turns {self._max_turns} "
             f"--max-tool-calls {self._max_tool_calls} "
             f"--max-elapsed-seconds {self._max_elapsed_seconds} "
-            f"--max-total-tokens {self._max_total_tokens}"
             f"{mcp_option}"
         )
 

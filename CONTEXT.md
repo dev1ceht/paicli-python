@@ -279,7 +279,7 @@ The explicit live-run confirmation that Agent shell commands and verifier execut
 _Avoid_: sandbox enablement, permission grant, unattended mode
 
 **Benchmark resource budget**:
-The recorded Agent turn, tool-call, elapsed-time, and token limits shared by every task in a comparable benchmark run; changing the budget creates a different benchmark configuration.
+The recorded Agent turn, tool-call, and elapsed-time limits shared by every task in a comparable benchmark run; per-request model output limits remain part of the model configuration, and changing the budget creates a different benchmark configuration.
 _Avoid_: task timeout, usage telemetry, per-task allowance
 
 **Local verification benchmark**:

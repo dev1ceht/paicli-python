@@ -19,7 +19,6 @@ from paicli.llm import create_llm_client
 DEFAULT_MAX_TURNS = 100
 DEFAULT_MAX_TOOL_CALLS = 200
 DEFAULT_MAX_ELAPSED_SECONDS = 1800.0
-DEFAULT_MAX_TOTAL_TOKENS = 1_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,7 +27,6 @@ class BenchmarkOptions:
     max_turns: int = DEFAULT_MAX_TURNS
     max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS
     max_elapsed_seconds: float = DEFAULT_MAX_ELAPSED_SECONDS
-    max_total_tokens: int = DEFAULT_MAX_TOTAL_TOKENS
     source_identity_file: Path | None = None
     mcp_config_file: Path | None = None
 
@@ -115,7 +113,6 @@ def _configure_benchmark_runtime(config: PaiCliConfig, options: BenchmarkOptions
     config.agent.max_turns = options.max_turns
     config.agent.max_tool_calls = options.max_tool_calls
     config.agent.max_elapsed_seconds = options.max_elapsed_seconds
-    config.agent.max_total_tokens = options.max_total_tokens
     config.policy.hitl_mode = "never"
     config.policy.require_approval_for_writes = False
     config.policy.audit_log_path = str(options.log_dir / "audit")
@@ -152,7 +149,6 @@ def _runtime_metadata(config, options, tools, manager) -> dict[str, Any]:
             "max_turns": config.agent.max_turns,
             "max_tool_calls": config.agent.max_tool_calls,
             "max_elapsed_seconds": config.agent.max_elapsed_seconds,
-            "max_total_tokens": config.agent.max_total_tokens,
         },
     }
     return {

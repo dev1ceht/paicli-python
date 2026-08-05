@@ -17,7 +17,6 @@ from paicli.agent import QueryEngine
 from paicli.benchmark import (
     DEFAULT_MAX_ELAPSED_SECONDS,
     DEFAULT_MAX_TOOL_CALLS,
-    DEFAULT_MAX_TOTAL_TOKENS,
     DEFAULT_MAX_TURNS,
     BenchmarkOptions,
     run_benchmark_prompt,
@@ -83,7 +82,6 @@ def main(
         float | None,
         typer.Option("--max-elapsed-seconds"),
     ] = None,
-    max_total_tokens: Annotated[int | None, typer.Option("--max-total-tokens")] = None,
     benchmark_source_identity: Annotated[
         Path | None,
         typer.Option("--benchmark-source-identity", hidden=True),
@@ -111,7 +109,6 @@ def main(
         max_turns,
         max_tool_calls,
         max_elapsed_seconds,
-        max_total_tokens,
         benchmark_source_identity,
         benchmark_mcp_config,
     )
@@ -132,9 +129,6 @@ def main(
             ),
             "max_elapsed_seconds": (
                 DEFAULT_MAX_ELAPSED_SECONDS if max_elapsed_seconds is None else max_elapsed_seconds
-            ),
-            "max_total_tokens": (
-                DEFAULT_MAX_TOTAL_TOKENS if max_total_tokens is None else max_total_tokens
             ),
         }
         if any(value <= 0 for value in limits.values()):

@@ -201,8 +201,6 @@ async def query(
         if not finalizing:
             if time.monotonic() - started_at >= config.agent.max_elapsed_seconds:
                 limit_reason = "elapsed time limit reached"
-            elif total_tokens >= config.agent.max_total_tokens:
-                limit_reason = "token limit reached"
             if limit_reason:
                 finalizing = True
                 messages.append(Message(role="user", content=_finalization_prompt(limit_reason)))
