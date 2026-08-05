@@ -129,8 +129,6 @@ def test_benchmark_cli_runs_one_production_turn_with_isolated_configuration(
             "200",
             "--max-elapsed-seconds",
             "1800",
-            "--max-total-tokens",
-            "1000000",
         ],
         env={
             "HOME": str(home),
@@ -147,6 +145,7 @@ def test_benchmark_cli_runs_one_production_turn_with_isolated_configuration(
     assert len(requests) == 2
     assert requests[0]["model"] == "harbor-model"
     assert requests[0]["temperature"] == 0.7
+    assert requests[0]["max_tokens"] == 16384
     assert sorted(tool["function"]["name"] for tool in requests[0]["tools"]) == sorted(
         tool.name for tool in get_builtin_tools()
     )
@@ -162,7 +161,6 @@ def test_benchmark_cli_runs_one_production_turn_with_isolated_configuration(
         "max_turns": 100,
         "max_tool_calls": 200,
         "max_elapsed_seconds": 1800.0,
-        "max_total_tokens": 1_000_000,
     }
     assert runtime["tools"] == sorted(tool.name for tool in get_builtin_tools())
     assert runtime["mcp_servers"] == []

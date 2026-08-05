@@ -986,7 +986,6 @@ def _configure_benchmark(
     config.agent.max_turns = 20
     config.agent.max_tool_calls = 40
     config.agent.max_elapsed_seconds = 600.0
-    config.agent.max_total_tokens = 100_000
     config.policy.hitl_mode = "never"
     config.policy.require_approval_for_writes = False
     config.policy.audit_log_path = str(output_dir / "audit")
@@ -1480,7 +1479,6 @@ def _configuration_identity(config: PaiCliConfig) -> dict[str, Any]:
             "max_turns": config.agent.max_turns,
             "max_tool_calls": config.agent.max_tool_calls,
             "max_elapsed_seconds": config.agent.max_elapsed_seconds,
-            "max_total_tokens": config.agent.max_total_tokens,
         },
     }
     return {**details, "fingerprint": _hash_json(details)}

@@ -55,7 +55,6 @@ class AgentConfig:
     max_turns: int = 20
     max_tool_calls: int = 40
     max_elapsed_seconds: float = 600.0
-    max_total_tokens: int = 100_000
     stagnation_threshold: int = 3
 
 
@@ -510,6 +509,10 @@ def _config_to_dict(config: PaiCliConfig) -> dict[str, Any]:
 
 def _dict_to_config(data: dict[str, Any]) -> PaiCliConfig:
     retry_data = data.get("retry", {})
+    agent_data = dict(data.get("agent", {}))
+    # Keep existing project configs loadable after removing the cumulative
+    # token budget. Token usage remains telemetry; it is no longer a run limit.
+    agent_data.pop("max_total_tokens", None)
     return PaiCliConfig(
         llm=LlmConfig(**data.get("llm", {})),
         render_mode=data.get("render_mode", "inline"),
@@ -518,7 +521,7 @@ def _dict_to_config(data: dict[str, Any]) -> PaiCliConfig:
         typewriter_max_chars_per_second=float(data.get("typewriter_max_chars_per_second", 320)),
         typewriter_frame_rate=float(data.get("typewriter_frame_rate", 30)),
         tools=ToolsConfig(**data.get("tools", {})),
-        agent=AgentConfig(**data.get("agent", {})),
+        agent=AgentConfig(**agent_data),
         retry=RetryConfig(
             enabled=bool(retry_data.get("enabled", True)),
             default=RetryPolicy(**retry_data.get("default", {})),

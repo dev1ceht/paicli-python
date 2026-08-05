@@ -90,7 +90,6 @@ def test_harbor_agent_installs_minimal_checkout_and_runs_one_benchmark_turn(
         max_turns="80",
         max_tool_calls="160",
         max_elapsed_seconds="1200",
-        max_total_tokens="600000",
     )
 
     asyncio.run(agent.install(environment))
@@ -117,7 +116,6 @@ def test_harbor_agent_installs_minimal_checkout_and_runs_one_benchmark_turn(
     assert "--max-turns 80" in command
     assert "--max-tool-calls 160" in command
     assert "--max-elapsed-seconds 1200.0" in command
-    assert "--max-total-tokens 600000" in command
     assert "'Fix the task." in command
     assert "PAICLI_API_KEY" not in command
     assert command_env == {"PAICLI_BENCHMARK": "1"}
@@ -245,7 +243,6 @@ def test_harbor_agent_allows_literal_non_secret_mcp_settings(
         ("max_turns", 0),
         ("max_tool_calls", 0),
         ("max_elapsed_seconds", 0),
-        ("max_total_tokens", 0),
     ],
 )
 def test_harbor_agent_rejects_invalid_resource_limits(
