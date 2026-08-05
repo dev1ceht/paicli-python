@@ -41,26 +41,17 @@ def test_config_precedence(tmp_path, monkeypatch):
     assert config.llm.model == "cli-model"
 
 
-def test_legacy_cumulative_token_budget_is_ignored(tmp_path, monkeypatch):
+def test_removed_cumulative_token_budget_is_rejected(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     project_config = tmp_path / ".paicli"
     project_config.mkdir()
     (project_config / "config.json").write_text(
-        json.dumps(
-            {
-                "agent": {
-                    "max_turns": 7,
-                    "max_total_tokens": 1_000_000,
-                }
-            }
-        ),
+        json.dumps({"agent": {"max_total_tokens": 1_000_000}}),
         encoding="utf-8",
     )
 
-    config = load_config(project_root=tmp_path)
-
-    assert config.agent.max_turns == 7
-    assert not hasattr(config.agent, "max_total_tokens")
+    with pytest.raises(TypeError, match="max_total_tokens"):
+        load_config(project_root=tmp_path)
 
 
 def test_typewriter_settings_have_interactive_defaults_and_env_overrides(tmp_path, monkeypatch):
