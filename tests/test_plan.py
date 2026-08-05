@@ -775,8 +775,8 @@ def test_task_status_failed_and_skipped():
     assert task2.status == TaskStatus.SKIPPED
 
 
-def test_planner_injects_project_memory():
-    """Project memory should be included in the planner system prompt."""
+def test_planner_injects_full_project_context():
+    """Project instructions should be included without a planner-side truncation."""
     captured_system: list[str] = []
 
     class CaptureLlm:
@@ -791,13 +791,16 @@ def test_planner_injects_project_memory():
                 "text": '{"tasks": [{"id": "t1", "description": "step"}]}',
             }
 
+    project_context = "# My Project\n" + ("Some context\n" * 500) + "context sentinel"
+
     async def run():
-        planner = JsonPlanner(CaptureLlm(), project_memory="# My Project\nSome context")
+        planner = JsonPlanner(CaptureLlm(), project_context=project_context)
         await planner.create_plan("complex task that needs planning and verification steps")
 
     asyncio.run(run())
     assert len(captured_system) == 1
     assert "# My Project" in captured_system[0]
+    assert "context sentinel" in captured_system[0]
 
 
 def test_planner_llm_request_uses_planner_context_scope():

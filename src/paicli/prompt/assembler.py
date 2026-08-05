@@ -6,7 +6,7 @@ from pathlib import Path
 
 from paicli.clock import now_timestamp
 from paicli.config import PaiCliConfig
-from paicli.prompt.project_memory import ProjectMemoryLoader
+from paicli.prompt.project_instructions import ProjectInstructionLoader
 from paicli.skill import SkillRegistry
 
 
@@ -96,7 +96,7 @@ class PromptAssembler:
                 provider=self.provider,
                 tool_summaries=self.tool_summaries,
             ),
-            self._project_memory(),
+            self._project_instructions(),
         ]
         suffix = [
             _resource("context/context-management.md"),
@@ -109,8 +109,8 @@ class PromptAssembler:
             suffix=_join_sections(suffix),
         )
 
-    def _project_memory(self) -> str:
-        return ProjectMemoryLoader.create_default(self.cwd).load_for_prompt()
+    def _project_instructions(self) -> str:
+        return ProjectInstructionLoader.create_default(self.cwd).load_for_prompt()
 
     def _skill_index(self) -> str:
         if not self.config.features.skill:
