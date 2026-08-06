@@ -238,6 +238,7 @@ class PaiCliHarborAgent(BaseInstalledAgent):
             "fi; "
             "if command -v python3 >/dev/null 2>&1 && ! python3 -c "
             "'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then "
+            '  PYTHON_BIN="python3.11"; '
             '  MISSING_PACKAGES="python3.11 python3.11-venv"; '
             "fi; "
             "if command -v python3.11 >/dev/null 2>&1; then PYTHON_BIN=python3.11; fi; "
@@ -253,13 +254,43 @@ class PaiCliHarborAgent(BaseInstalledAgent):
             "fi; "
             'rm -rf "$VENV_PROBE"; '
             'if [ -n "$MISSING_PACKAGES" ]; then '
-            "  if ! apt-get -o Acquire::Retries=3 update; then "
-            '    echo "apt update incomplete; attempting install from '
-            'available signed indexes" >&2; '
-            "  fi; "
-            "  apt-get -o Acquire::Retries=3 install -y "
-            "--no-install-recommends $MISSING_PACKAGES; "
-            "fi; "
+            '  APT_MIRROR=""; '
+            '  for CANDIDATE in '
+            'https://mirrors.aliyun.com/ubuntu '
+            'https://mirrors.tuna.tsinghua.edu.cn/ubuntu '
+            'https://mirrors.ustc.edu.cn/ubuntu '
+            'https://archive.ubuntu.com/ubuntu; do '
+            '    if command -v curl >/dev/null 2>&1 && '
+            '       curl -fsSL --connect-timeout 5 --max-time 20 '
+            '       "$CANDIDATE/dists/jammy-updates/InRelease" -o /dev/null; then '
+            '      APT_MIRROR="$CANDIDATE"; break; '
+            '    fi; '
+            '  done; '
+            '  if [ -n "$APT_MIRROR" ]; then '
+            '    sed -i "s#http://archive.ubuntu.com/ubuntu/#$APT_MIRROR/#g; '
+            's#https://archive.ubuntu.com/ubuntu/#$APT_MIRROR/#g" '
+            '/etc/apt/sources.list; '
+            '  fi; '
+            '  INSTALL_STATUS=1; '
+            '  for ATTEMPT in 1 2 3 4 5; do '
+            '    if apt-get -o Acquire::Retries=5 '
+            '-o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 update '
+            '&& apt-get -o Acquire::Retries=5 '
+            '-o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 install -y '
+            '--no-install-recommends $MISSING_PACKAGES; then '
+            '      INSTALL_STATUS=0; break; '
+            '    fi; '
+            '    echo "Python bootstrap apt attempt '
+            '$ATTEMPT/5 failed; retrying" >&2; '
+            '    dpkg --configure -a >/dev/null 2>&1 || true; '
+            '    apt-get clean; '
+            '    sleep "$((ATTEMPT * 5))"; '
+            '  done; '
+            '  if [ "$INSTALL_STATUS" -ne 0 ]; then '
+            '    echo "Unable to install Python runtime packages after 5 attempts" >&2; '
+            '    exit 100; '
+            '  fi; '
+            'fi; '
             'PYTHON_BIN=""; '
             "for candidate in python3.12 python3.11 python3; do "
             '  if command -v "$candidate" >/dev/null 2>&1 && '

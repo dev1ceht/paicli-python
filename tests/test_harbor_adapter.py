@@ -153,11 +153,21 @@ def test_harbor_agent_bootstraps_python_and_venv_support(
 
     assert 'MISSING_PACKAGES="python3 python3-venv"' in command
     assert "python3.11 python3.11-venv" in command
+    assert 'PYTHON_BIN="python3.11"' in command
     assert 'VENV_PROBE="$(mktemp -d)"' in command
     assert "python3-venv" in command
-    assert "apt-get -o Acquire::Retries=3 update" in command
-    assert "attempting install from available signed indexes" in command
-    assert "apt-get -o Acquire::Retries=3 install -y --no-install-recommends" in command
+    assert "mirrors.aliyun.com/ubuntu" in command
+    assert "mirrors.tuna.tsinghua.edu.cn/ubuntu" in command
+    assert "mirrors.ustc.edu.cn/ubuntu" in command
+    assert "dists/jammy-updates/InRelease" in command
+    assert "APT_MIRROR" in command
+    assert "for ATTEMPT in 1 2 3 4 5" in command
+    assert "Acquire::Retries=5" in command
+    assert "Acquire::http::Timeout=60" in command
+    assert "Acquire::https::Timeout=60" in command
+    assert "Python bootstrap apt attempt" in command
+    assert 'sleep \"$((ATTEMPT * 5))\"' in command
+    assert "Unable to install Python runtime packages after 5 attempts" in command
 
 
 def test_harbor_agent_stages_an_explicit_mcp_configuration(
