@@ -1,0 +1,3 @@
+Skipping image OS validation for alexgshaw/circuit-fibsqrt:20251031: docker inspect returned 1
+Trial circuit-fibsqrt__WFL652V cancelled
+Collecting main service artifacts

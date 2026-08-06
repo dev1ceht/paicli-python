@@ -1,0 +1,14 @@
+{
+    "task": {
+        "name": "terminal-bench/mteb-leaderboard",
+        "ref": "sha256:484f6d7008a05b5b8640fc6618a384b8c9447cd76f85416c8a595028d29bff9c",
+        "source": "terminal-bench/terminal-bench-2-1"
+    },
+    "trial_name": "mteb-leaderboard__Ei7T3So",
+    "trials_dir": "jobs\\2026-08-05__21-37-54",
+    "agent": {
+        "name": "benchmark.harbor.paicli_agent:PaiCliHarborAgent",
+        "model_name": "deepseek/deepseek-v4-flash"
+    },
+    "job_id": "33eab7c1-bc94-48e6-9c12-5cc841f99205"
+}

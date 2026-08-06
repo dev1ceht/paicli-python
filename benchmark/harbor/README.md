@@ -101,6 +101,33 @@ Then run exactly one selected task:
 Acceptance requires a completed trial with a valid verifier result; container
 startup or dataset download alone is not sufficient.
 
+## Aider Polyglot Java verifier
+
+The Java tasks in the local Aider Polyglot dataset use a Gradle Wrapper whose
+default download timeout is only ten seconds. The checked-in override at
+`benchmark/harbor/aider-polyglot/gradle-wrapper.properties` raises it to five
+minutes. Mount it over the task's wrapper properties when running a Java task.
+The mount must remain writable because the dataset verifier appends its own
+Gradle daemon setting before invoking `./gradlew`:
+
+```powershell
+$gradleOverride = (Resolve-Path .\benchmark\harbor\aider-polyglot\gradle-wrapper.properties).Path -replace '\\', '/'
+$gradleMount = ConvertTo-Json -InputObject @([ordered]@{
+  type = "bind"
+  source = $gradleOverride
+  target = "/app/gradle/wrapper/gradle-wrapper.properties"
+}) -Compress
+$gradleMount = $gradleMount -replace '"', '\\"'
+
+.\.harbor-venv\Scripts\harbor.exe run `
+  -d aider/aider-polyglot `
+  -i aider/polyglot_java_affine-cipher `
+  -a benchmark.harbor.paicli_agent:PaiCliHarborAgent `
+  -m "$env:PAICLI_PROVIDER/$env:PAICLI_MODEL" `
+  --mounts $gradleMount `
+  ...
+```
+
 ## Source and Isolation
 
 By default each trial stages the current checkout's `pyproject.toml`,
