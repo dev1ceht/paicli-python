@@ -649,13 +649,8 @@ async def _handle_slash_legacy(
         _browser_command(arg, console, cwd)
     elif command == "/task":
         _task_command(arg, console)
-    elif command in {"/checkpoint", "/snapshot"}:
+    elif command == "/checkpoint":
         _checkpoint_command(arg, console, cwd)
-    elif command == "/restore":
-        if not arg:
-            console.print("[red]Usage:[/red] /restore <checkpoint-id-or-index>")
-        else:
-            _checkpoint_command(f"restore {arg}", console, cwd)
     else:
         console.print(f"[red]Unknown command:[/red] {command}")
     return False
