@@ -29,7 +29,6 @@ This file tracks the Python port against the existing Java and TypeScript implem
   - `/plan`
   - `/task`
   - `/checkpoint`
-  - `/snapshot` and `/restore` compatibility aliases
   - `/skill`
   - `/mcp`
   - `/exit`
@@ -127,7 +126,6 @@ This file tracks the Python port against the existing Java and TypeScript implem
   - Side-Git fallback for non-Git workspaces under `~/.paicli/snapshots/`
   - one automatic checkpoint before a mutating workspace tool
   - `/checkpoint list|status|create|restore|clean`
-  - `/snapshot` and `/restore` compatibility aliases
 - Image input:
   - `@image:path`
   - `@image:file:///path`

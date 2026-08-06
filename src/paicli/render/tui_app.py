@@ -505,17 +505,11 @@ class PaiCliApp(App):
         if command == "/task":
             self._task_command_info(arg, chat_log)
             return
-        if command in {"/checkpoint", "/snapshot"}:
+        if command == "/checkpoint":
             self._checkpoint_command_info(arg, chat_log)
             return
         if command == "/session":
             self._session_command(arg, chat_log)
-            return
-        if command == "/restore":
-            if not arg:
-                chat_log.add_info("[red]Usage:[/red] /restore <checkpoint-id-or-index>")
-            else:
-                self._checkpoint_command_info(f"restore {arg}", chat_log)
             return
         if command == "/skill":
             self._skill_command_info(arg, chat_log)
