@@ -38,7 +38,6 @@ TOOL_LABELS: dict[str, tuple[str, str]] = {
     "web_fetch": ("\U0001f4f0 \u6293\u53d6\u7f51\u9875", "url"),
     "save_memory": ("\U0001f4be \u4fdd\u5b58\u8bb0\u5fc6", "fact"),
     "load_skill": ("\U0001f3af \u52a0\u8f7d\u6280\u80fd", "name"),
-    "revert_turn": ("\u23ea \u56de\u9000\u5feb\u7167", "id"),
     "browser_connect": ("\U0001f310 \u8fde\u63a5\u6d4f\u89c8\u5668", ""),
     "browser_disconnect": ("\U0001f310 \u65ad\u5f00\u6d4f\u89c8\u5668", ""),
     "browser_status": ("\U0001f310 \u6d4f\u89c8\u5668\u72b6\u6001", ""),

@@ -9,6 +9,7 @@ from paicli.cancellation import TaskCanceled
 from paicli.config import load_config
 from paicli.policy import AuditLog
 from paicli.retry import RetryPolicy
+from paicli.snapshot.checkpoint import SnapshotRecord, WorkspaceCheckpointCoordinator
 from paicli.tools import ToolRegistry, get_builtin_tools
 from paicli.tools.base import Tool, ToolContext, ToolResult
 from paicli.tools.executor import ToolExecutor
@@ -552,6 +553,57 @@ def test_executor_allows_only_the_exact_tool_for_session(tmp_path, monkeypatch):
     assert second[0].is_error
     assert calls == ["executed"]
     assert context.session_allowed_tools == {"first"}
+
+
+def test_executor_creates_one_workspace_checkpoint_before_mutations(tmp_path):
+    config = load_config(project_root=tmp_path)
+    config.policy.hitl_mode = "never"
+    checkpoint_calls: list[str] = []
+
+    class RecordingStore:
+        def create(self, phase):
+            checkpoint_calls.append(phase)
+            return SnapshotRecord(
+                id="checkpoint",
+                phase=phase,
+                created_at="now",
+                path=tmp_path,
+                backend="test",
+            )
+
+    async def handler(_payload, _context):
+        return ToolResult("ok")
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="mutate",
+            description="",
+            parameters={"type": "object"},
+            handler=handler,
+            is_read_only=False,
+            mutates_workspace=True,
+        )
+    )
+    context = ToolContext(
+        cwd=str(tmp_path),
+        config=config,
+        workspace_checkpoint=WorkspaceCheckpointCoordinator(RecordingStore()),
+    )
+
+    async def run():
+        return await ToolExecutor(registry).execute_all(
+            [
+                {"id": "1", "name": "mutate", "arguments": {}},
+                {"id": "2", "name": "mutate", "arguments": {}},
+            ],
+            context,
+        )
+
+    results = asyncio.run(run())
+
+    assert [result.content for result in results] == ["ok", "ok"]
+    assert checkpoint_calls == ["before-agent-edit"]
 
 
 def test_executor_propagates_cancellation_without_executing_tools(tmp_path, monkeypatch):

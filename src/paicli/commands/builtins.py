@@ -575,17 +575,51 @@ def build_builtin_specs() -> tuple[CommandSpec, ...]:
             ),
         ),
         _command(
-            "snapshot",
-            "查看最近 Side-History 快照",
+            "checkpoint",
+            "管理独立的工作区 checkpoint",
             children=(
-                _command("status", "查看 Side-Git 快照状态", usage="/snapshot status"),
-                _command("clean", "清理当前项目快照", usage="/snapshot clean"),
+                _command(
+                    "create",
+                    "创建工作区 checkpoint",
+                    args=(_rest("label"),),
+                    usage="/checkpoint create [label]",
+                ),
+                _command("list", "查看工作区 checkpoint", usage="/checkpoint list"),
+                _command("status", "查看 checkpoint 状态", usage="/checkpoint status"),
+                _command(
+                    "restore",
+                    "恢复到指定 checkpoint",
+                    args=(_word("checkpoint-id-or-index", required=True),),
+                    usage="/checkpoint restore <checkpoint-id-or-index>",
+                ),
+                _command("clean", "清理工作区 checkpoint", usage="/checkpoint clean"),
+            ),
+        ),
+        _command(
+            "snapshot",
+            "兼容入口：管理工作区 checkpoint",
+            children=(
+                _command(
+                    "create",
+                    "创建工作区 checkpoint",
+                    args=(_rest("label"),),
+                    usage="/snapshot create [label]",
+                ),
+                _command("list", "查看工作区 checkpoint", usage="/snapshot list"),
+                _command("status", "查看 checkpoint 状态", usage="/snapshot status"),
+                _command("clean", "清理 checkpoint", usage="/snapshot clean"),
+                _command(
+                    "restore",
+                    "恢复到指定 checkpoint",
+                    args=(_word("checkpoint-id-or-index", required=True),),
+                    usage="/snapshot restore <checkpoint-id-or-index>",
+                ),
             ),
         ),
         _command(
             "restore",
-            "恢复到指定快照",
-            args=(_word("snapshot-id-or-index", required=True),),
-            usage="/restore <snapshot-id-or-index>",
+            "兼容入口：恢复指定 checkpoint",
+            args=(_word("checkpoint-id-or-index", required=True),),
+            usage="/restore <checkpoint-id-or-index>",
         ),
     )

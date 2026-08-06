@@ -505,20 +505,17 @@ class PaiCliApp(App):
         if command == "/task":
             self._task_command_info(arg, chat_log)
             return
-        if command == "/snapshot":
-            self._snapshot_command_info(arg, chat_log)
+        if command in {"/checkpoint", "/snapshot"}:
+            self._checkpoint_command_info(arg, chat_log)
             return
         if command == "/session":
             self._session_command(arg, chat_log)
             return
         if command == "/restore":
             if not arg:
-                chat_log.add_info("[red]Usage:[/red] /restore <snapshot-id-or-index>")
+                chat_log.add_info("[red]Usage:[/red] /restore <checkpoint-id-or-index>")
             else:
-                from paicli.snapshot import SnapshotService
-
-                record = SnapshotService(self.cwd).restore(arg)
-                chat_log.add_info(f"Restored {record.id}")
+                self._checkpoint_command_info(f"restore {arg}", chat_log)
             return
         if command == "/skill":
             self._skill_command_info(arg, chat_log)
@@ -2146,21 +2143,41 @@ class PaiCliApp(App):
             )
             chat_log.add_info(output or "(no tasks)")
 
-    def _snapshot_command_info(self, arg: str, chat_log: ChatLog) -> None:
+    def _checkpoint_command_info(self, arg: str, chat_log: ChatLog) -> None:
         from paicli.snapshot import SnapshotService
 
         service = SnapshotService(self.cwd)
-        if arg == "status":
+        subcommand, _, value = arg.strip().partition(" ")
+        if subcommand in {"", "list"}:
+            rows = service.list(limit=20)
+            output = "\n".join(
+                f"{index}. {row.id} {row.phase} {row.created_at} [{row.backend}]"
+                for index, row in enumerate(rows, 1)
+            )
+            chat_log.add_info(output or "(no checkpoints)")
+            return
+        if subcommand == "create":
+            record = service.create(value.strip() or "manual")
+            chat_log.add_info(f"Created checkpoint {record.id} ({record.backend})")
+            return
+        if subcommand == "restore":
+            if not value.strip():
+                chat_log.add_info(
+                    "[red]Usage:[/red] /checkpoint restore <checkpoint-id-or-index>"
+                )
+            else:
+                record = service.restore(value.strip())
+                chat_log.add_info(f"Restored checkpoint {record.id}")
+            return
+        if subcommand == "status":
             chat_log.add_info(str(service.status()))
             return
-        if arg == "clean":
-            chat_log.add_info(f"Cleaned {service.clean()} snapshots.")
+        if subcommand == "clean":
+            chat_log.add_info(f"Cleaned {service.clean()} checkpoints.")
             return
-        rows = service.list(limit=20)
-        output = "\n".join(
-            f"{index}. {row.id} {row.phase} {row.created_at}" for index, row in enumerate(rows, 1)
+        chat_log.add_info(
+            "[red]Usage:[/red] /checkpoint [list|status|create [label]|restore <id>|clean]"
         )
-        chat_log.add_info(output or "(no snapshots)")
 
     def _skill_command_info(self, arg: str, chat_log: ChatLog) -> None:
         from paicli.skill import SkillRegistry

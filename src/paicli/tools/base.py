@@ -10,6 +10,7 @@ from jsonschema import ValidationError, validate
 from paicli.cancellation import CancellationCheck, raise_if_cancelled
 from paicli.config import PaiCliConfig
 from paicli.llm.base import LlmClient
+from paicli.snapshot.checkpoint import WorkspaceCheckpointCoordinator
 
 DangerLevel = Literal["safe", "medium", "high"]
 ToolDecision = Literal["approve", "allow_session", "deny", "skip"]
@@ -42,6 +43,7 @@ class ToolContext:
     cancellation_check: CancellationCheck | None = None
     event_sink: Callable[[dict[str, Any]], None] | None = None
     progress_sink: Callable[[dict[str, Any]], None] | None = None
+    workspace_checkpoint: WorkspaceCheckpointCoordinator | None = None
     tool_call_id: str | None = None
 
     def raise_if_cancelled(self) -> None:
@@ -55,6 +57,7 @@ class Tool:
     parameters: dict[str, Any]
     handler: Callable[[dict[str, Any], ToolContext], Awaitable[ToolResult]]
     is_read_only: bool = True
+    mutates_workspace: bool = False
     is_idempotent: bool = True
     is_concurrency_safe: bool = True
     danger_level: DangerLevel = "safe"

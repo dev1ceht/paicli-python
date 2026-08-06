@@ -89,6 +89,7 @@ async def start_repl(
         system_prompt=system_prompt,
         cwd=cwd,
         config=config,
+        workspace_checkpoint_store=SnapshotService(cwd),
     )
 
     # Launch Textual TUI app (same pattern as pico: PicoTuiApp(agent).run())
@@ -648,14 +649,13 @@ async def _handle_slash_legacy(
         _browser_command(arg, console, cwd)
     elif command == "/task":
         _task_command(arg, console)
-    elif command == "/snapshot":
-        _snapshot_command(arg, console, cwd)
+    elif command in {"/checkpoint", "/snapshot"}:
+        _checkpoint_command(arg, console, cwd)
     elif command == "/restore":
         if not arg:
-            console.print("[red]Usage:[/red] /restore <snapshot-id-or-index>")
+            console.print("[red]Usage:[/red] /restore <checkpoint-id-or-index>")
         else:
-            record = SnapshotService(cwd).restore(arg)
-            console.print(f"Restored {record.id}")
+            _checkpoint_command(f"restore {arg}", console, cwd)
     else:
         console.print(f"[red]Unknown command:[/red] {command}")
     return False
@@ -975,19 +975,37 @@ async def _mcp_command(
     console.print("[red]Usage:[/red] /mcp [restart|logs|disable|enable|resources|prompts] <name>")
 
 
-def _snapshot_command(arg: str, console: Console, cwd: str) -> None:
+def _checkpoint_command(arg: str, console: Console, cwd: str) -> None:
     service = SnapshotService(cwd)
-    if arg == "status":
+    subcommand, _, value = arg.strip().partition(" ")
+    if subcommand in {"", "list"}:
+        rows = service.list(limit=20)
+        output = "\n".join(
+            f"{index}. {row.id} {row.phase} {row.created_at} [{row.backend}]"
+            for index, row in enumerate(rows, 1)
+        )
+        console.print(output or "(no checkpoints)")
+        return
+    if subcommand == "create":
+        record = service.create(value.strip() or "manual")
+        console.print(f"Created checkpoint {record.id} ({record.backend})")
+        return
+    if subcommand == "restore":
+        if not value.strip():
+            console.print("[red]Usage:[/red] /checkpoint restore <checkpoint-id-or-index>")
+            return
+        record = service.restore(value.strip())
+        console.print(f"Restored checkpoint {record.id}")
+        return
+    if subcommand == "status":
         console.print(service.status())
         return
-    if arg == "clean":
-        console.print(f"Cleaned {service.clean()} snapshots.")
+    if subcommand == "clean":
+        console.print(f"Cleaned {service.clean()} checkpoints.")
         return
-    rows = service.list(limit=20)
-    output = "\n".join(
-        f"{index}. {row.id} {row.phase} {row.created_at}" for index, row in enumerate(rows, 1)
+    console.print(
+        "[red]Usage:[/red] /checkpoint [list|status|create [label]|restore <id>|clean]"
     )
-    console.print(output or "(no snapshots)")
 
 
 def _interactive_renderer(

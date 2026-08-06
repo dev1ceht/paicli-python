@@ -185,17 +185,14 @@ def test_agent_run_emits_current_context_estimate_before_model_output(tmp_path):
     assert context["context_window"] == 128_000
 
 
-def test_agent_snapshot_io_runs_outside_the_event_loop(tmp_path, monkeypatch):
-    snapshot_calls: list[tuple[str, int]] = []
+def test_agent_does_not_checkpoint_a_read_only_turn(tmp_path):
+    snapshot_calls: list[str] = []
 
-    class RecordingSnapshotService:
-        def __init__(self, project_root):
-            assert project_root == str(tmp_path)
+    class RecordingCheckpointStore:
+        def create(self, phase: str):
+            snapshot_calls.append(phase)
+            return object()
 
-        def create(self, phase: str) -> None:
-            snapshot_calls.append((phase, get_ident()))
-
-    monkeypatch.setattr("paicli.agent.agent.SnapshotService", RecordingSnapshotService)
     config = load_config(project_root=tmp_path)
     config.features.memory = False
     config.features.skill = False
@@ -207,18 +204,16 @@ def test_agent_snapshot_io_runs_outside_the_event_loop(tmp_path, monkeypatch):
         system_prompt="system",
         cwd=str(tmp_path),
         config=config,
+        workspace_checkpoint_store=RecordingCheckpointStore(),
     )
 
-    async def run() -> int:
-        event_loop_thread = get_ident()
+    async def run() -> None:
         events = [event async for event in agent.run("hello")]
         assert events[-1]["type"] == "done"
-        return event_loop_thread
 
-    event_loop_thread = asyncio.run(run())
+    asyncio.run(run())
 
-    assert [phase for phase, _ in snapshot_calls] == ["pre-turn", "post-turn"]
-    assert all(thread_id != event_loop_thread for _, thread_id in snapshot_calls)
+    assert snapshot_calls == []
 
 
 def test_agent_prompt_assembly_runs_outside_the_event_loop(tmp_path, monkeypatch):

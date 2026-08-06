@@ -1,11 +1,23 @@
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 
+import pytest
 from dulwich.objects import Commit
 from dulwich.repo import Repo
 
 from paicli.snapshot import SnapshotService
+
+
+def _run_git(project, *args):
+    return subprocess.run(
+        ["git", "-C", str(project), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_snapshot_restore_modified_file(tmp_path, monkeypatch):
@@ -145,3 +157,38 @@ def test_snapshot_status_reports_side_git_location(tmp_path, monkeypatch):
 
     assert "Side-Git" in status
     assert str(service.git_dir) in status
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_git_checkpoint_uses_hidden_refs_and_restores_untracked_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("PAICLI_SNAPSHOT_BACKEND", "auto")
+    project = tmp_path / "project"
+    project.mkdir()
+    _run_git(project, "init", "-q")
+    _run_git(project, "config", "user.name", "PaiCLI Test")
+    _run_git(project, "config", "user.email", "snapshot@paicli.local")
+    note = project / "note.txt"
+    note.write_text("before", encoding="utf-8")
+    _run_git(project, "add", "--", "note.txt")
+    _run_git(project, "commit", "--no-gpg-sign", "-m", "initial")
+    head_before = _run_git(project, "rev-parse", "HEAD").stdout.strip()
+    index_before = _run_git(project, "diff", "--cached", "--binary").stdout
+    new_file = project / "new.txt"
+    new_file.write_text("before-new", encoding="utf-8")
+
+    service = SnapshotService(project)
+    first = service.create("before-agent-edit")
+    assert service.backend == "git"
+    assert first.backend == "git"
+
+    note.write_text("after", encoding="utf-8")
+    new_file.unlink()
+
+    service.restore(first.id)
+
+    assert note.read_text(encoding="utf-8") == "before"
+    assert new_file.read_text(encoding="utf-8") == "before-new"
+    assert _run_git(project, "rev-parse", "HEAD").stdout.strip() == head_before
+    assert _run_git(project, "diff", "--cached", "--binary").stdout == index_before
+    refs = _run_git(project, "for-each-ref", "--format=%(refname)", "refs/paicli/checkpoints")
+    assert "refs/paicli/checkpoints/" in refs.stdout

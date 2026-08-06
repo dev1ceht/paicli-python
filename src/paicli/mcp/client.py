@@ -176,6 +176,7 @@ class McpClientManager:
                     parameters=schema,
                     handler=handler,
                     is_read_only=read_only,
+                    mutates_workspace=not read_only,
                     is_concurrency_safe=False,
                     danger_level="safe" if read_only else "medium",
                     requires_approval=True,

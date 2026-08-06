@@ -107,6 +107,8 @@ class ToolExecutor:
                 approver = "hitl"
 
             execution_context = replace(context, tool_call_id=tool_call_id or None)
+            if tool.mutates_workspace and execution_context.workspace_checkpoint is not None:
+                await asyncio.to_thread(execution_context.workspace_checkpoint.ensure)
             result = await self._execute_with_retry(
                 tool,
                 data,

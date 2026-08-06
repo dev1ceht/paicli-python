@@ -141,8 +141,13 @@ PAICLI_API_KEY=local-key
 | `/index [path]`、`/search <query>` | 建立索引并搜索代码 |
 | `/mcp`、`/skill`、`/model` | 管理扩展与当前模型 |
 | `/task`、`/task add <task>` | 管理后台任务 |
-| `/snapshot`、`/restore <id>` | 创建或恢复项目快照 |
+| `/checkpoint list`、`/checkpoint create [label]` | 查看或创建独立工作区 checkpoint |
+| `/checkpoint restore <id>` | 恢复工作区文件（`/snapshot`、`/restore` 保留为兼容别名） |
 | `/exit` | 退出 |
+
+Git 工作区默认使用 `refs/paicli/checkpoints/*` 保存 checkpoint；非 Git 工作区使用
+`~/.paicli/snapshots/` 下的 Side-Git 兜底。可通过
+`PAICLI_SNAPSHOT_BACKEND=auto|git|side-git` 覆盖默认选择。
 
 常用快捷键：
 
