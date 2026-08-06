@@ -12,7 +12,6 @@ from paicli.memory import MemoryManager
 from paicli.policy import CommandGuard, PathGuard
 from paicli.rag import CodeIndex
 from paicli.skill import SkillRegistry
-from paicli.snapshot import SnapshotService
 from paicli.tools.base import Tool, ToolContext, ToolResult, object_schema
 from paicli.tools.command_runner import CommandRunner
 from paicli.tools.structured_patch import apply_structured_patch
@@ -56,6 +55,7 @@ def get_builtin_tools() -> list[Tool]:
             required_keys=["path", "content"],
             handler=write,
             is_read_only=False,
+            mutates_workspace=True,
             is_concurrency_safe=False,
             danger_level="medium",
             requires_approval=True,
@@ -96,6 +96,7 @@ def get_builtin_tools() -> list[Tool]:
             required_keys=["path", "edits"],
             handler=edit,
             is_read_only=False,
+            mutates_workspace=True,
             is_concurrency_safe=False,
             danger_level="medium",
             requires_approval=True,
@@ -119,6 +120,7 @@ def get_builtin_tools() -> list[Tool]:
             required_keys=["patch"],
             handler=apply_patch,
             is_read_only=False,
+            mutates_workspace=True,
             is_concurrency_safe=False,
             danger_level="medium",
             requires_approval=True,
@@ -175,6 +177,7 @@ def get_builtin_tools() -> list[Tool]:
             required_keys=["command"],
             handler=bash,
             is_read_only=False,
+            mutates_workspace=True,
             is_concurrency_safe=False,
             danger_level="high",
             requires_approval=True,
@@ -292,21 +295,6 @@ def get_builtin_tools() -> list[Tool]:
             ),
             required_keys=["query"],
             handler=search_code,
-        ),
-        Tool(
-            name="revert_turn",
-            description="Restore the workspace to a previous PaiCLI side-history snapshot.",
-            parameters=object_schema(
-                {"snapshot": {"type": "string", "description": "Snapshot id or 1-based index"}},
-                ["snapshot"],
-            ),
-            required_keys=["snapshot"],
-            handler=revert_turn,
-            is_read_only=False,
-            is_concurrency_safe=False,
-            danger_level="high",
-            requires_approval=True,
-            mandatory_confirmation=True,
         ),
     ]
     return tools
@@ -670,11 +658,6 @@ async def search_code(payload: dict[str, Any], context: ToolContext) -> ToolResu
     if not results:
         return ToolResult("(no indexed matches; run /index first)")
     return ToolResult("\n".join(f"{item.path}:{item.line}: {item.snippet}" for item in results))
-
-
-async def revert_turn(payload: dict[str, Any], context: ToolContext) -> ToolResult:
-    record = SnapshotService(context.cwd).restore(str(payload["snapshot"]))
-    return ToolResult(f"Restored snapshot {record.id}")
 
 
 def _resolve_path(context: ToolContext, value: str) -> Path:

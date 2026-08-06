@@ -28,8 +28,8 @@ This file tracks the Python port against the existing Java and TypeScript implem
   - `/search`
   - `/plan`
   - `/task`
-  - `/snapshot`
-  - `/restore`
+  - `/checkpoint`
+  - `/snapshot` and `/restore` compatibility aliases
   - `/skill`
   - `/mcp`
   - `/exit`
@@ -39,7 +39,7 @@ This file tracks the Python port against the existing Java and TypeScript implem
   - ReAct loop with text/thinking/tool-call/tool-result/done events
   - Plan-and-Execute mode with JSON planning, dependency-aware task execution, and plan events
   - SDK entrypoint
-  - pre/post side-history snapshots around Agent runs
+  - independent workspace checkpoints before the first mutating tool
 - Configuration:
   - defaults
   - user config
@@ -66,7 +66,6 @@ This file tracks the Python port against the existing Java and TypeScript implem
   - `save_memory`
   - `load_skill`
   - `search_code`
-  - `revert_turn`
 - Safety:
   - PathGuard
   - CommandGuard
@@ -123,13 +122,12 @@ This file tracks the Python port against the existing Java and TypeScript implem
   - `GET /v1/tasks/{id}`
   - `POST /v1/tasks/{id}/cancel`
   - SQLite durable task queue
-- Snapshot:
-  - `pre-turn` / `post-turn`
-  - Dulwich Side-Git snapshots under `~/.paicli/snapshots/`
-  - `/snapshot`
-  - `/snapshot status`
-  - `/restore`
-  - `revert_turn`
+- Workspace checkpoints:
+  - Git hidden-ref checkpoints under `refs/paicli/checkpoints/*`
+  - Side-Git fallback for non-Git workspaces under `~/.paicli/snapshots/`
+  - one automatic checkpoint before a mutating workspace tool
+  - `/checkpoint list|status|create|restore|clean`
+  - `/snapshot` and `/restore` compatibility aliases
 - Image input:
   - `@image:path`
   - `@image:file:///path`

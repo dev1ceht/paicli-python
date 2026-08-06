@@ -19,6 +19,8 @@ from paicli.clock import (
     format_timestamp,
     now_timestamp,
 )
+from paicli.snapshot.checkpoint import SnapshotRecord
+from paicli.snapshot.git_adapter import GitCheckpointAdapter, find_git_root
 
 BRANCH_REF = b"refs/heads/main"
 SNAPSHOT_IDENT = b"PaiCLI Snapshot <snapshot@paicli.local>"
@@ -47,19 +49,12 @@ DEFAULT_EXCLUDES = (
 
 
 @dataclass(slots=True)
-class SnapshotRecord:
-    id: str
-    phase: str
-    created_at: str
-    path: Path
-
-
-@dataclass(slots=True)
 class _SnapshotConfig:
     enabled: bool
     root: Path
     max_snapshots: int
     excludes: tuple[str, ...]
+    backend: str
 
     @classmethod
     def from_environment(cls) -> _SnapshotConfig:
@@ -74,13 +69,14 @@ class _SnapshotConfig:
             root=Path(os.getenv("PAICLI_SNAPSHOT_DIR", "~/.paicli/snapshots")).expanduser(),
             max_snapshots=max(1, _read_int("PAICLI_SNAPSHOT_MAX", 50)),
             excludes=tuple(excludes),
+            backend=_read_backend(),
         )
 
 
-class SnapshotService:
-    def __init__(self, project_root: str | Path):
+class SideGitCheckpointAdapter:
+    def __init__(self, project_root: str | Path, *, config: _SnapshotConfig | None = None):
         self.project_root = Path(project_root).resolve()
-        self.config = _SnapshotConfig.from_environment()
+        self.config = config or _SnapshotConfig.from_environment()
         parent = self.project_root.parent if self.project_root.parent else self.project_root
         self.root = (
             self.config.root
@@ -91,6 +87,10 @@ class SnapshotService:
         self.skipped_symlink_count = 0
         self.root.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def backend(self) -> str:
+        return "side-git"
+
     def create(self, phase: str) -> SnapshotRecord:
         if not self.config.enabled:
             return SnapshotRecord(
@@ -98,6 +98,7 @@ class SnapshotService:
                 phase=phase,
                 created_at=now_timestamp(),
                 path=self.git_dir,
+                backend="side-git",
             )
         repo = self._open_repo()
         parent = self._head(repo)
@@ -278,6 +279,7 @@ class SnapshotService:
                 datetime.fromtimestamp(commit.commit_time, EAST_EIGHT)
             ),
             path=self.git_dir,
+            backend="side-git",
         )
 
     def _write_exclude_file(self) -> None:
@@ -299,6 +301,56 @@ class SnapshotService:
         return False
 
 
+class SnapshotService:
+    """Facade over the Git and non-Git workspace checkpoint adapters."""
+
+    def __init__(self, project_root: str | Path):
+        self.project_root = Path(project_root).resolve()
+        self.config = _SnapshotConfig.from_environment()
+        repository_root = find_git_root(self.project_root)
+        backend = self.config.backend
+        if backend in {"auto", "git"} and repository_root == self.project_root:
+            self._backend = GitCheckpointAdapter(
+                self.project_root,
+                enabled=self.config.enabled,
+                max_snapshots=self.config.max_snapshots,
+                excludes=self.config.excludes,
+            )
+        elif backend == "git":
+            raise RuntimeError(
+                "PAICLI_SNAPSHOT_BACKEND=git requires the workspace root to be a Git repository"
+            )
+        else:
+            self._backend = SideGitCheckpointAdapter(self.project_root, config=self.config)
+
+    @property
+    def backend(self) -> str:
+        return self._backend.backend
+
+    @property
+    def root(self) -> Path:
+        return self._backend.root
+
+    @property
+    def git_dir(self) -> Path:
+        return self._backend.git_dir
+
+    def create(self, phase: str) -> SnapshotRecord:
+        return self._backend.create(phase)
+
+    def list(self, limit: int = 20) -> list[SnapshotRecord]:
+        return self._backend.list(limit)
+
+    def restore(self, snapshot_ref: str) -> SnapshotRecord:
+        return self._backend.restore(snapshot_ref)
+
+    def clean(self) -> int:
+        return self._backend.clean()
+
+    def status(self) -> str:
+        return self._backend.status()
+
+
 def _hash_key(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
@@ -318,6 +370,11 @@ def _read_int(name: str, fallback: int) -> int:
         return int(value.strip())
     except ValueError:
         return fallback
+
+
+def _read_backend() -> str:
+    value = os.getenv("PAICLI_SNAPSHOT_BACKEND", "auto").strip().lower()
+    return value if value in {"auto", "git", "side-git"} else "auto"
 
 
 def _is_inside(path: Path, root: Path) -> bool:

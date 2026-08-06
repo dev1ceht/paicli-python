@@ -15,6 +15,7 @@ from paicli.context.telemetry import current_context_scope
 from paicli.image import parse_image_references
 from paicli.llm.base import LlmClient
 from paicli.prompt import PromptSections
+from paicli.snapshot.checkpoint import WorkspaceCheckpointCoordinator, WorkspaceCheckpointStore
 from paicli.tools.base import ApprovalPending, ToolContext, ToolDecision
 from paicli.tools.executor import ToolExecutor
 from paicli.tools.registry import ToolRegistry
@@ -38,6 +39,7 @@ async def query(
     cancellation_check: CancellationCheck | None = None,
     execution_state: dict[str, Any] | None = None,
     checkpoint_callback=None,
+    workspace_checkpoint_store: WorkspaceCheckpointStore | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     query_run_id = f"query_{uuid4().hex}"
     restored_state = dict(execution_state or {})
@@ -55,6 +57,7 @@ async def query(
         next_tool_index = 0
     tool_definitions = tool_registry.definitions()
     executor = ToolExecutor(tool_registry)
+    workspace_checkpoint = WorkspaceCheckpointCoordinator(workspace_checkpoint_store)
     tool_retry_events: list[dict[str, Any]] = []
     tool_progress_events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
@@ -126,6 +129,7 @@ async def query(
         cancellation_check=cancellation_check,
         event_sink=tool_retry_events.append,
         progress_sink=tool_progress_events.put_nowait,
+        workspace_checkpoint=workspace_checkpoint,
     )
 
     turn_limit = max_turns if max_turns is not None else config.agent.max_turns

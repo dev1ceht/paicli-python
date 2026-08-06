@@ -9,6 +9,8 @@ from paicli.config import PaiCliConfig
 from paicli.context import ContextManager
 from paicli.llm.base import LlmClient
 from paicli.prompt import PromptAssembler
+from paicli.snapshot import SnapshotService
+from paicli.snapshot.checkpoint import WorkspaceCheckpointStore
 from paicli.tools.registry import ToolRegistry
 from paicli.types import Message, QueryResult
 
@@ -24,6 +26,7 @@ class QueryEngine:
         approval_callback=None,
         cancellation_check: CancellationCheck | None = None,
         context_manager_factory: Callable[..., ContextManager] | None = None,
+        workspace_checkpoint_store: WorkspaceCheckpointStore | None = None,
     ):
         self.llm_client = llm_client
         self.tool_registry = tool_registry
@@ -32,6 +35,7 @@ class QueryEngine:
         self.approval_callback = approval_callback
         self.cancellation_check = cancellation_check
         self.context_manager_factory = context_manager_factory
+        self.workspace_checkpoint_store = workspace_checkpoint_store or SnapshotService(cwd)
         self.system_prompt = PromptAssembler(
             config=config,
             cwd=cwd,
@@ -58,6 +62,7 @@ class QueryEngine:
             approval_callback=self.approval_callback,
             cancellation_check=self.cancellation_check,
             context_manager_factory=self.context_manager_factory,
+            workspace_checkpoint_store=self.workspace_checkpoint_store,
         )
         agent.history = list(history or [])
         async for event in agent.run(

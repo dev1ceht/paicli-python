@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import suppress
 from copy import deepcopy
 from typing import Any
 
@@ -16,7 +15,7 @@ from paicli.llm import create_llm_client
 from paicli.llm.base import LlmClient
 from paicli.memory import MemoryManager
 from paicli.prompt import PromptAssembler, PromptSections
-from paicli.snapshot import SnapshotService
+from paicli.snapshot.checkpoint import WorkspaceCheckpointStore
 from paicli.tools.registry import ToolRegistry
 from paicli.types import Message, QueryResult
 
@@ -29,8 +28,8 @@ async def _run_blocking(callback: Callable[..., Any], *args: Any) -> Any:
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
-        # Cancellation cannot stop a worker thread. Let it settle before the
-        # post-turn snapshot can touch the same side repository.
+        # Cancellation cannot stop a worker thread. Let it settle before
+        # returning to the event loop.
         await task
         raise
 
@@ -59,6 +58,7 @@ class Agent:
         max_turns: int | None = None,
         cancellation_check: CancellationCheck | None = None,
         context_manager_factory: Callable[..., ContextManager] | None = None,
+        workspace_checkpoint_store: WorkspaceCheckpointStore | None = None,
     ):
         self.llm_client = llm_client
         self.tool_registry = tool_registry
@@ -68,6 +68,7 @@ class Agent:
         self.approval_callback = approval_callback
         self.max_turns = max_turns if max_turns is not None else config.agent.max_turns
         self.cancellation_check = cancellation_check
+        self.workspace_checkpoint_store = workspace_checkpoint_store
         self.history: list[Message] = []
         self.session_allowed_tools: set[str] = set()
         self._session_checkpoint_marker: Any = None
@@ -87,12 +88,8 @@ class Agent:
         checkpoint_callback=None,
     ) -> AsyncIterator[dict[str, Any]]:
         raise_if_cancelled(self.cancellation_check)
-        snapshot = await _run_blocking(SnapshotService, self.cwd)
-        canceled = False
         context_checkpoint = self.context_manager.checkpoint_state()
         context_committed = False
-        with suppress(Exception):
-            await _run_blocking(snapshot.create, "pre-turn")
         try:
             prompt_sections = await _run_blocking(self._prompt_sections_for_message, message)
             system_prompt = await _run_blocking(prompt_sections.render)
@@ -114,6 +111,7 @@ class Agent:
                     cancellation_check=self.cancellation_check,
                     execution_state=execution_state,
                     checkpoint_callback=checkpoint_callback,
+                    workspace_checkpoint_store=self.workspace_checkpoint_store,
                 ):
                     if event.get("type") == "done" and commit_history:
                         self.history = list(event.get("messages") or [])
@@ -123,14 +121,10 @@ class Agent:
                             yield baseline
                     yield event
         except TaskCanceled:
-            canceled = True
             raise
         finally:
             if not context_committed:
                 self.context_manager.restore_state(context_checkpoint)
-            if not canceled:
-                with suppress(Exception):
-                    await _run_blocking(snapshot.create, "post-turn")
 
     async def run_complete(self, message: str) -> QueryResult:
         text = ""
