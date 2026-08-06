@@ -1,0 +1,14 @@
+{
+    "task": {
+        "name": "terminal-bench/circuit-fibsqrt",
+        "ref": "sha256:9bcffe1054bb33249aa578a9a2a74f3c8cca66b0cb7aa1328233f1d31822aae3",
+        "source": "terminal-bench/terminal-bench-2-1"
+    },
+    "trial_name": "circuit-fibsqrt__WVCnFCq",
+    "trials_dir": "jobs\\2026-08-05__21-36-48",
+    "agent": {
+        "name": "benchmark.harbor.paicli_agent:PaiCliHarborAgent",
+        "model_name": "deepseek/deepseek-v4-flash"
+    },
+    "job_id": "c34682d1-2621-43a8-818f-34a7a94cd7f8"
+}

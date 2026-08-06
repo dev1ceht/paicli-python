@@ -1,0 +1,6 @@
+Skipping image OS validation for alexgshaw/circuit-fibsqrt:20251031: docker inspect returned 1
+Skipping image OS validation for alexgshaw/mteb-leaderboard:20260430: docker inspect returned 1
+Trial mteb-leaderboard__RGLHDrL cancelled
+Trial circuit-fibsqrt__WVCnFCq cancelled
+Collecting main service artifacts
+Collecting main service artifacts
