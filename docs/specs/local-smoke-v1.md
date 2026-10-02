@@ -1,5 +1,9 @@
 # Local Smoke v2 Context-Pressure Evaluation
 
+> Dataset availability: `benchmarks/` is local-only and is not distributed with this
+> repository. Prepare the manifests, fixtures, histories, and acceptance files described
+> below before running this suite.
+
 PaiCLI provides a self-contained seven-task local coding benchmark that exercises the
 production Agent path. The files remain under `benchmarks/local-smoke-v1` for continuity,
 while the immutable experiment identity is `local-smoke-v2`. It is an end-to-end local

@@ -1,7 +1,12 @@
-.DS_Store
+# Local configuration and credentials
 .env
-.harbor-venv/
+.env.*
+!.env.example
+.paicli/
+
+# Python environments and caches
 .venv/
+.harbor-venv/
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -9,13 +14,27 @@ __pycache__/
 .pytest-tmp/
 .pytest_tmp/
 .ruff_cache/
-dist/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Build and evaluation output
 build/
-.paicli/
+dist/
 artifacts/
+jobs/
 benchmark/runs/
+# Local evaluation datasets are not distributed with the repository.
 benchmarks/
+
+# Editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local agent workspaces
 .worktrees/
 .superpowers/
 .zcode/
-.gitignore
